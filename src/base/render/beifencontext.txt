@@ -1,0 +1,605 @@
+use std::sync::Arc;
+
+use pollster::block_on;
+use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
+use wgpu::{CommandBuffer, Sampler, SamplerBorderColor};
+use wgpu::{SurfaceTexture, TextureFormat, TextureView};
+use wgpu::SamplerDescriptor as WgpuSamplerDescriptor;
+
+use sdl3::video::Window as SdlWindow;
+
+use crate::base::error::Error;
+use crate::base::render::bind_group::builder::BindGroupBuilder;
+use crate::base::render::bind_group::storage_buffer::StorageBuffer;
+use crate::base::render::bind_group::struct_layout::StructLayout;
+use crate::base::render::bind_group::uniform_buffer::UniformBuffer;
+use crate::base::render::command_encoder::CommandEncoder;
+use crate::base::render::mesh::builder::MeshBuilder;
+use crate::base::render::mesh::mesh::Mesh;
+use crate::base::render::pipeline::{ComputePipelineBuilder, RenderPipelineBuilder};
+use crate::base::render::render_pass::attachments::{ColorAttachment, DepthAttachment};
+use crate::base::render::sampler_desc::SamplerDescriptor;
+use crate::base::render::settings::{GpuSettings, SurfaceSettings};
+use crate::base::render::shader_module::builder::ShaderModuleBuilder;
+use crate::base::render::shader_module::shader_module::ShaderModule;
+use crate::base::resources::image::{Image, ImageData};
+use crate::base::resources::shader::Shader;
+
+use super::super::window::Window;
+use super::texture::{Texture,TextureDescriptor};
+
+
+use raw_window_handle::HandleError;
+
+#[derive(thiserror::Error, Debug)]
+pub enum RenderContextError {
+    #[error("获取窗口DisplayHandle失败: {0}")]
+    DisplayHandle(HandleError),
+    #[error("获取窗口WindowHandle失败: {0}")]
+    WindowHandle(HandleError),
+    #[error("创建WGPU Surface失败: {0}")]
+    CreateSurface(wgpu::CreateSurfaceError),
+    #[error("请求GPU适配器失败，无兼容显卡")]
+    RequestAdapter,
+    #[error("创建设备/队列失败: {0}")]
+    RequestDevice(wgpu::RequestDeviceError),
+}
+
+// 自动转换对应错误
+impl From<HandleError> for RenderContextError {
+    fn from(e: HandleError) -> Self {
+        RenderContextError::DisplayHandle(e)
+    }
+}
+impl From<wgpu::CreateSurfaceError> for RenderContextError {
+    fn from(e: wgpu::CreateSurfaceError) -> Self {
+        RenderContextError::CreateSurface(e)
+    }
+}
+impl From<wgpu::RequestDeviceError> for RenderContextError {
+    fn from(e: wgpu::RequestDeviceError) -> Self {
+        RenderContextError::RequestDevice(e)
+    }
+}
+
+// ==============================================
+// 渲染器：管理Surface、设备、队列、管线、配置
+// ==============================================
+pub struct RenderContext<'a> {
+    instance: wgpu::Instance,
+    surface: wgpu::Surface<'a>,          // 渲染表面（对应窗口）
+    device: Arc<wgpu::Device>,                // GPU逻辑设备（核心）
+    queue: Arc<wgpu::Queue>,                  // GPU命令队列
+
+    config: wgpu::SurfaceConfiguration,  // 表面配置（尺寸、格式等）
+
+    // 帧
+    color_format:TextureFormat,
+    color_frame: Option<SurfaceTexture>,//当前帧
+    color_view:  Option<Arc<wgpu::TextureView>>,   //当前帧视图
+    color_attachment : Option<ColorAttachment>,
+
+    // 深度缓冲
+    depth_format:  TextureFormat,
+    depth_texture: wgpu::Texture,
+    depth_view:    Arc<wgpu::TextureView>,
+    depth_attachment : DepthAttachment,
+    
+    // 遮挡查询
+    occlusion_query_set: Arc<wgpu::QuerySet>,
+
+    pending_cmds: Vec<CommandBuffer>,
+}
+impl<'a> RenderContext<'a> {
+
+    pub fn new(
+        window: &Window, 
+        surface_settings: Option<SurfaceSettings>,
+        gpu_settings:Option<GpuSettings>
+    ) -> Result<Self, RenderContextError>{
+
+        block_on(RenderContext::async_new(
+            window.inner(), 
+            surface_settings.unwrap_or_default(),
+            gpu_settings.unwrap_or_default())
+        )
+    }
+
+    // 异步创建渲染器 + 三角形网格
+    pub async fn async_new(
+        window: &SdlWindow, 
+        surface_settings: SurfaceSettings,
+        gpu_settings:GpuSettings) -> Result<Self, RenderContextError>{
+
+
+        // 获取窗口大小
+        let size: (u32, u32) = window.size();
+
+        // ==============================================
+        // 创建wgpu实例（指定Vulkan后端，关闭调试）
+        // ==============================================
+        //backends: wgpu::Backends  flags  memory_budget_thresholds
+        let instance = wgpu::Instance::new(gpu_settings.to_instance());
+
+
+        let display_handle = window.display_handle()?;
+        let window_handle = window.window_handle()?;
+
+
+        // 只创建一次 surface！
+        let surface = unsafe {
+            instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
+                raw_display_handle: Some(display_handle.as_raw()),
+                raw_window_handle: window_handle.as_raw()
+            })
+        }?;
+
+        // ==============================================
+        // 请求GPU适配器
+        // ==============================================
+        let maybe_adapter: Result<wgpu::Adapter, wgpu::RequestAdapterError> = instance
+            .request_adapter(&gpu_settings.to_adapter(&surface))
+            .await;
+
+        let adapter = match maybe_adapter {
+            Ok(a) => a,
+            Err(_) => return Err(RenderContextError::RequestAdapter),
+        };
+        println!("{:#?}", adapter.get_info());
+
+        // ==============================================
+        // 获取表面能力，选择纹理格式
+        // ==============================================
+        let caps = surface.get_capabilities(&adapter);
+        println!("Supported formats: {:?}", caps.formats);
+
+        // ==============================================
+        // 正确：生成最终配置
+        // ==============================================
+                let final_config = surface_settings.to_wgpu(&caps, &size);
+
+        // ==============================================
+        // 请求逻辑设备 + 命令队列
+        // ==============================================
+        let (device, queue) = adapter
+            .request_device(&gpu_settings.to_device())
+            .await?;
+        let (device, queue)  = (Arc::new(device),Arc::new(queue));
+
+        // 应用配置到表面
+        surface.configure(&device, &final_config);
+
+        // ==============================================
+        // 创建深度纹理（默认开启）
+        // ==============================================
+        let depth_format = wgpu::TextureFormat::Depth24Plus;
+        let depth_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("depth_texture"),
+            size: wgpu::Extent3d {
+                width: final_config.width,
+                height: final_config.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: depth_format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let depth_view = Arc::new(depth_texture.create_view(&Default::default()));
+
+
+        let depth_attachment = DepthAttachment{ 
+            view: depth_view.clone(), 
+            load: wgpu::LoadOp::Load, 
+            store: wgpu::StoreOp::Store,
+            stencil_ops: None, 
+            depth_slice: None,
+
+        };
+
+        // ==============================================
+        // 创建遮挡查询（默认开启）
+        // ==============================================
+        let occlusion_query_set = Arc::new(device.create_query_set(&wgpu::QuerySetDescriptor {
+            label: Some("occlusion_query"),
+            ty: wgpu::QueryType::Occlusion,
+            count: 1,
+        }));
+        
+        device.on_uncaptured_error(
+            Arc::new(|err| {
+                eprintln!("\n================ WGPU 底层验证错误 ================");
+                eprintln!("错误类型: {:?}", err);
+                eprintln!("完整详情:\n{err:#?}");
+                eprintln!("===================================================\n");
+            })
+        );
+
+        // ==============================================
+        // 最终构造
+        // ==============================================
+        Ok(Self {
+            instance,
+            surface,
+            device,
+            queue,
+            color_format: (&final_config.format).clone(),
+            depth_format: depth_format,
+            config: final_config,
+            color_frame: None,
+            color_view: None,
+            color_attachment: None,
+            depth_texture:depth_texture,
+            depth_view:depth_view,
+            depth_attachment: depth_attachment,
+            occlusion_query_set: occlusion_query_set,
+            pending_cmds:Vec::new(),
+            
+        })
+    }
+
+
+
+    pub fn begin_frame(&mut self, clear_color: wgpu::Color,clear_depth:f32) {
+        // 获取当前交换链纹理
+        if self.color_view.is_none() {
+            let frame = match self.surface.get_current_texture() {
+                wgpu::CurrentSurfaceTexture::Success(f) => f,
+                wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
+                wgpu::CurrentSurfaceTexture::Timeout => panic!("获取窗口帧超时"),
+                wgpu::CurrentSurfaceTexture::Outdated => panic!("帧已过期，需要重建交换链"),
+                wgpu::CurrentSurfaceTexture::Lost => panic!("窗口已丢失，无法渲染"),
+                wgpu::CurrentSurfaceTexture::Occluded => panic!("窗口被遮挡，无法获取帧"),
+                wgpu::CurrentSurfaceTexture::Validation => panic!("渲染验证错误"),
+            };
+
+            let view = Arc::new(frame.texture.create_view(&Default::default()));
+            self.color_attachment = Some(ColorAttachment{ 
+                view: view.clone(),
+                load: wgpu::LoadOp::Load,
+                store: wgpu::StoreOp::Store,
+                resolve_target: None,
+                depth_slice: None 
+            });
+            self.color_frame = Some(frame);
+            self.color_view = Some(view);
+        }
+
+
+        let cur_view = self.color_view.as_ref().expect("bbegin_frame: color_view is empty, swap chain texture not acquired");
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+
+        // 清屏 + 清深度
+        let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("clear_screen"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: cur_view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(clear_color),
+                    store: wgpu::StoreOp::Store,
+                },
+                depth_slice: None,
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &self.depth_view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(clear_depth),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            occlusion_query_set: Some(&self.occlusion_query_set),
+            timestamp_writes: None,
+            multiview_mask: None,
+        });
+
+        drop(_pass);
+        let cmd = encoder.finish();
+        self.pending_cmds.push(cmd);
+        //self.queue.submit([cmd]);
+    }
+    /// 仅缓存命令，延后到present统一提交
+    pub fn submit<I: IntoIterator<Item = CommandBuffer>>(&mut self, command_buffers: I) {
+        self.pending_cmds.extend(command_buffers.into_iter());
+    }
+    pub fn submit_single(
+        &mut self,
+        cmd: CommandBuffer
+    ){
+        self.pending_cmds.push(cmd);
+    }
+
+    pub fn present(&mut self) {
+        // 取出当前帧交换链纹理
+        let frame = self.color_frame.take().expect("present() failed: No valid frames");
+        // 1. 收集所有待提交命令
+        let all_commands = std::mem::take(&mut self.pending_cmds);
+        // 3. 仅当存在命令时才提交（空帧避免无意义submit）
+        if !all_commands.is_empty() {
+            let _submission_idx = self.queue.submit(all_commands);
+        }
+        // 4. 上屏
+        self.queue.present(frame);
+        // 重置帧状态
+        self.color_view = None;
+        self.color_frame = None;
+    }
+
+
+    pub fn resize(&mut self, width: u32, height: u32) {
+        // 0. 防 0 尺寸
+        let width = width.max(1);
+        let height = height.max(1);
+
+        // 2. 直接修改你原来存的 config
+        self.config.width = width;
+        self.config.height = height;
+
+        // 3. 用修改后的 config 重新配置 surface
+        self.surface.configure(&self.device, &self.config);
+
+        // 4. 重新创建匹配新尺寸的深度纹理
+        self.depth_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("depth_texture"),
+            size: wgpu::Extent3d {
+                width: self.config.width,
+                height: self.config.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.depth_format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        self.depth_view = Arc::new(self.depth_texture.create_view(&Default::default()));
+    }
+
+
+    
+
+    pub fn get_current_color_texture_view(&self) -> Option<Arc<TextureView>>{
+        self.color_view.clone()
+    }
+    pub fn get_current_depth_texture_view(&self)-> Option<Arc<TextureView>>{
+        Some(self.depth_view.clone())
+    }
+    pub fn get_current_color_attachment(&self)->Option<ColorAttachment>{
+        self.color_attachment.clone()
+    }
+    pub fn get_current_depth_attachment(&self)->Option<DepthAttachment>{
+        Some(self.depth_attachment.clone())
+    }
+
+
+    pub fn color_format(&self)->TextureFormat{
+        self.color_format.clone()
+    }
+    pub fn depth_format(&self)->TextureFormat{
+        self.depth_format.clone()
+    }
+
+    /// 判断传入纹理视图是否等于当前帧颜色视图
+    pub fn is_same_color_view(&self, other: &Arc<TextureView>) -> bool {
+        let Some(cur) = &self.color_view else {
+            return false;
+        };
+        Arc::as_ptr(cur) == Arc::as_ptr(other)
+    }
+
+    /// 校验传入的 ColorAttachment 是否是当前帧有效附件
+    pub fn is_valid_color_attachment(&self, attach: &ColorAttachment) -> bool {
+        self.is_same_color_view(&attach.view)
+    }
+
+    /// 判断传入纹理视图是否等于当前深度视图
+    pub fn is_same_depth_view(&self, other: &Arc<TextureView>) -> bool {
+        Arc::as_ptr(&self.depth_view) == Arc::as_ptr(other)
+    }
+
+    /// 校验传入的 DepthAttachment 是否是当前有效深度附件
+    pub fn is_valid_depth_attachment(&self, attach: &DepthAttachment) -> bool {
+        self.is_same_depth_view(&attach.view)
+    }
+
+    
+
+
+
+
+
+
+    
+    pub fn create_uniform_buffer(&self,layout: &Arc<StructLayout>)->UniformBuffer{
+        UniformBuffer::new(&self.device, layout)
+    }
+
+    pub fn create_storage_buffer(&self,layout: &Arc<StructLayout>, count: usize, label: Option<&str>)->StorageBuffer{
+        StorageBuffer::new(&self.device, layout, count, label)
+    }
+
+    pub fn update_uniform_buffer(&self,buffer:&mut UniformBuffer){
+        buffer.upload(&self.queue);
+    }
+
+    pub fn update_storage_buffer(&self,buffer:&mut StorageBuffer){
+        buffer.upload(&self.queue);
+    }
+
+
+    pub fn write_vertex_buffer(&self,mesh:&Mesh,data:&[u8]){
+        mesh.write_vertex_data(&self.queue,data)
+    }
+
+    pub fn write_index_buffer(&self,mesh:&Mesh,data:&[u8])->Result<(),Error>{
+         mesh.write_index_data(&self.queue,data)
+    }
+
+
+
+    pub fn create_sampler(&self,label: &str,config:&SamplerDescriptor)->Sampler{
+        let border_color = if config.use_white_border() {
+            Some(SamplerBorderColor::OpaqueWhite)
+        } else {
+            None
+        };
+
+        let desc = WgpuSamplerDescriptor {
+            label: Some(label),
+            address_mode_u: config.address_u(),
+            address_mode_v: config.address_v(),
+            address_mode_w: config.address_w(),
+
+            min_filter: config.min_filter(),
+            mag_filter: config.mag_filter(),
+            mipmap_filter: config.mipmap_filter(),
+
+            lod_min_clamp: 0.0,
+            lod_max_clamp: 100.0,
+
+            compare: config.compare(),
+            anisotropy_clamp: config.anisotropy(),
+            border_color,
+        };
+
+        self.device.create_sampler(&desc)
+    }
+
+    /**
+    该函数等价于create_texture_from_rgba8_2d
+    */
+    pub fn create_texture(&self,label: &str,image_data: &ImageData,desc: TextureDescriptor)->Texture{
+        let  image = &Image::new(image_data);
+        Texture::from_rgba8_2d(&self.device, &self.queue, label, image, desc)
+    }
+
+    pub fn create_texture_from_rgba8_1d(&self,label: &str,image_data: &ImageData,desc: TextureDescriptor)->Texture{
+        let  image = &Image::new(image_data);
+        Texture::from_rgba8_1d(&self.device,  &self.queue, label, image, desc)
+    }
+
+    pub fn create_texture_from_rgba8_2d(
+        &self,
+        label: &str,
+        image_data: &ImageData,
+        desc: TextureDescriptor,
+    ) -> Texture
+    {   
+
+        let  image = &Image::new(image_data);
+
+        let texture =
+            Texture::from_rgba8_2d(
+                &self.device,
+                &self.queue,
+                label,
+                image,
+                desc,
+            );
+        texture
+    }
+
+    pub fn create_texture_from_rgba8_3d(
+        &self,
+        label: &str,
+        images: &[&ImageData],
+        desc: TextureDescriptor
+    ) -> Texture {
+        // 先收集所有权，存到Vec，生命周期贯穿整个函数
+        let owned_images: Vec<Image> = images.iter()
+            .map(|data| Image::new(data))
+            .collect();
+        // 再传切片引用
+        Texture::from_rgba8_3d(
+            &self.device,
+            &self.queue,
+            label,
+            &owned_images,
+            desc
+        )
+    }
+
+    pub fn create_texture_from_rgba8_cube(
+        &self,
+        label: &str,
+        faces: [&ImageData; 6],
+        desc: TextureDescriptor
+    ) -> Texture {
+        // 生成栈上固定数组，持有所有权
+        let face_images = faces.map(|data| Image::new(data));
+        Texture::from_rgba8_cube(&self.device, &self.queue, label, &face_images, desc)
+    }
+
+    pub fn create_texture_from_rgba8_array(
+        &self,
+        label: &str,
+        images: &[&ImageData],
+        desc: TextureDescriptor
+    ) -> Texture {
+        let owned_images: Vec<Image> = images.iter()
+            .map(|data| Image::new(data))
+            .collect();
+        Texture::from_rgba8_array(
+            &self.device,
+            &self.queue,
+            label,
+            &owned_images,
+            desc
+        )
+    }
+
+    pub fn create_command_encoder(&self)->CommandEncoder{
+        CommandEncoder::new(self.device.create_command_encoder(&Default::default()))
+    }
+
+
+
+
+    // 产出MeshBuilder，内部自带上下文引用
+    pub fn shader_module_builder(&self,shader:Shader)->ShaderModuleBuilder{
+        ShaderModuleBuilder::new(&self.device, shader)
+    }
+
+    pub fn mesh_builder(&self,layout: Vec<wgpu::VertexFormat>,vertices: Vec<u8>,) -> MeshBuilder {
+        MeshBuilder::new(&self.device,layout,vertices)
+    }
+
+    pub fn bind_group_builder(&self) -> BindGroupBuilder {
+        BindGroupBuilder::new(&self.device)
+    }
+
+    pub fn compute_pipeline_builder(&self,shader: &Arc<ShaderModule>)->ComputePipelineBuilder{
+        ComputePipelineBuilder::new(&self.device,shader)
+    }
+    pub fn render_pipeline_builder_2d(&self, shader: &Arc<ShaderModule>) -> RenderPipelineBuilder {
+        RenderPipelineBuilder::new_2d(
+            &self.device,
+            self.color_format,
+            self.depth_format,
+            &shader,
+        )
+    }
+
+    pub fn render_pipeline_builder_3d(&self,  shader: &Arc<ShaderModule>) -> RenderPipelineBuilder {
+        RenderPipelineBuilder::new_3d(
+            &self.device,
+            self.color_format,
+            self.depth_format,
+            &shader
+        )
+    }
+
+    pub fn render_pipeline_builder(&self,  shader: &Arc<ShaderModule>) -> RenderPipelineBuilder {
+        RenderPipelineBuilder::new_2d(
+            &self.device,
+            self.color_format,
+            self.depth_format,
+            &shader,
+        )
+    }
+
+}
