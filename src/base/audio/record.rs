@@ -1,0 +1,293 @@
+//! 引擎层录音（AudioRecorder）
+//!
+//! 与 [`AudioMixer`](super::AudioMixer)（输出）对称的输入端：SDL 录音回调是
+//! 生产者，主线程是消费者，中间复用与流式播放同一份 SPSC 环
+//! （[`super::ring::SharedRing`]），音频线程全程无锁、无分配。
+//!
+//! 数据流：
+//!
+//! ```text
+//! 麦克风 → SDL 设备 → RecordingCallback（subsystem 胶水）→ SharedRing → 主线程 read/save_wav
+//! ```
+//!
+//! 行为约定：
+//! - **构造即采集**：打开流即 resume，无显式 start（与 AudioMixer 风格一致）
+//! - **溢出丢弃新数据并计数**：用户不及时 `read` 时，缓冲写满后丢弃新采集帧，
+//!   [`dropped`](AudioRecorder::dropped) 可查——音频线程永不阻塞
+//! - 长录音请周期性 `read`，或按预期时长用
+//!   [`new_with_capacity`](AudioRecorder::new_with_capacity) 一次性给足容量
+
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+
+use sdl3::audio::{AudioFormat, AudioSpec, AudioStreamWithCallback};
+
+use crate::base::subsystem::audio::common::{AudioError, AudioUserCallback, StereoFrame};
+use crate::base::subsystem::audio::recording::{open_recording_stream, RecordingCallback};
+use crate::base::subsystem::audio::AudioSubsystem;
+
+use super::ring::SharedRing;
+
+/// 环形写入端（跑在 SDL 录音回调线程上）：写满即丢新数据并计数
+struct RingSink {
+    ring: Arc<SharedRing>,
+    dropped: Arc<AtomicU64>,
+}
+
+impl AudioUserCallback for RingSink {
+    fn on_frames(&mut self, frames: &mut [StereoFrame]) {
+        let written = self.ring.write(frames);
+        if written < frames.len() {
+            let lost = (frames.len() - written) as u64;
+            self.dropped.fetch_add(lost, Ordering::Relaxed);
+        }
+    }
+}
+
+/// 引擎层录音器（AudioMixer 的输入端对位物）
+///
+/// # 示例
+///
+/// ```ignore
+/// let mut rec = AudioRecorder::new(&audio_subsys, 44100)?;
+/// println!("设备：{:?}", AudioRecorder::device_names(&audio_subsys)?);
+/// std::thread::sleep(Duration::from_secs(5));          // 录 5 秒
+/// let frames = rec.save_wav("recording.wav")?;         // 拉空并保存
+/// ```
+pub struct AudioRecorder {
+    /// 持有 SDL 录音流（Drop 即停止采集并释放设备）
+    stream: AudioStreamWithCallback<RecordingCallback>,
+    ring: Arc<SharedRing>,
+    dropped: Arc<AtomicU64>,
+    sample_rate: u32,
+}
+
+impl AudioRecorder {
+    /// 打开默认录音设备并开始采集（f32 立体声，缓冲约 4 秒）
+    pub fn new(subsystem: &AudioSubsystem, sample_rate: u32) -> Result<Self, AudioError> {
+        Self::new_with_capacity(subsystem, sample_rate, sample_rate as usize * 4)
+    }
+
+    /// 打开默认录音设备，指定环形缓冲容量（帧，向上取 2 的幂）
+    pub fn new_with_capacity(
+        subsystem: &AudioSubsystem,
+        sample_rate: u32,
+        capacity_frames: usize,
+    ) -> Result<Self, AudioError> {
+        let ring = Arc::new(SharedRing::with_capacity(capacity_frames));
+        let dropped = Arc::new(AtomicU64::new(0));
+
+        let sink = RingSink {
+            ring: ring.clone(),
+            dropped: dropped.clone(),
+        };
+
+        // 与播放侧同一套格式：f32 交错立体声（设备格式/采样率由 SDL 转换）
+        let spec = AudioSpec::new(Some(sample_rate as i32), Some(2), Some(AudioFormat::F32LE));
+        let stream = open_recording_stream(subsystem.inner(), &spec, sink)?;
+
+        // 构造即采集
+        stream
+            .resume()
+            .map_err(|e| AudioError::custom(format!("录音流 resume 失败: {e}")))?;
+
+        Ok(Self {
+            stream,
+            ring,
+            dropped,
+            sample_rate,
+        })
+    }
+
+    /// 枚举系统录音设备名（诊断用；v1 打开的始终是默认设备）
+    pub fn device_names(subsystem: &AudioSubsystem) -> Result<Vec<String>, AudioError> {
+        let ids = subsystem
+            .audio_recording_device_ids()
+            .map_err(|e| AudioError::custom(format!("枚举录音设备失败: {e}")))?;
+        let mut names = Vec::with_capacity(ids.len());
+        for i in 0..ids.len() {
+            names.push(
+                subsystem
+                    .audio_recording_device_name(i as u32)
+                    .unwrap_or_else(|_| format!("录音设备 {i}")),
+            );
+        }
+        Ok(names)
+    }
+
+    // ───────────────────────── 数据面（全部非阻塞，主线程调用） ─────────────────────────
+
+    /// 拉走至多 `out.len()` 帧已采集数据，返回实际帧数
+    pub fn read(&mut self, out: &mut [StereoFrame]) -> usize {
+        self.ring.read(out)
+    }
+
+    /// 当前缓冲内可读帧数
+    pub fn available(&self) -> usize {
+        self.ring.available()
+    }
+
+    /// 因缓冲写满而丢弃的帧数（累计值）
+    pub fn dropped(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
+    }
+
+    /// 丢弃缓冲内全部已采集数据
+    pub fn clear(&mut self) {
+        self.ring.clear();
+    }
+
+    /// 暂停采集（SDL 流级暂停，设备保持打开）
+    pub fn pause(&mut self) -> Result<(), AudioError> {
+        self.stream
+            .pause()
+            .map_err(|e| AudioError::custom(format!("录音流 pause 失败: {e}")))
+    }
+
+    /// 恢复采集
+    pub fn resume(&mut self) -> Result<(), AudioError> {
+        self.stream
+            .resume()
+            .map_err(|e| AudioError::custom(format!("录音流 resume 失败: {e}")))
+    }
+
+    /// 把缓冲内全部已采集数据写出为 16-bit PCM 立体声 WAV，返回帧数
+    ///
+    /// 调用后缓冲被清空。
+    pub fn save_wav(&mut self, path: &str) -> Result<u64, AudioError> {
+        let mut frames = Vec::with_capacity(self.ring.available());
+        let mut buf = vec![StereoFrame::SILENT; 4096];
+        loop {
+            let n = self.ring.read(&mut buf);
+            if n == 0 {
+                break;
+            }
+            frames.extend_from_slice(&buf[..n]);
+        }
+        write_wav_16(path, &frames, self.sample_rate)?;
+        Ok(frames.len() as u64)
+    }
+
+    /// 采样率（Hz）
+    pub fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+}
+
+/// 将帧数据写为 16-bit PCM 立体声 WAV（纯函数，可脱离设备测试）
+pub(crate) fn write_wav_16(
+    path: &str,
+    frames: &[StereoFrame],
+    sample_rate: u32,
+) -> Result<(), AudioError> {
+    let mut data = Vec::with_capacity(frames.len() * 4);
+    for f in frames {
+        let l = (f.left.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+        let r = (f.right.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+        data.extend_from_slice(&l.to_le_bytes());
+        data.extend_from_slice(&r.to_le_bytes());
+    }
+
+    let mut wav = Vec::with_capacity(data.len() + 44);
+    let data_len = data.len() as u32;
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + data_len).to_le_bytes());
+    wav.extend_from_slice(b"WAVE");
+    wav.extend_from_slice(b"fmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    wav.extend_from_slice(&2u16.to_le_bytes()); // 立体声
+    wav.extend_from_slice(&sample_rate.to_le_bytes());
+    wav.extend_from_slice(&(sample_rate * 4).to_le_bytes()); // byte rate
+    wav.extend_from_slice(&4u16.to_le_bytes()); // 块对齐 = 2ch × 2B
+    wav.extend_from_slice(&16u16.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&data_len.to_le_bytes());
+    wav.extend_from_slice(&data);
+
+    std::fs::write(path, wav)
+        .map_err(|e| AudioError::custom(format!("写入 WAV 失败 {path}: {e}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::base::audio::decoder::SymphoniaDecoder;
+
+    #[test]
+    fn wav_round_trip() {
+        // 生成 0.5s 440Hz 正弦（44100Hz 立体声）
+        let rate = 44100u32;
+        let n = (rate as f32 * 0.5) as usize;
+        let frames: Vec<StereoFrame> = (0..n)
+            .map(|i| {
+                let s = (i as f32 / rate as f32 * 440.0 * std::f32::consts::TAU).sin() * 0.5;
+                StereoFrame { left: s, right: s }
+            })
+            .collect();
+
+        let path = std::env::temp_dir().join("starfish_rec_test.wav");
+        let path = path.to_str().unwrap();
+        write_wav_16(path, &frames, rate).unwrap();
+
+        // 用自家解码器读回，验证可解析且元数据一致
+        let decoded = SymphoniaDecoder::from_file(path).unwrap();
+        assert_eq!(decoded.sample_rate, rate);
+        assert!(
+            (decoded.duration() - 0.5).abs() < 0.01,
+            "duration = {}",
+            decoded.duration()
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn overflow_drops_and_counts() {
+        let ring = Arc::new(SharedRing::with_capacity(16));
+        let dropped = Arc::new(AtomicU64::new(0));
+        let mut sink = RingSink {
+            ring: ring.clone(),
+            dropped: dropped.clone(),
+        };
+
+        // 一次喂 100 帧：容量 16 → 写 16 丢 84
+        let mut frames: Vec<StereoFrame> =
+            (0..100).map(|i| StereoFrame { left: i as f32, right: 0.0 }).collect();
+        sink.on_frames(&mut frames);
+        assert_eq!(ring.available(), 16);
+        assert_eq!(dropped.load(Ordering::Relaxed), 84);
+
+        // 读空后再喂：不再丢弃
+        let mut out = vec![StereoFrame::SILENT; 16];
+        assert_eq!(ring.read(&mut out), 16);
+        let mut more: Vec<StereoFrame> =
+            (0..10).map(|i| StereoFrame { left: i as f32, right: 0.0 }).collect();
+        sink.on_frames(&mut more);
+        assert_eq!(dropped.load(Ordering::Relaxed), 84);
+        assert_eq!(ring.available(), 10);
+    }
+
+    #[test]
+    fn clear_discards_pending() {
+        let ring = Arc::new(SharedRing::with_capacity(64));
+        let mut sink = RingSink {
+            ring: ring.clone(),
+            dropped: Arc::new(AtomicU64::new(0)),
+        };
+        let mut frames: Vec<StereoFrame> =
+            (0..30).map(|i| StereoFrame { left: i as f32, right: 0.0 }).collect();
+        sink.on_frames(&mut frames);
+        assert_eq!(ring.available(), 30);
+
+        ring.clear();
+        assert_eq!(ring.available(), 0);
+
+        // clear 后继续采集/读取正常，数据从 clear 点起连续
+        let mut more: Vec<StereoFrame> =
+            (0..5).map(|i| StereoFrame { left: i as f32, right: 0.0 }).collect();
+        sink.on_frames(&mut more);
+        let mut out = vec![StereoFrame::SILENT; 16];
+        assert_eq!(ring.read(&mut out), 5);
+        assert_eq!(out[0].left, 0.0);
+    }
+}

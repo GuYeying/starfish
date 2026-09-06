@@ -1,0 +1,23 @@
+一、核心必用（运行期主力，全平台通用）
+open_playback_stream
+一键打开默认播放设备 + 创建回调输出流，游戏音效 / BGM 主力入口
+open_recording_stream
+打开默认录音设备 + 创建回调输入流，仅语音 / 收音类游戏使用
+
+new_playback_stream
+播放音频格式自动转换、重采样，解决音源与硬件格式不兼容
+new_recording_stream
+录音音频格式统一转换，搭配录音流使用
+
+二、可选辅助（仅编辑器 / 日志 / 问题排查用，游戏运行期基本不用）
+current_audio_driver
+获取音频驱动名称，用于日志、故障排查
+
+
+三、完全弃用（当前架构不需要）
+设备枚举：audio_playback_device_ids、audio_recording_device_ids
+设备名称查询：audio_playback_device_name、audio_recording_device_name
+仅获取设备标识：default_playback_device、default_recording_device
+基础打开设备：open_playback_device、open_recording_device
+指定设备播放流：open_playback_stream_with_callback
+通用转换流：new_stream

@@ -1,0 +1,77 @@
+class Surface:
+    def __init__(self, width, height, is_3d=False):
+        self.width = width
+        self.height = height
+        self.is_3d = is_3d
+        # 2D：仅颜色纹理；3D：颜色+深度模板纹理
+        self.color_tex = create_color_tex(width, height)
+        self.depth_tex = create_depth_tex(width, height) if is_3d else None
+        self._current_rp = None  # 缓存当前渲染通道
+
+    def _get_attachments(self, frame_ctx):
+        """生成当前Surface的渲染附件（颜色+可选深度）"""
+        color_view = self.color_tex.create_view()
+        color_attach = RenderPassColorAttachment(
+            view=color_view,
+            ops=Operations(load=LoadOp::Clear, store=StoreOp::Store),
+            resolve_target=None
+        )
+        depth_attach = None
+        if self.depth_tex is not None:
+            depth_view = self.depth_tex.create_view()
+            depth_attach = RenderPassDepthStencilAttachment(
+                view=depth_view,
+                depth_ops=Operations(LoadOp::Clear, StoreOp::Store),
+                stencil_ops=Operations(LoadOp::Clear, StoreOp::Store),
+            )
+        return [color_attach], depth_attach
+
+    def __enter__(self):
+        # 获取当前帧全局渲染上下文（单帧唯一encoder）
+        frame_ctx = get_active_frame_context()
+        color_att, depth_att = self._get_attachments(frame_ctx)
+        # 新建当前Surface专属RenderPass
+        self._current_rp = frame_ctx.encoder.begin_render_pass(RenderPassDescriptor(
+            color_attachments=color_att,
+            depth_stencil_attachment=depth_att,
+        ))
+        # as 拿到渲染通道对象，用于绘制
+        return self._current_rp
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        # 无论是否报错，强制关闭RenderPass
+        if self._current_rp is not None:
+            self._current_rp.end()
+            self._current_rp = None
+        # 不吞异常，上层正常捕获报错
+        return False
+    
+
+
+
+
+
+# 每帧全局渲染上下文（全局单encoder）
+frame_ctx = FrameContext(encoder=device.create_command_encoder())
+set_active_frame_context(frame_ctx)
+
+# 1. 绘制第一版 surface1
+surface1 = Surface(800, 600, is_3d=False)
+with surface1 as rp:
+    rp.draw_sprite(tex, (0,0))
+    rp.draw_rect(10,10,200,200)
+
+# 2. 绘制surface2（采样已完成的surface1）
+surface2 = Surface(800, 600, is_3d=True)
+with surface2 as rp:
+    rp.draw_3d_model(model)
+    rp.blit_texture(surface1.color_tex.create_view(), (50,50))
+
+# 3. 重绘覆盖surface1
+with surface1 as rp:
+    rp.draw_circle(400, 300, 100)
+
+# 屏幕单独逻辑：blit入队列，flip内部统一渲染，不占用with
+screen.blit(surface2, (0,0))
+screen.blit(surface1, (100,100))
+pygame.display.flip()
