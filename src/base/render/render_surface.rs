@@ -33,8 +33,8 @@ pub struct RenderSurface{
     msaa_texture: Option<wgpu::Texture>,
     msaa_view: Option<Arc<TextureView>>,
 
-    // 遮挡查询
-    occlusion_query_set: Arc<wgpu::QuerySet>,
+    // 遮挡查询（Web/emscripten 上为 None：GL 仿真栈不支持，见 new() 内注释）
+    occlusion_query_set: Option<Arc<wgpu::QuerySet>>,
 
     pending_cmds: Vec<CommandBuffer>,
 
@@ -60,13 +60,22 @@ impl RenderSurface{
 
 
         // ==============================================
-        // 创建遮挡查询（默认开启）
+        // 创建遮挡查询（native 默认开启；Web 不创建）
         // ==============================================
-        let occlusion_query_set = Arc::new(device.create_query_set(&wgpu::QuerySetDescriptor {
-            label: Some("occlusion_query"),
-            ty: wgpu::QueryType::Occlusion,
-            count: 1,
-        }));
+        // ⚠️ Web（wasm32-unknown-unknown，WebGL2 后端）上保守不创建：
+        // 浏览器实现对查询的支持面不一致（原 emscripten GL 仿真只映射 EXT 系
+        // 查询函数，创建 QuerySet 直接 TypeError）。遮挡查询属于
+        // features.rs 的"原生 only 位"，不创建（descriptor 允许 None）。
+        #[cfg(not(target_arch = "wasm32"))]
+        let occlusion_query_set = Some(Arc::new(device.create_query_set(
+            &wgpu::QuerySetDescriptor {
+                label: Some("occlusion_query"),
+                ty: wgpu::QueryType::Occlusion,
+                count: 1,
+            },
+        )));
+        #[cfg(target_arch = "wasm32")]
+        let occlusion_query_set = None;
 
 
         // ==============================================
@@ -160,6 +169,7 @@ impl RenderSurface{
 
 
     pub fn begin_frame(&mut self, clear_color: wgpu::Color,clear_depth:f32) {
+        crate::base::rt::debug_assert_main_thread("RenderSurface::begin_frame");
         // 获取当前交换链纹理（自愈式）：
         // Outdated/Lost → 重建交换链配置与深度/MSAA 纹理后重试（拖动窗口/最小化的常见情况）
         // Timeout/Occluded → 直接重试
@@ -222,7 +232,7 @@ impl RenderSurface{
                 }),
                 stencil_ops: None,
             }),
-            occlusion_query_set: Some(&self.occlusion_query_set),
+            occlusion_query_set: self.occlusion_query_set.as_deref(),
             timestamp_writes: None,
             multiview_mask: None,
         });
@@ -244,6 +254,7 @@ impl RenderSurface{
     }
 
     pub fn present(&mut self) {
+        crate::base::rt::debug_assert_main_thread("RenderSurface::present");
         // 取出当前帧交换链纹理
         let frame = self.color_frame.take().expect("present() failed: No valid frames");
         // 1. 收集所有待提交命令
@@ -285,6 +296,7 @@ impl RenderSurface{
 
 
     pub fn resize(&mut self, width: u32, height: u32) {
+        crate::base::rt::debug_assert_main_thread("RenderSurface::resize");
         // 0. 防 0 尺寸
         let width = width.max(1);
         let height = height.max(1);
@@ -359,6 +371,15 @@ impl RenderSurface{
     /// 表面多重采样数（1 = MSAA 关闭）
     pub fn sample_count(&self) -> u32 {
         self.sample_count
+    }
+
+    /// 当前表面配置尺寸（最近一次 configure/resize 的值）
+    ///
+    /// Web 上窗口真实尺寸经 ResizeObserver 异步到达，可能晚于资源就绪——
+    /// 帧循环对比此值与 `ctx.size()`，不一致即调 [`resize`](Self::resize) 自愈
+    ///（覆盖"Resized 事件先于异步资源初始化到达"的竞态）。
+    pub fn size(&self) -> (u32, u32) {
+        (self.config.width, self.config.height)
     }
 
     pub fn color_format(&self)->TextureFormat{

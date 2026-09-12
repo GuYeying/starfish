@@ -10,7 +10,7 @@
 use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
-use crate::base::subsystem::audio::common::StereoFrame;
+use crate::base::audio::common::StereoFrame;
 
 /// 读者与写者共享的环形缓冲（容量为 2 的幂）
 pub(crate) struct SharedRing {

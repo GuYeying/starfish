@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use crate::base::audio::GroupHandle;
-use crate::base::subsystem::audio::common::StereoFrame;
+use crate::base::audio::common::StereoFrame;
 
 use super::SoundData;
 

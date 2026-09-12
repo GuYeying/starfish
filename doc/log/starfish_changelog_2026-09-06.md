@@ -3,9 +3,47 @@
 > 接续 2026-09-05 批次（time 初版 / font 数据侧 / 渲染五缺口 / 特性系统 / 文本管线）。
 > 本批主题：**架构定位收敛**（单窗口回归、空间化划归开发者、maths 采纳 glam）
 > 与 **四项增量**（time SDL3 化、font kerning、audio 单声道优化、多窗口接口标注）。
+> **补录**：audio 流式播放 / 组总线 / 录音批次（详见「🔊 audio — 流式播放与录音系统」区块，
+> 该批内容量大且未及入 09-05 篇，按用户要求补录于此）。
 >
 > 状态：`cargo test` 38/38 通过，示例编译零错误，新增依赖 0。
 > 注：上一份日志中 time 的「std Instant」描述已被本批 SDL3 方案取代——按日志惯例保留原文，以本篇为准。
+
+---
+
+## 🔊 audio — 流式播放与录音系统（补录）
+
+### Added：流式播放（长音频内存恒定方案）
+
+- **`MusicStream`**：SDL3 回调线程（消费端）+ 解码线程（生产者）+ SPSC 环形缓冲
+  - 单调 head/tail 原子指针；`generation` 换代计数防 seek 撕裂读（写前换代 + 读后校验）
+  - 环容量约 2 秒（2 的幂对齐），音频线程全程无锁、无分配
+- **解码线程**：symphonia 逐包解码 → 跨包线性重采样（与 `SoundData::resample` 同款插值）→ 写入环；
+  缓冲灌满即 park（condvar + 超时兜底），EOF 排空余量后自动退出
+- **`MusicPlayer` 流式后端**：`music_load_file` / `music_queue_file`（排队预起解码线程，无缝切歌）/
+  `music_seek`（generation flush）/ 淡变 / 排队——混音循环零改动
+- **`SymphoniaDecoder`**：OGG / MP3 / FLAC / WAV 自动探测（纯 Rust）
+- **`SoundData::from_file`** + `track.rs → sound_data.rs` 重命名（与内容对齐）
+- 示例 `09_play_music_stream`（流式 BGM + 排队切歌 + 淡入淡出）
+
+### Added：组总线音量
+
+- `GroupHandle` → `group_volumes` 密集向量（索引 = group_id − 1，无哈希开销）
+- `set_group_volume` / `group_volume`；增益链统一为一处：
+  `master × sfx_bus × group × channel_volume × fade`（未知组增益 1.0）
+- 2 个测试（含软限幅全链路衰减数学验证）
+
+### Added：录音（AudioRecorder）
+
+- `AudioRecorder`：SDL3 录音回调（生产者）+ SPSC 环（消费者为主线程）——
+  缓冲写满**丢弃新数据 + `dropped` 计数**，音频线程永不阻塞
+- `save_wav`：拉空缓冲 → 16-bit PCM 立体声 WAV 导出
+- `pause` / `resume` / `clear` / `available` / `device_names`（FFI 设备枚举）
+- 示例 `10_record_mic`（录音 N 秒 → recording.wav）
+
+### 硬件验证修复
+- draw_text 示例顶点缓冲缺失 `COPY_DST` 用途，导致 `Queue::write_buffer` 验证错误
+  （`MeshBuilder` 顶点缓冲补 `COPY_DST`）
 
 ---
 
@@ -52,7 +90,7 @@
 
 ---
 
-## 🔊 audio — SoundData 单声道内存优化
+## 🔊 audio — SoundData 单声道内存优化（流式批次的后续优化）
 
 ### Added
 - `AudioChannels::Mono(Vec<f32>)` / `Stereo(Vec<StereoFrame>)` 双形态：
@@ -94,8 +132,29 @@
 
 ---
 
+## 🧪 Web 路线 spike 结论（决策记录）
+
+emscripten 目标实测（emsdk 3.x + emcc 6.0.9 + Ninja + SDL3 3.4.12 源码构建）：
+
+- ✅ **SDL3 C 库 × emscripten 构建链可行**：cmake 工具链文件 + Ninja 生成器 +
+  emsdk node（架构探测需要）配置后，SDL3 全子系统完成 Emscripten 平台配置
+- ❌ **sdl3 Rust 封装存在上游编译 bug**（0.18.4 与最新 0.20.0 均未修复）：
+  `raw_window_handle.rs:118` 的 `XlibWindowHandle::new(window as u64)` 在
+  emscripten 目标下 u64→c_ulong 类型不匹配——**Web 渲染路线被上游阻塞**
+- 环境要求已固化至项目根 `activate_wasm.bat`（CMake/Ninja/node +
+  `CMAKE_TOOLCHAIN_FILE_wasm32_unknown_emscripten` + Ninja 生成器变量）
+
+### 可选路线（按优先级）
+1. 向 sdl3-rs 上游提 issue（修复点明确：u64→c_ulong 一行转换），等待新版后解锁
+2. `[patch.crates-io]` 指向自维护 fork，一行补丁自修（需长期维护 fork）
+3. Web 降级为「逻辑库」（gfx 生成器 / 字体光栅化 / 音频数据 wasm 可编译，
+   渲染后端待上游修复后接入）
+
+---
+
 ## 📊 状态
 
-- 测试 **38/38**（新增：kern 布局 1、SoundData 单声道 3；time 用例迁移 8）
-- 示例 8，编译零错误
+- 测试 **38/38**（含 audio 流式/录音/组总线批次用例——SPSC 环 5、流式端到端 2、
+  录音 3、组总线 2、重采样 4、单声道展开 3 等，明细见各区块）
+- 示例 8，编译零错误（含 09_play_music_stream / 10_record_mic）
 - 新增依赖 0

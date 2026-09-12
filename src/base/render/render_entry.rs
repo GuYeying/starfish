@@ -1,22 +1,21 @@
 //! 渲染入口（RenderEntry）
 //!
-//! ⚠️ **多窗口接口声明（`//!` 模块级标注）**
+//! **多窗口支持（2026-09-08 起）**：base 的窗口层已支持运行时多窗口
+//! （`ctx.create_window` + `window_created`/`window_closed`/按窗事件路由）。
+//! 多窗口的渲染形态 = 每窗一个渲染目标：
 //!
-//! 本模块中带「多窗口」标记的接口——
-//! [`RenderEntry::surface_from_context`] / [`RenderEntry::async_surface_from_context`]——
-//! 属于 **仅开放、不具备开箱即用能力** 的桌面进阶接口：
+//! - 首窗：[`RenderEntry::new`] / [`RenderEntry::async_new`]（建立 wgpu 上下文）
+//! - 其余窗：[`RenderEntry::surface_from_context`] /
+//!   [`RenderEntry::async_surface_from_context`]（共享同一设备/队列，
+//!   各窗独立表面与独立 present）
 //!
-//! - 引擎官方支持形态是 **单窗口**（`RenderEntry::new`）
-//! - 移动端 / 鸿蒙的表面语义不同（单 Activity / 单 Surface），这些平台上
-//!   多窗口接口未经验证，不构成支持承诺
-//! - 开发者可自行基于该能力扩展，但需自行承担平台适配责任
-//!
-//! 其余接口（`new` / `async_new`）为单窗口主路径，开箱即用。
+//! 平台注记：桌面全后端验证路径；Web（多 canvas）与移动端表面语义
+//! 未经验证，不构成支持承诺。
 
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
 use pollster::block_on;
-use super::super::window::Window;
-use sdl3::video::Window as SdlWindow;
+use crate::base::window::Window;
 use raw_window_handle::{HandleError, HasDisplayHandle, HasWindowHandle};
 use crate::base::render::RenderContext;
 use crate::base::render::render_resource_access::RenderResourceAccess;
@@ -61,14 +60,17 @@ pub struct RenderEntry;
 
 impl RenderEntry{
 
+    /// 阻塞式创建（桌面与 Emscripten 便利层；裸 wasm 无阻塞模型，不参与编译）
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn new(
-        window: &Window, 
+        window: &Window,
         surface_settings: Option<SurfaceSettings>,
         gpu_settings:Option<GpuSettings>,
     ) -> Result<(RenderContext,RenderResourceAccess,RenderSurface), RenderContextError>{
+        crate::base::rt::debug_assert_main_thread("RenderEntry::new");
         block_on(
             RenderEntry::async_new(
-                window.inner(), 
+                window,
                 surface_settings.unwrap_or_default(),
                 gpu_settings.unwrap_or_default(),
             )
@@ -77,7 +79,7 @@ impl RenderEntry{
 
     // 异步创建渲染器 + 三角形网格
     pub async fn async_new(
-        window: &SdlWindow, 
+        window: &Window,
         surface_settings: SurfaceSettings,
         gpu_settings:GpuSettings,
     ) -> Result<(RenderContext,RenderResourceAccess,RenderSurface), RenderContextError>{
@@ -86,7 +88,7 @@ impl RenderEntry{
         // 获取窗口大小
         let size: (u32, u32) = window.size();
         // ==============================================
-        // 创建wgpu实例（指定Vulkan后端，关闭调试）
+        // 创建wgpu实例
         // ==============================================
         let instance = wgpu::Instance::new(gpu_settings.to_instance());
 
@@ -94,7 +96,7 @@ impl RenderEntry{
         // 只提取纯数字raw句柄，不再绑定&window生命周期
         let raw_display = window.display_handle()?.as_raw();
         let raw_window = window.window_handle()?.as_raw();
-        // 'static 生命周期，不再依赖 SdlWindow
+        // 'static 生命周期，不绑定窗口引用（winit 窗口句柄经 HasWindowHandle 提取）
         let surface = Arc::new(unsafe {
             instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
                 raw_display_handle: Some(raw_display),
@@ -133,6 +135,19 @@ impl RenderEntry{
             .request_device(&gpu_settings.to_device(&adapter))
             .await?;
         let (device, queue)  = (Arc::new(device),Arc::new(queue));
+
+        // Web：未捕获错误不直接吞（WebGL2 上校验细节默认被顶层 Display 吞掉）——
+        // 沿 source 链展开完整原因后再抛出，经 console_error_panic_hook 落控制台
+        #[cfg(target_arch = "wasm32")]
+        device.on_uncaptured_error(Arc::new(move |e: wgpu::Error| {
+            let mut msg = format!("wgpu uncaptured error: {e}");
+            let mut src = std::error::Error::source(&e);
+            while let Some(s) = src {
+                msg.push_str(&format!("\n  caused by: {s}"));
+                src = s.source();
+            }
+            panic!("{msg}");
+        }));
 
 
         let render_context = RenderContext::new(
@@ -186,12 +201,14 @@ impl RenderEntry{
     /// let (ctx, access, surface1) = RenderEntry::new(&window1, None, None)?;
     /// let (ctx2, surface2) = RenderEntry::surface_from_context(&ctx, &window2, SurfaceSettings::default())?;
     /// ```
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn surface_from_context(
         context: &RenderContext,
         window: &Window,
         surface_settings: SurfaceSettings,
     ) -> Result<(RenderContext, RenderSurface), RenderContextError> {
-        block_on(Self::async_surface_from_context(context, window.inner(), surface_settings))
+        crate::base::rt::debug_assert_main_thread("RenderEntry::surface_from_context");
+        block_on(Self::async_surface_from_context(context, window, surface_settings))
     }
 
     /// ⚠️【多窗口接口 · 仅开放，不具备开箱即用能力】
@@ -200,7 +217,7 @@ impl RenderEntry{
     /// 定位与限制同上：桌面平台进阶用法，非跨平台承诺。
     pub async fn async_surface_from_context(
         context: &RenderContext,
-        window: &SdlWindow,
+        window: &Window,
         surface_settings: SurfaceSettings,
     ) -> Result<(RenderContext, RenderSurface), RenderContextError> {
         let instance = context.instance().clone();

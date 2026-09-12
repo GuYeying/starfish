@@ -5,7 +5,7 @@
 //! 游戏 SFX 大多为单声道，省一半内存。
 //! 适用于 SFX 和 Music 两个子系统。
 
-use crate::base::subsystem::audio::common::{AudioError, StereoFrame};
+use crate::base::audio::common::{AudioError, StereoFrame};
 
 /// 声道形态
 #[derive(Debug, Clone)]

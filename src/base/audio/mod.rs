@@ -1,16 +1,15 @@
 //! 音频引擎主入口
+//!
+//! 设备层见 [`device`]（cpal 胶水，平台差异唯一收敛点）；
+//! 混音器/流式/录音等其余部分全部是平台中立纯逻辑。
 
-use sdl3::audio::AudioStreamWithCallback;
 use std::sync::{
     atomic::{AtomicU32, Ordering},
     Arc, Mutex,
 };
 
-use crate::base::subsystem::audio::{
-    common::{AudioError, AudioUserCallback, StereoFrame},
-    playback::PlaybackCallback,
-    AudioSubsystem,
-};
+use self::common::{AudioError, AudioUserCallback, StereoFrame};
+use self::device::DeviceStream;
 
 #[inline]
 fn atomic_f32_store(v: f32) -> u32 {
@@ -22,6 +21,7 @@ fn atomic_f32_load(v: u32) -> f32 {
 }
 
 pub mod common;
+pub mod device;
 pub mod record;
 pub mod sfx;
 mod music;
@@ -29,6 +29,9 @@ mod sound_data;
 mod ring;
 pub mod decoder;
 pub mod stream;
+
+#[cfg(test)]
+mod test_support;
 
 pub use sfx::{AudioEffect, ChannelState, FadeState, FadeType, SfxChannel};
 pub use music::MusicPlayer;
@@ -153,53 +156,46 @@ pub struct AudioMixer {
     master_volume: Arc<AtomicU32>,
     sfx_volume: Arc<AtomicU32>,
     music_volume: Arc<AtomicU32>,
-    _stream: AudioStreamWithCallback<PlaybackCallback>,
+    /// cpal 设备流（Drop 即停止并释放设备）
+    _stream: DeviceStream,
     pub output_sample_rate: u32,
     group_id_counter: u32,
 }
 
-impl AudioMixer {
-    pub fn new(
-        subsystem: &AudioSubsystem,
-        sample_rate: u32,
-        num_channels: u32,
-    ) -> Result<Self, AudioError> {
-        let spec = sdl3::audio::AudioSpec::new(
-            Some(sample_rate as i32),
-            Some(2),
-            Some(sdl3::audio::AudioFormat::F32LE),
-        );
-        Self::new_with_spec(subsystem, &spec, num_channels)
+/// 采样率域适配：源采样率 ≠ 混音域（设备真实采样率）时一次性线性插值重采样
+///
+/// cpal 无 SDL 式设备边界转换，混音域由设备决定；采样率适配职责移到数据侧，
+/// 播放期零转换（与流式路径同款算法，见 [`SoundData::resample`]）。
+fn resample_to_domain(sound: Arc<SoundData>, domain_rate: u32) -> Arc<SoundData> {
+    if sound.sample_rate == domain_rate {
+        sound
+    } else {
+        Arc::new((*sound).resample(domain_rate))
     }
+}
 
-    pub fn new_with_spec(
-        subsystem: &AudioSubsystem,
-        spec: &sdl3::audio::AudioSpec,
-        num_channels: u32,
-    ) -> Result<Self, AudioError> {
+impl AudioMixer {
+    /// 创建混音器并打开默认播放设备（f32 立体声，构造即播放）
+    ///
+    /// 混音域 = 设备真实采样率，可用 [`output_sample_rate`](Self::output_sample_rate) 查询。
+    /// 采样率不一致的音源由 [`load_sound`](Self::load_sound) / `play_*` 侧
+    /// 一次性重采样；流式音乐（`music_load_file`）本来就按混音域重采样。
+    pub fn new(num_channels: u32) -> Result<Self, AudioError> {
         let inner = Arc::new(Mutex::new(Inner::new(num_channels.max(1))));
         let master_volume = Arc::new(AtomicU32::new(atomic_f32_store(1.0)));
         let sfx_volume = Arc::new(AtomicU32::new(atomic_f32_store(1.0)));
         let music_volume = Arc::new(AtomicU32::new(atomic_f32_store(1.0)));
 
-        let cb = PlaybackCallback::new(AudioMixerCallback {
+        let cb = AudioMixerCallback {
             inner: inner.clone(),
             master_volume: master_volume.clone(),
             sfx_volume: sfx_volume.clone(),
             music_volume: music_volume.clone(),
-        });
+        };
 
-        let device = subsystem.default_playback_device();
-        let stream = subsystem
-            .open_playback_stream_with_callback(&device, spec, cb)
-            .map_err(|e: sdl3::Error| {
-                AudioError::custom(format!("SDL stream open failed: {e}"))
-            })?;
-        stream.resume().map_err(|e: sdl3::Error| {
-            AudioError::custom(format!("SDL stream resume failed: {e}"))
-        })?;
+        let stream = device::open_output_stream(cb)?;
+        let output_sample_rate = stream.spec.sample_rate;
 
-        let output_sample_rate = spec.freq.unwrap_or(44100) as u32;
         Ok(Self {
             inner,
             master_volume,
@@ -218,6 +214,7 @@ impl AudioMixer {
     }
 
     pub fn play_on(&mut self, sound: Arc<SoundData>, channel: usize) -> Result<(), AudioError> {
+        let sound = resample_to_domain(sound, self.output_sample_rate);
         let mut inner = self.inner.lock().unwrap();
         let ch = inner
             .sfx_channels
@@ -243,6 +240,7 @@ impl AudioMixer {
         loops: i32,
         fade_in_ms: f32,
     ) -> Result<Option<usize>, AudioError> {
+        let sound = resample_to_domain(sound, self.output_sample_rate);
         let mut inner = self.inner.lock().unwrap();
         let reserved = inner.reserved;
         let idx = if let Some(g) = group {
@@ -573,9 +571,19 @@ impl AudioMixer {
             .queue(MusicSource::Buffer { data, cursor: 0 });
     }
 
+    /// 无线程环境（Web）：每帧推进流式解码（预算：帧数）
+    ///
+    /// 桌面（有线程）无需调用——解码线程自动维持缓冲。
+    pub fn pump_streams(&mut self, budget_frames: usize) {
+        self.inner.lock().unwrap().music.pump(budget_frames);
+    }
+
     /// 加载短音效文件为可复用的 SoundData（对位 pygame.mixer.Sound）
+    ///
+    /// 解码后一次性重采样到混音域（设备真实采样率），播放期零转换。
     pub fn load_sound(&self, path: &str) -> Result<Arc<SoundData>, AudioError> {
-        Ok(Arc::new(SoundData::from_file(path)?))
+        let data = SoundData::from_file(path)?;
+        Ok(resample_to_domain(Arc::new(data), self.output_sample_rate))
     }
 
     /// 控制线程锁外 join 已退役的解码线程
@@ -667,7 +675,7 @@ impl AudioMixer {
 impl Drop for AudioMixer {
     fn drop(&mut self) {
         // 收口解码线程：停掉当前源与队列中的所有流式 worker，
-        // 在控制线程（此刻无锁竞争）join 完毕后，SDL 流随字段析构停止。
+        // 在控制线程（此刻无锁竞争）join 完毕后，cpal 流随字段析构停止。
         let handles = self
             .inner
             .lock()
@@ -685,7 +693,7 @@ impl Drop for AudioMixer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::base::subsystem::audio::common::StereoFrame as TestFrame;
+    use super::common::StereoFrame as TestFrame;
 
     #[test]
     fn group_volume_attenuates_mix() {

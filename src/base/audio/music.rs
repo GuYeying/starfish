@@ -18,7 +18,7 @@ use std::thread::JoinHandle;
 use crate::base::audio::common::{AudioEffect, ChannelState, FadeState, FadeType};
 use crate::base::audio::stream::{Cmd, MusicStream};
 use crate::base::audio::SoundData;
-use crate::base::subsystem::audio::common::StereoFrame;
+use crate::base::audio::common::StereoFrame;
 
 /// 音乐数据源（内部枚举：流式 / 内存缓冲）
 pub(crate) enum MusicSource {
@@ -97,6 +97,7 @@ impl MusicPlayer {
     fn retire_current(&mut self) {
         if let Some(MusicSource::Stream(mut s)) = self.source.take() {
             s.request_stop();
+            #[cfg(not(target_arch = "wasm32"))]
             if let Some(h) = s.take_worker() {
                 self.retired.push(h);
             }
@@ -114,10 +115,20 @@ impl MusicPlayer {
         for src in self.queue.drain(..) {
             if let MusicSource::Stream(mut s) = src {
                 s.request_stop();
+                #[cfg(not(target_arch = "wasm32"))]
                 if let Some(h) = s.take_worker() {
                     self.retired.push(h);
                 }
             }
+        }
+    }
+
+    /// 无线程环境（Web）：每帧推进流式解码（预算：帧数）
+    ///
+    /// 桌面（有线程）无需调用——解码线程自动维持缓冲。
+    pub(crate) fn pump(&mut self, budget_frames: usize) {
+        if let Some(MusicSource::Stream(s)) = &mut self.source {
+            s.pump(budget_frames);
         }
     }
 

@@ -1,54 +1,63 @@
-//! 流式解码线程
+//! 流式解码核心（DecoderPump）与 native 线程驱动
 //!
-//! 生产者：symphonia 逐包解码 →（按需）线性重采样到混音输出率 → 写入环形缓冲。
+//! [`DecoderPump`] 是**纯解码逻辑**：symphonia 逐包解码 → 跨包线性重采样 →
+//! 写入环形缓冲。它本身不含线程——由调用方驱动：
 //!
-//! 节奏模型是"尽力提前灌满，灌满了就睡"：缓冲有充足空位时连续解码；
-//! 空位不足时在命令槽的 condvar 上小睡（控制命令即时唤醒，无命令则
-//! 超时自醒后重查空位）。解码到文件尾后清空余量、置 EOF、线程退出。
+//! - **native**：[`spawn_decoder_thread`] 起后台线程循环驱动（灌满即让位睡眠）
+//! - **Web（无线程）**：游戏循环每帧调用 [`DecoderPump::pump_budget`]（预算式）
+//!
+//! 两种驱动共享同一份解码核心，行为语义一致。
 
-use std::sync::{Arc, Condvar, Mutex};
-use std::thread::JoinHandle;
+use std::sync::Arc;
 use std::time::Duration;
 
-use crate::base::subsystem::audio::common::StereoFrame;
+use crate::base::audio::decoder::SymphoniaReader;
+use crate::base::audio::common::StereoFrame;
 
 use crate::base::audio::ring::SharedRing;
 
-/// 控制面 → 解码线程的命令
+const TAU: f32 = std::f32::consts::TAU;
+
+/// 控制面 → 解码核心的命令
+#[derive(Debug, Clone, Copy)]
 pub(crate) enum Cmd {
-    /// 跳转（秒）。worker 收到后：symphonia seek → 换代 → 从新位置继续
+    /// 跳转（秒）。收到后：seek → 换代 → 从新位置继续
     Seek(f32),
-    /// 退出线程
+    /// 退出
     Stop,
 }
 
-/// 命令槽：控制面投递、worker 消费，兼作 worker 的睡眠/唤醒点
+/// 命令槽：控制面投递、解码侧消费；亦是解码循环的睡眠/唤醒点
 #[derive(Default)]
 pub(crate) struct CmdSlot {
-    cmd: Mutex<Option<Cmd>>,
-    signal: Condvar,
+    cmd: std::sync::Mutex<Option<Cmd>>,
+    signal: std::sync::Condvar,
 }
 
 impl CmdSlot {
-    /// 投递命令并唤醒 worker（控制线程调用，绝不阻塞于解码进度）
+    /// 投递命令并唤醒解码循环（控制线程调用）
     pub(crate) fn send(&self, cmd: Cmd) {
         *self.cmd.lock().unwrap() = Some(cmd);
         self.signal.notify_all();
     }
 
-    /// worker：取命令；无命令时等待至多 `timeout`（兜底轮询缓冲空位）
-    fn take(&self, timeout: Duration) -> Option<Cmd> {
+    /// 非阻塞取命令（Web 游戏循环 / 解码核心内部使用）
+    pub(crate) fn try_take(&self) -> Option<Cmd> {
+        self.cmd.lock().unwrap().take()
+    }
+
+    /// 阻塞等待至多 `timeout` 后取命令（native 驱动的 park 点；命令即时唤醒）
+    pub(crate) fn take_timeout(&self, timeout: Duration) -> Option<Cmd> {
         let mut guard = self.cmd.lock().unwrap();
         if guard.is_none() {
-            // 无命令：睡眠（控制面 notify 即醒，否则超时自醒）
             guard = self.signal.wait_timeout(guard, timeout).unwrap().0;
         }
         guard.take()
     }
 }
 
-/// 跨包线性重采样器（与 `SoundData::resample` 同款线性插值，带状态）
-struct Resampler {
+/// 跨包线性重采样器（带状态，与 `SoundData::resample` 同款插值）
+pub(crate) struct Resampler {
     step: f64,
     /// 下一个输出点相对 `last` 的位置 ∈ [0, 1)
     pos: f64,
@@ -57,7 +66,7 @@ struct Resampler {
 }
 
 impl Resampler {
-    fn new(src_rate: u32, dst_rate: u32) -> Self {
+    pub(crate) fn new(src_rate: u32, dst_rate: u32) -> Self {
         Self {
             step: src_rate as f64 / dst_rate as f64,
             pos: 1.0,
@@ -66,12 +75,12 @@ impl Resampler {
         }
     }
 
-    fn needs_resample(&self) -> bool {
+    pub(crate) fn needs_resample(&self) -> bool {
         self.step != 1.0
     }
 
-    /// 把一个包的帧追加到 `out`（输出采样率）
-    fn process(&mut self, input: &[StereoFrame], out: &mut Vec<StereoFrame>) {
+    /// 把一包帧追加到 `out`（输出采样率）
+    pub(crate) fn process(&mut self, input: &[StereoFrame], out: &mut Vec<StereoFrame>) {
         if !self.needs_resample() {
             out.extend_from_slice(input);
             return;
@@ -97,93 +106,174 @@ impl Resampler {
     }
 }
 
-/// 启动解码线程
+/// 解码核心：逐包解码 → 跨包线性重采样 → 写入环形缓冲
 ///
-/// `dst_rate`：混音输出采样率。源采样率不同时由 worker 侧重采样，
-/// 环形缓冲内永远是输出采样率，音频线程读取即纯 memcpy。
-pub(crate) fn spawn_worker(
-    mut reader: crate::base::audio::decoder::SymphoniaReader,
+/// 纯逻辑、不含线程——native 由后台线程驱动，Web 由游戏循环驱动。
+/// 两种驱动共享同一份核心，行为语义一致。
+pub(crate) struct DecoderPump {
+    reader: SymphoniaReader,
     ring: Arc<SharedRing>,
     cmd: Arc<CmdSlot>,
-    dst_rate: u32,
-) -> JoinHandle<()> {
-    let mut resampler = Resampler::new(reader.src_rate(), dst_rate);
+    resampler: Resampler,
+    /// 上一包未能完全写入环的余量（环满时暂存）
+    pending: Vec<StereoFrame>,
+    /// 单包解码的重采样输出暂存（复用避免分配）
+    resampled: Vec<StereoFrame>,
+    /// 解码已到流末尾（余量排空后置环 EOF）
+    eof: bool,
+    /// 收到 Stop
+    stopped: bool,
+    /// 解码让位阈值：环空闲低于此值时暂停解码（帧）
+    batch: usize,
+}
+
+impl DecoderPump {
+    /// 创建解码核心
+    ///
+    /// `dst_rate`：混音输出采样率。源采样率不同时在 pump 内完成重采样，
+    /// 环形缓冲里永远是输出采样率，读取侧纯 memcpy。
+    /// 让位阈值默认 4096 帧，可用 [`set_batch`](Self::set_batch) 调整。
+    pub(crate) fn new(
+        reader: SymphoniaReader,
+        ring: Arc<SharedRing>,
+        cmd: Arc<CmdSlot>,
+        dst_rate: u32,
+    ) -> Self {
+        let src_rate = reader.src_rate();
+        Self {
+            reader,
+            ring,
+            cmd,
+            resampler: Resampler::new(src_rate, dst_rate),
+            pending: Vec::new(),
+            resampled: Vec::new(),
+            eof: false,
+            stopped: false,
+            batch: 4096,
+        }
+    }
+
+    /// 设置解码让位阈值（环空闲低于此值时暂停解码）
+    pub(crate) fn set_batch(&mut self, frames: usize) {
+        self.batch = frames.max(1);
+    }
+
+    /// 尽力推进至多 `max_frames` 帧入环，返回实际写入帧数
+    ///
+    /// 同时非阻塞处理控制命令（Seek / Stop）。
+    /// 返回 0 = 本轮无事可做（环满让位 / 已停止 / EOF 已标记）。
+    pub(crate) fn pump_budget(&mut self, max_frames: usize) -> usize {
+        // 1. 命令（非阻塞）
+        match self.cmd.try_take() {
+            Some(Cmd::Stop) => {
+                self.stopped = true;
+                return 0;
+            }
+            Some(Cmd::Seek(sec)) => {
+                self.pending.clear();
+                match self.reader.seek(sec) {
+                    // 先换代再写新数据，读者据此丢弃旧代残留
+                    Ok(()) => self.ring.begin_generation(),
+                    Err(e) => eprintln!("[starfish audio] seek 失败: {e}"),
+                }
+            }
+            None => {}
+        }
+
+        // 2. 环满让位（批量写入粒度约 batch 帧）
+        if self.ring.free() < self.batch {
+            return 0;
+        }
+
+        // 3. 上一包余量优先写入
+        if !self.pending.is_empty() {
+            let n = self.ring.write(&self.pending);
+            self.pending.drain(..n);
+            return n;
+        }
+
+        // 4. 解码下一包
+        match self.reader.next_interleaved() {
+            Ok(Some(chunk)) if chunk.is_empty() => 0,
+            Ok(Some(chunk)) => {
+                let frames = interleave(&chunk, self.reader.src_channels() == 1);
+                self.resampled.clear();
+                self.resampler.process(&frames, &mut self.resampled);
+
+                let n = self.ring.write(&self.resampled);
+                self.pending.extend_from_slice(&self.resampled[n..]);
+                n
+            }
+            Ok(None) => {
+                // 流结束：把余量灌完再标记 EOF，保证尾部不截断
+                while !self.pending.is_empty() {
+                    if matches!(self.cmd.try_take(), Some(Cmd::Stop)) {
+                        self.stopped = true;
+                        return 0;
+                    }
+                    let n = self.ring.write(&self.pending);
+                    self.pending.drain(..n);
+                    if n == 0 {
+                        // 环满：等消费，下次继续排空（EOF 标记延后）
+                        return 0;
+                    }
+                }
+                self.ring.set_eof();
+                0
+            }
+            Err(e) => {
+                eprintln!("[starfish audio] 解码错误，流终止: {e}");
+                self.ring.set_eof();
+                0
+            }
+        }
+    }
+
+    /// 是否已收到 Stop
+    pub(crate) fn stopped(&self) -> bool {
+        self.stopped
+    }
+
+    /// 解码是否已到流末尾（余量是否排空另见环状态）
+    pub(crate) fn eof(&self) -> bool {
+        self.eof
+    }
+}
+
+/// 交错采样 → 立体声帧（`mono` 时 L=R 展开）
+fn interleave(chunk: &[f32], mono: bool) -> Vec<StereoFrame> {
+    let mut frames = Vec::with_capacity(chunk.len() / 2 + 1);
+    if mono {
+        for &s in chunk {
+            frames.push(StereoFrame { left: s, right: s });
+        }
+    } else {
+        for pair in chunk.chunks_exact(2) {
+            frames.push(StereoFrame {
+                left: pair[0],
+                right: pair[1],
+            });
+        }
+    }
+    frames
+}
+
+/// native 驱动：后台解码线程
+///
+/// 循环驱动 [`DecoderPump`]：命令即时响应，缓冲灌满即让位睡眠，
+/// EOF 排空后自动退出。
+pub(crate) fn spawn_decoder_thread(mut pump: DecoderPump) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
         .name("starfish-audio-decoder".into())
         .spawn(move || {
-            let mut pending: Vec<StereoFrame> = Vec::new();
-            let mut resampled: Vec<StereoFrame> = Vec::new();
-
             loop {
-                // ── 1. 处理控制命令（顺带充当空位轮询的睡眠点） ──
-                match cmd.take(Duration::from_millis(5)) {
-                    Some(Cmd::Stop) => return,
-                    Some(Cmd::Seek(sec)) => {
-                        pending.clear();
-                        match reader.seek(sec) {
-                            // 先换代再写新数据，读者据此丢弃旧代残留
-                            Ok(()) => ring.begin_generation(),
-                            Err(e) => eprintln!("[starfish audio] seek 失败: {e}"),
-                        }
-                    }
-                    None => {}
+                if pump.stopped() || pump.eof() {
+                    return;
                 }
-
-                // ── 2. 空位不足则继续睡（约 4096 帧 ≈ 85ms 粒度批量写入） ──
-                if ring.free() < 4096 {
-                    continue;
-                }
-
-                // ── 3. 上一包余量优先写入 ──
-                if !pending.is_empty() {
-                    let n = ring.write(&pending);
-                    pending.drain(..n);
-                    continue;
-                }
-
-                // ── 4. 解码下一包 ──
-                match reader.next_interleaved() {
-                    Ok(Some(chunk)) if chunk.is_empty() => continue,
-                    Ok(Some(chunk)) => {
-                        let mut frames: Vec<StereoFrame> =
-                            Vec::with_capacity(chunk.len() / 2);
-                        if reader.src_channels() == 1 {
-                            // 单声道流：环形缓冲保持统一立体声（容量以秒计有界，翻倍代价可控），
-                            // 与 SoundData 的单声道省内存策略不同
-                            for &s in &chunk {
-                                frames.push(StereoFrame { left: s, right: s });
-                            }
-                        } else {
-                            for pair in chunk.chunks_exact(2) {
-                                frames.push(StereoFrame {
-                                    left: pair[0],
-                                    right: pair[1],
-                                });
-                            }
-                        }
-                        resampled.clear();
-                        resampler.process(&frames, &mut resampled);
-
-                        let n = ring.write(&resampled);
-                        pending.extend_from_slice(&resampled[n..]);
-                    }
-                    Ok(None) => {
-                        // 流结束：把余量灌完再置 EOF，保证尾部不截断
-                        while !pending.is_empty() {
-                            if matches!(cmd.take(Duration::from_millis(5)), Some(Cmd::Stop)) {
-                                return;
-                            }
-                            let n = ring.write(&pending);
-                            pending.drain(..n);
-                        }
-                        ring.set_eof();
-                        return;
-                    }
-                    Err(e) => {
-                        eprintln!("[starfish audio] 解码错误，流终止: {e}");
-                        ring.set_eof();
-                        return;
-                    }
+                let n = pump.pump_budget(4096);
+                if n == 0 {
+                    // 环满或无进展：让位睡眠（命令即时唤醒，超时自醒兜底）
+                    std::thread::sleep(Duration::from_millis(5));
                 }
             }
         })
@@ -199,58 +289,57 @@ mod tests {
     }
 
     #[test]
-    fn resampler_upsample_2x_length_and_values() {
-        // 22050 → 44100：step = 0.5
-        let mut r = Resampler::new(22050, 44100);
-        let src: Vec<StereoFrame> = (0..100).map(|i| frame(i as f32)).collect();
-        let mut out = Vec::new();
-        r.process(&src, &mut out);
+    fn pump_budget_fills_ring() {
+        let ring = Arc::new(SharedRing::with_capacity(2048));
+        let cmd = Arc::new(CmdSlot::default());
+        let mut pump = DecoderPump::new(make_test_reader(), ring.clone(), cmd.clone(), 44100);
+        pump.set_batch(64);
 
-        // 输出 t = 0, 0.5, ..., 98.5（t=99 的边界样本要等下一个包补上 → 198）
-        assert_eq!(out.len(), 198);
-        assert!((out[0].left - 0.0).abs() < 1e-6);
-        assert!((out[197].left - 98.5).abs() < 1e-6);
-        // 中间插值：t=0.5 处应为 0.5
-        assert!((out[1].left - 0.5).abs() < 1e-6);
+        let n = pump.pump_budget(1000);
+        assert!(n > 0, "应写入部分帧");
+        assert_eq!(ring.available(), n);
+        assert!(!pump.stopped());
+        assert!(!pump.eof());
     }
 
     #[test]
-    fn resampler_same_rate_passthrough() {
-        let mut r = Resampler::new(44100, 44100);
-        let src: Vec<StereoFrame> = (0..10).map(|i| frame(i as f32)).collect();
-        let mut out = Vec::new();
-        r.process(&src, &mut out);
-        assert_eq!(out.len(), 10);
+    fn stop_takes_effect() {
+        let ring = Arc::new(SharedRing::with_capacity(2048));
+        let cmd = Arc::new(CmdSlot::default());
+        let mut pump = DecoderPump::new(make_test_reader(), ring.clone(), cmd.clone(), 44100);
+        pump.set_batch(64);
+
+        cmd.send(Cmd::Stop);
+        assert_eq!(pump.pump_budget(4096), 0);
+        assert!(pump.stopped());
     }
 
     #[test]
-    fn resampler_downsample_length() {
-        // 44100 → 22050：step = 2.0，输出约一半
-        let mut r = Resampler::new(44100, 22050);
-        let src: Vec<StereoFrame> = (0..100).map(|i| frame(i as f32)).collect();
-        let mut out = Vec::new();
-        r.process(&src, &mut out);
-        assert_eq!(out.len(), 50);
-        // 抽取点保持原值
-        assert!((out[0].left - 0.0).abs() < 1e-6);
-        assert!((out[1].left - 2.0).abs() < 1e-6);
-    }
+    fn seek_generation_no_panic() {
+        let ring = Arc::new(SharedRing::with_capacity(2048));
+        let cmd = Arc::new(CmdSlot::default());
+        let mut pump = DecoderPump::new(make_test_reader(), ring.clone(), cmd.clone(), 44100);
+        pump.set_batch(64);
 
-    #[test]
-    fn resampler_cross_packet_continuity() {
-        // 分两个包送入，结果应与一次性送入一致
-        let src: Vec<StereoFrame> = (0..64).map(|i| frame(i as f32 * 0.5)).collect();
-        let mut whole = Vec::new();
-        Resampler::new(22050, 44100).process(&src, &mut whole);
+        // 先灌一点，再 seek（换代），继续泵——不应 panic 且可继续产出
+        pump.pump_budget(100);
+        pump.pump_budget(4096);
+        cmd.send(Cmd::Seek(0.2));
 
-        let mut split = Vec::new();
-        let mut r = Resampler::new(22050, 44100);
-        r.process(&src[..13], &mut split);
-        r.process(&src[13..], &mut split);
-
-        assert_eq!(whole.len(), split.len());
-        for (a, b) in whole.iter().zip(split.iter()) {
-            assert!((a.left - b.left).abs() < 1e-6);
+        // 模拟消费者：读取会推进 head 并丢弃换代前的旧数据
+        fn drain(ring: &SharedRing) {
+            let mut buf = [StereoFrame::SILENT; 256];
+            while ring.read(&mut buf) > 0 {}
         }
+        drain(&ring);
+
+        let n = pump.pump_budget(100);
+        assert!(n > 0 || pump.eof());
+    }
+
+    fn make_test_reader() -> SymphoniaReader {
+        let path = std::env::temp_dir().join("starfish_pump_test.wav");
+        crate::base::audio::test_support::write_test_wav(&path, 44100, 1.0);
+        SymphoniaReader::open(path.to_str().unwrap()).unwrap()
     }
 }

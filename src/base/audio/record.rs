@@ -1,34 +1,32 @@
 //! 引擎层录音（AudioRecorder）
 //!
-//! 与 [`AudioMixer`](super::AudioMixer)（输出）对称的输入端：SDL 录音回调是
+//! 与 [`AudioMixer`](super::AudioMixer)（输出）对称的输入端：cpal 录音回调是
 //! 生产者，主线程是消费者，中间复用与流式播放同一份 SPSC 环
 //! （[`super::ring::SharedRing`]），音频线程全程无锁、无分配。
 //!
 //! 数据流：
 //!
 //! ```text
-//! 麦克风 → SDL 设备 → RecordingCallback（subsystem 胶水）→ SharedRing → 主线程 read/save_wav
+//! 麦克风 → cpal 输入流 → RingSink（数据面回调）→ SharedRing → 主线程 read/save_wav
 //! ```
 //!
 //! 行为约定：
-//! - **构造即采集**：打开流即 resume，无显式 start（与 AudioMixer 风格一致）
+//! - **构造即采集**：打开流即 play，无显式 start（与 AudioMixer 风格一致）
 //! - **溢出丢弃新数据并计数**：用户不及时 `read` 时，缓冲写满后丢弃新采集帧，
 //!   [`dropped`](AudioRecorder::dropped) 可查——音频线程永不阻塞
-//! - 长录音请周期性 `read`，或按预期时长用
+//! - 长录音请周期性 `read`，或用
 //!   [`new_with_capacity`](AudioRecorder::new_with_capacity) 一次性给足容量
+//! - **采样率 = 设备真实采样率**（cpal 无设备边界转换；设备层见
+//!   [`super::device`]），WAV 头据此写出
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use sdl3::audio::{AudioFormat, AudioSpec, AudioStreamWithCallback};
+use crate::base::audio::common::{AudioError, AudioUserCallback, StereoFrame};
+use crate::base::audio::device;
+use crate::base::audio::ring::SharedRing;
 
-use crate::base::subsystem::audio::common::{AudioError, AudioUserCallback, StereoFrame};
-use crate::base::subsystem::audio::recording::{open_recording_stream, RecordingCallback};
-use crate::base::subsystem::audio::AudioSubsystem;
-
-use super::ring::SharedRing;
-
-/// 环形写入端（跑在 SDL 录音回调线程上）：写满即丢新数据并计数
+/// 环形写入端（跑在录音回调线程上）：写满即丢新数据并计数
 struct RingSink {
     ring: Arc<SharedRing>,
     dropped: Arc<AtomicU64>,
@@ -49,31 +47,31 @@ impl AudioUserCallback for RingSink {
 /// # 示例
 ///
 /// ```ignore
-/// let mut rec = AudioRecorder::new(&audio_subsys, 44100)?;
-/// println!("设备：{:?}", AudioRecorder::device_names(&audio_subsys)?);
-/// std::thread::sleep(Duration::from_secs(5));          // 录 5 秒
-/// let frames = rec.save_wav("recording.wav")?;         // 拉空并保存
+/// let mut rec = AudioRecorder::new()?;                  // 默认约 4 秒容量
+/// println!("设备：{:?}", AudioRecorder::device_names()?);
+/// std::thread::sleep(Duration::from_secs(5));           // 录 5 秒
+/// let frames = rec.save_wav("recording.wav")?;          // 拉空并保存
 /// ```
 pub struct AudioRecorder {
-    /// 持有 SDL 录音流（Drop 即停止采集并释放设备）
-    stream: AudioStreamWithCallback<RecordingCallback>,
+    /// 持有 cpal 录音流（Drop 即停止采集并释放设备）
+    _stream: device::DeviceStream,
     ring: Arc<SharedRing>,
     dropped: Arc<AtomicU64>,
     sample_rate: u32,
 }
 
+/// `AudioRecorder::new()` 的默认容量：≈4 秒 @48kHz（环形容量只需量级正确，
+/// 它只决定溢出前的缓冲深度，WAV 头用的是设备真实采样率）
+const DEFAULT_CAPACITY_FRAMES: usize = 192_000;
+
 impl AudioRecorder {
-    /// 打开默认录音设备并开始采集（f32 立体声，缓冲约 4 秒）
-    pub fn new(subsystem: &AudioSubsystem, sample_rate: u32) -> Result<Self, AudioError> {
-        Self::new_with_capacity(subsystem, sample_rate, sample_rate as usize * 4)
+    /// 打开默认录音设备并开始采集（f32 立体声，设备真实采样率）
+    pub fn new() -> Result<Self, AudioError> {
+        Self::new_with_capacity(DEFAULT_CAPACITY_FRAMES)
     }
 
     /// 打开默认录音设备，指定环形缓冲容量（帧，向上取 2 的幂）
-    pub fn new_with_capacity(
-        subsystem: &AudioSubsystem,
-        sample_rate: u32,
-        capacity_frames: usize,
-    ) -> Result<Self, AudioError> {
+    pub fn new_with_capacity(capacity_frames: usize) -> Result<Self, AudioError> {
         let ring = Arc::new(SharedRing::with_capacity(capacity_frames));
         let dropped = Arc::new(AtomicU64::new(0));
 
@@ -82,17 +80,11 @@ impl AudioRecorder {
             dropped: dropped.clone(),
         };
 
-        // 与播放侧同一套格式：f32 交错立体声（设备格式/采样率由 SDL 转换）
-        let spec = AudioSpec::new(Some(sample_rate as i32), Some(2), Some(AudioFormat::F32LE));
-        let stream = open_recording_stream(subsystem.inner(), &spec, sink)?;
-
-        // 构造即采集
-        stream
-            .resume()
-            .map_err(|e| AudioError::custom(format!("录音流 resume 失败: {e}")))?;
+        let stream = device::open_input_stream(sink)?;
+        let sample_rate = stream.spec.sample_rate;
 
         Ok(Self {
-            stream,
+            _stream: stream,
             ring,
             dropped,
             sample_rate,
@@ -100,19 +92,8 @@ impl AudioRecorder {
     }
 
     /// 枚举系统录音设备名（诊断用；v1 打开的始终是默认设备）
-    pub fn device_names(subsystem: &AudioSubsystem) -> Result<Vec<String>, AudioError> {
-        let ids = subsystem
-            .audio_recording_device_ids()
-            .map_err(|e| AudioError::custom(format!("枚举录音设备失败: {e}")))?;
-        let mut names = Vec::with_capacity(ids.len());
-        for i in 0..ids.len() {
-            names.push(
-                subsystem
-                    .audio_recording_device_name(i as u32)
-                    .unwrap_or_else(|_| format!("录音设备 {i}")),
-            );
-        }
-        Ok(names)
+    pub fn device_names() -> Result<Vec<String>, AudioError> {
+        device::input_device_names()
     }
 
     // ───────────────────────── 数据面（全部非阻塞，主线程调用） ─────────────────────────
@@ -137,18 +118,14 @@ impl AudioRecorder {
         self.ring.clear();
     }
 
-    /// 暂停采集（SDL 流级暂停，设备保持打开）
+    /// 暂停采集（流级暂停，设备保持打开）
     pub fn pause(&mut self) -> Result<(), AudioError> {
-        self.stream
-            .pause()
-            .map_err(|e| AudioError::custom(format!("录音流 pause 失败: {e}")))
+        self._stream.pause()
     }
 
     /// 恢复采集
     pub fn resume(&mut self) -> Result<(), AudioError> {
-        self.stream
-            .resume()
-            .map_err(|e| AudioError::custom(format!("录音流 resume 失败: {e}")))
+        self._stream.resume()
     }
 
     /// 把缓冲内全部已采集数据写出为 16-bit PCM 立体声 WAV，返回帧数
@@ -168,7 +145,7 @@ impl AudioRecorder {
         Ok(frames.len() as u64)
     }
 
-    /// 采样率（Hz）
+    /// 采样率（Hz）——设备真实采样率
     pub fn sample_rate(&self) -> u32 {
         self.sample_rate
     }

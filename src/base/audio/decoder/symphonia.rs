@@ -6,7 +6,7 @@
 //!   - [`SymphoniaReader`]：逐包拉取（流式播放的解码前端）
 
 use crate::base::audio::SoundData;
-use crate::base::subsystem::audio::common::AudioError;
+use crate::base::audio::common::AudioError;
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::CODEC_TYPE_NULL;
 use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo};
@@ -34,8 +34,20 @@ impl SymphoniaReader {
     pub fn open(path: &str) -> Result<Self, AudioError> {
         let file = std::fs::File::open(path)
             .map_err(|e| AudioError::custom(format!("打开音频文件失败 {path}: {e}")))?;
+        Self::from_media_source(Box::new(file), path)
+    }
 
-        let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    /// 从内存字节探测格式（Web / 字节缝场景）
+    pub fn from_bytes(data: Vec<u8>) -> Result<Self, AudioError> {
+        let cursor = std::io::Cursor::new(data);
+        Self::from_media_source(Box::new(cursor), "<memory>")
+    }
+
+    fn from_media_source(
+        source: Box<dyn symphonia::core::io::MediaSource>,
+        label: &str,
+    ) -> Result<Self, AudioError> {
+        let mss = MediaSourceStream::new(source, Default::default());
         let probe = symphonia::default::get_probe()
             .format(
                 &Hint::new(),
@@ -44,7 +56,7 @@ impl SymphoniaReader {
                 &MetadataOptions::default(),
             )
             .map_err(|e| {
-                AudioError::custom(format!("symphonia 格式探测失败 {path}: {e}"))
+                AudioError::custom(format!("symphonia 格式探测失败 {label}: {e}"))
             })?;
         let format = probe.format;
 

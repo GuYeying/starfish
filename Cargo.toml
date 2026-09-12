@@ -1,55 +1,238 @@
 [package]
 name = "starfish"
-version = "0.2.5"
+version = "0.5.0"
 edition = "2024"
 
+# ── 特性（场景化裁剪：默认全包含；可选剔除 gfx / font / video）──
+# - 渲染/窗口/循环/时间/资源/Web入口 为核心，恒参与编译
+# - audio 恒参与编译（cpal/symphonia 轻，游戏几乎必用）
+# - video 为重依赖特性：Linux 构建需 gstreamer dev 包、Windows 编译 MF/D3D11
+#   探测、Apple 编译 objc2 系、Android 编译 jni——不用视频的场景剔除之
+[features]
+default = ["gfx", "font", "video", "gamepad"]
+gfx = []
+font = ["dep:ttf-parser"]
+gamepad = ["dep:gilrs"]
+video = [
+    "dep:windows",
+    "dep:gstreamer",
+    "dep:gstreamer-app",
+    "dep:gstreamer-video",
+    "dep:objc2",
+    "dep:objc2-foundation",
+    "dep:objc2-av-foundation",
+    "dep:objc2-core-media",
+    "dep:objc2-core-video",
+    "dep:objc2-video-toolbox",
+    "dep:objc2-core-foundation",
+    "dep:jni",
+    "dep:ndk-context",
+    "dep:mp4",
+    "dep:js-sys",
+]
+
+# 历史说明（2026-09-08）：[patch.crates-io] 已随 emscripten 目标退役整段移除
+# （原 sdl3 / glow / wgpu-types / wgpu-hal 四个 vendor 补丁，详见
+# doc/log/starfish_changelog_2026-09-06-b.md 与 2026-09-08.md）。
+# Web 目标为 wasm32-unknown-unknown（生态主线），crates.io 原版即可。
+
+# ── 平台无关依赖 ──
+
 [dependencies]
-bitflags = "2.13.0"
-thiserror = "2.0.18"
-bytemuck = { version = "1.23", features = ["derive"] }
-env_logger = "0.11.11" 
-cgmath = "0.18.0"
-serde = { version = "1.0.228", features = ["derive"] }
-once_cell = "1.21.4"
-serde_json = "1.0.150"
 
-wgpu = {version="30.0.0"}
-pollster = "0.4"
+# ── 渲染 ──
+# wgpu：跨平台图形 API。桌面后端 dx12/metal/vulkan/gles；Web 双后端
+# webgl（WebGL2 兜底）+ webgpu（navigator.gpu 存在时优先，缺失自动落到 WebGL2）。
+# default-features = false 只为精确控制后端与特性面。
+wgpu = { version = "30.0.0", default-features = false, features = [
+    "std",
+    "parking_lot",
+    "dx12",
+    "metal",
+    "vulkan",
+    "gles",
+    "wgsl",
+    "webgl",
+    "webgpu",
+] }
 
-
-
-# hound = "3.5.1"
-
-# 通用音频解码（OGG/MP3/FLAC/WAV），纯 Rust 实现
-symphonia = { version = "0.5", default-features = false, features = ["ogg", "mp3", "flac", "wav", "pcm"] }
-
-
-
-sdl3 = { version = "0.18.4", default-features = false, features = [
-    "raw-window-handle",
-    "build-from-source-static",  # 自动编译 SDL3，永不报错
-]}
-# 底层 sdl3-sys 精准控制子系统
-sdl3-sys = {version = "0.6.7+SDL-3.4.12",default-features = false,features = [
-        # 1. 全局关闭所有默认子系统（核心）
-        "no-default-subsystems",
-        # 2. 手动开启 刚需子系统
-        "sdl-audio",     # 音频 游戏必备
-        "sdl-video",     # 窗口/视频 必开（WGPU 依赖）
-        "sdl-camera",    # 摄像头
-        "sdl-joystick",  # 摇杆/手柄 输入
-        "sdl-haptic",    # 力反馈传感器
-        "sdl-hidapi",    # HID 底层兼容，提升键鼠/手柄稳定性
-        "sdl-sensor",    # 传感器
-]}
+# ── 窗口 / 事件 ──
+# winit：rust-windowing 机构维护（bevy/iced/egui 共同底座），2026-09-08 替代 SDL3。
+# android-native-activity：安卓目标的活动引导（仅 android 目标生效；视频后端
+# 依赖其注入的 ndk_context，见 base/video/android.rs）。
+# raw-window-handle：wgpu 建表面的句柄桥（base::window::Window 直通实现）。
+winit = { version = "0.30", features = ["android-native-activity"] }
 raw-window-handle = "0.6.2"
 
+# ── 音频 ──
+# cpal：跨平台音频设备层（WASAPI/CoreAudio/ALSA/WebAudio；RustAudio 机构维护）。
+# symphonia：通用音频解码（OGG/MP3/FLAC/WAV），纯 Rust。二者皆为 2026-09-08 替代 SDL3。
+cpal = "0.18"
+symphonia = { version = "0.5", default-features = false, features = ["ogg", "mp3", "flac", "wav", "pcm"] }
 
-
+# ── 数学 / 几何 ──
 glam = { version = "0.33.2", features = ["bytemuck"] }
 
+# ── 资源：图片 / 字体 / 3D 模型 ──
 image = "0.25.10"
+ttf-parser = { version = "0.25.1", optional = true }
+gltf = { version = "1.4.1", features = ["import", "extensions", "extras"] }
 
-ttf-parser = "0.25.1"
+# ── 错误 / 派生 / 数据 ──
+thiserror = "2.0.18"
+bytemuck = { version = "1.23", features = ["derive"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+once_cell = "1.21.4"
 
-gltf = { version = "1.4.1",  features = ["import", "extensions", "extras"] }
+# ── 视频：MP4 解复用（纯 Rust；base/video/mp4_demux.rs）──
+# Windows 等桌面原生后端（MF/VT）自带解复用不参与编译；供 android/web 后端共用
+mp4 = { version = "0.14", optional = true }
+
+# ── 平台差异依赖 ──
+# 注意：target 段统一放在文件末尾（普通依赖之后），避免 TOML 表格吞并后续裸键。
+
+# 桌面：阻塞式异步驱动（wasm 上无阻塞模型，初始化走 spawn_local，见 base::app）
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+pollster = "0.4"
+
+# Web（wasm32-unknown-unknown）
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+wasm-bindgen = "0.2"                    # base::web::console_log / web_entry! 宏
+wasm-bindgen-futures = "0.4"            # app::run 的 spawn_local 调度
+web-sys = { version = "0.3", features = [
+    "Window",
+    "Performance",   # time：performance.now()（std Instant 在该目标不可用）
+    "Document",
+    "Element",
+    "HtmlCanvasElement", # app：嵌入 canvas 接管
+    "Response",      # video：fetch 响应（WebCodecs 后端，见 base/video/web.rs）
+] }
+console_error_panic_hook = "0.1"        # web_entry! 的 panic → 浏览器控制台转发
+
+# 所有 wasm32 变体：cpal 启用 WebAudio 设备后端
+# Web 视频硬解（WebCodecs 自持绑定 + mp4 解复用，见 base/video/web.rs）
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+cpal = { version = "0.18", features = ["wasm-bindgen"] }
+js-sys = { version = "0.3", optional = true }
+
+# Web 示例：web_entry! 宏展开的 #[wasm_bindgen(start)] 属性路径
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen = "0.2"
+
+# ── Windows 平台（视频硬解：Media Foundation SourceReader，见 base/video）──
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62", optional = true, features = [
+    "Win32_Media_MediaFoundation",
+    "Win32_Media_DirectShow",    # DXVA H264 VLD profile GUID
+    "Win32_System_Com",
+    "Win32_Graphics_Direct3D11", # 硬解能力探测（D3D11 VideoDevice / H264 VLD profile）
+    "Win32_Graphics_Dxgi",       # DXGI_FORMAT_NV12（解码输出格式探测）
+] }
+
+# ── Linux 视频硬解（GStreamer 硬解聚合层，见 base/video/linux.rs）──
+# 仅链接系统动态库（二进制只增几百 KB 绑定代码）；Ubuntu 24.04 自带 GStreamer 1.24
+[target.'cfg(target_os = "linux")'.dependencies]
+gstreamer = { version = "0.23", optional = true, features = ["v1_24"] }
+gstreamer-app = { version = "0.23", optional = true }
+gstreamer-video = { version = "0.23", optional = true }
+
+# ── macOS/iOS 视频硬解（VideoToolbox 系统框架，见 base/video/apple.rs）──
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+objc2 = { version = "0.6", optional = true }
+objc2-foundation = { version = "0.3", optional = true, features = ["NSString", "NSURL"] }
+objc2-av-foundation = { version = "0.3", optional = true, features = [
+    "AVAsset",
+    "AVAssetTrack",
+    "AVAssetReader",
+    "AVAssetReaderOutput",
+    "AVMediaFormat",
+    "objc2-core-media",
+] }
+objc2-core-media = { version = "0.3", optional = true, features = ["CMSampleBuffer", "CMFormatDescription", "CMTime"] }
+objc2-core-video = { version = "0.3", optional = true, features = [
+    "CVPixelBuffer",
+    "CVImageBuffer",
+    "CVBase",
+    "CVBuffer",
+    "CVReturn",
+] }
+objc2-video-toolbox = { version = "0.3", optional = true, features = [
+    "VTDecompressionSession",
+    "VTErrors",
+    "VTSession",
+] }
+objc2-core-foundation = { version = "0.3", optional = true }
+
+# ── 手柄（gilrs：win/linux/mac 原生，见 base/gamepad.rs）──
+# wasm：Gamepad API 为稳定接口，自持 js_sys Reflect 轮询（不给构建链添 flag）
+# Android/iOS 无 gilrs 支持：状态表空实现占位（待引擎事件管线立项）
+[target.'cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))'.dependencies]
+gilrs = { version = "0.11", optional = true }
+
+# ── Android 视频硬解（MediaCodec via JNI + mp4 解复用，见 base/video/android.rs）──
+[target.'cfg(target_os = "android")'.dependencies]
+jni = { version = "0.21", optional = true }
+ndk-context = { version = "0.1", optional = true }
+
+# ── 示例（按目录分类：basics/render/draw/audio/platform/media；名称保持稳定，
+#     经显式段映射路径；按特性声明依赖，未启用时不参与编译）──
+[[example]]
+name = "01_hello_world"
+path = "examples/basics/01_hello_world.rs"
+
+[[example]]
+name = "02_triangles"
+path = "examples/basics/02_triangles.rs"
+
+[[example]]
+name = "03_texture"
+path = "examples/render/03_texture.rs"
+
+[[example]]
+name = "04_coord_system"
+path = "examples/render/04_coord_system.rs"
+
+[[example]]
+name = "05_storage_cube"
+path = "examples/render/05_storage_cube.rs"
+
+[[example]]
+name = "06_draw_gfx"
+path = "examples/draw/06_draw_gfx.rs"
+required-features = ["gfx"]
+
+[[example]]
+name = "07_draw_text"
+path = "examples/draw/07_draw_text.rs"
+required-features = ["font"]
+
+[[example]]
+name = "08_play_sound"
+path = "examples/audio/08_play_sound.rs"
+
+[[example]]
+name = "09_play_music_stream"
+path = "examples/audio/09_play_music_stream.rs"
+
+[[example]]
+name = "10_record_mic"
+path = "examples/audio/10_record_mic.rs"
+
+[[example]]
+name = "11_web_triangles"
+path = "examples/platform/11_web_triangles.rs"
+
+[[example]]
+name = "12_multi_window"
+path = "examples/platform/12_multi_window.rs"
+
+[[example]]
+name = "13_video_decode"
+path = "examples/media/13_video_decode.rs"
+required-features = ["video"]
+
+[[example]]
+name = "14_gamepad"
+path = "examples/media/14_gamepad.rs"
+required-features = ["gamepad"]

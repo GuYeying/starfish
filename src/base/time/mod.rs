@@ -1,28 +1,42 @@
 //! 时间模块：度量 / 缩放 / 固定步长 / 节流——四个正交原语
 //!
-//! 时间源适配本项目平台层：基于 **SDL3 timer**（[`sdl3::timer`]），
-//! 与窗口/音频同属一个跨平台平台层——base 的依赖底座就是 SDL3 + wgpu，
-//! 时间随之走 SDL3 是依赖一致性的自然选择。
+//! 时间源直接基于 **`std::time::Instant`**（OS 高精度单调钟：Windows QPC /
+//! 类 Unix CLOCK_MONOTONIC），不依赖任何平台库——时间模块因此对窗口/音频
+//! 后端完全中立，随渲染层同进退。
 //!
-//! - 高精度读数：`performance_counter / performance_frequency`
-//!   （OS 高精度单调钟：Windows QPC / 类 Unix CLOCK_MONOTONIC），
-//!   不受毫秒粒度限制
-//! - 节流睡眠：`timer::delay`（粗粒度）+ 末段自旋补齐的混合策略，
+//! - 高精度读数：`Instant`，不受毫秒粒度限制
+//! - 节流睡眠：`thread::sleep`（粗粒度）+ 末段自旋补齐的混合策略，
 //!   规避 OS 定时器粒度超调
-//! - 时间原点：SDL 库/子系统初始化时刻——**须在 SDL 初始化后创建 `Clock`**
-//!   （base 工程内 SDL 总是最先初始化，此约束自然满足）
+//! - 时间原点：进程内首次调用 [`now()`] 的时刻（懒初始化固定原点），
+//!   无需任何先行初始化；`wasm32-unknown-unknown` 上无阻塞睡眠，
+//!   [`sleep_until`] 为 no-op（节流权归浏览器 rAF）
 //!
 //! 与 pygame.time 的关系：本模块是底层原语，**不**对齐其毫秒语义与
 //! 事件定时器（`add_timer` 对应物属事件系统范畴），那些留给 `pygame/` 兼容层。
 
-use sdl3::timer;
 use std::time::Duration;
 
-/// SDL 高精度单调时钟读数（自 SDL 初始化起的时长）
+/// 高精度单调时钟读数（自进程内固定原点起的时长）
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 fn now() -> Duration {
-    let counter = timer::performance_counter() as f64;
-    let freq = timer::performance_frequency() as f64;
-    Duration::from_secs_f64(counter / freq)
+    // Web（unknown-unknown）：std Instant 不可用，走 performance.now()
+    //（毫秒 f64，页面相对时间，单调性满足帧计量需求）
+    let ms = web_sys::window()
+        .expect("Web 环境无全局 window")
+        .performance()
+        .expect("Web 环境无 performance")
+        .now();
+    Duration::from_secs_f64(ms / 1000.0)
+}
+
+/// 高精度单调时钟读数（自进程内固定原点起的时长）
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+fn now() -> Duration {
+    use std::sync::OnceLock;
+    use std::time::Instant;
+    // 懒初始化固定原点：保证返回值非负、单调，且与首次调用时机解耦
+    static ORIGIN: OnceLock<Instant> = OnceLock::new();
+    ORIGIN.get_or_init(Instant::now).elapsed()
 }
 
 /// 帧时钟：度量与缩放
@@ -151,12 +165,20 @@ impl Default for Clock {
     }
 }
 
-/// 帧节流原语：睡眠至目标时刻（SDL 时间轴；已过则立即返回）
+/// 帧节流原语：睡眠至目标时刻（本模块时间轴；已过则立即返回）
 ///
-/// 混合策略：剩余 >2ms 时走 `SDL_Delay`（主动少睡 1ms），末段自旋补齐——
+/// 混合策略：剩余 >2ms 时走 `thread::sleep`（主动少睡 1ms），末段自旋补齐——
 /// 规避 OS 定时器粒度（Windows ~15.6ms）造成的帧率超调，精度可达亚毫秒。
 /// 代价是每帧最多 ~2ms 的自旋占用，可接受即用。
+///
+/// `wasm32-unknown-unknown` 上为 no-op：Web 无阻塞睡眠，帧节奏由浏览器
+/// rAF 驱动（见 Step 4 的 web 主循环），`deadline` 仅作标记。
 pub fn sleep_until(deadline: Duration) {
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    {
+        let _ = deadline; // 浏览器 rAF 负责节流，不阻塞主线程
+    }
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
     loop {
         let now = now();
         if now >= deadline {
@@ -164,7 +186,7 @@ pub fn sleep_until(deadline: Duration) {
         }
         let remaining = deadline - now;
         if remaining > Duration::from_millis(2) {
-            timer::delay((remaining - Duration::from_millis(1)).as_millis() as u32);
+            std::thread::sleep(remaining - Duration::from_millis(1));
         } else {
             std::hint::spin_loop();
         }

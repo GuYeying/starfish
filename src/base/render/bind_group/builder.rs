@@ -112,6 +112,22 @@ impl BindGroupBuilder {
         self
     }
 
+    /// 绑定裸纹理视图（外部纹理源直绑口：视频帧等库外创建的纹理）
+    ///
+    /// 与 [`Self::texture_view_array`] 同为裸视图入参——不经库 [`Texture`]
+    /// 包装，供 `Video::texture_view()` 这类外部句柄接入采样管线。
+    pub fn texture_view(mut self, binding: u32, view: Arc<wgpu::TextureView>) -> Self {
+        self.items.push(BindItem {
+            binding,
+            visibility: ShaderStages::FRAGMENT,
+            resource: BindResource::Texture {
+                view,
+            },
+        });
+
+        self
+    }
+
     /// 绑定纹理视图数组（bindless 基础）
     ///
     /// layout 的 count = views.len()；WGSL 侧用 `binding_array<texture_2d<f32>>` 承接。

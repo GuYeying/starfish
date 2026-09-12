@@ -100,14 +100,38 @@ impl SurfaceSettings {
         let format = self.color_format.unwrap_or(caps.formats[0]);
         let alpha_mode = self.alpha_mode.unwrap_or(caps.alpha_modes[0]);
 
+        // usage / present_mode 走"许愿 → 掩码"：与 caps 实际能力取交集，
+        // 请求超出时自动剥离/回落——WebGL2 表面通常只支持
+        // RENDER_ATTACHMENT|TEXTURE_BINDING 与 Fifo，硬请求会炸 configure
+        let usage = {
+            let masked = self.usage & caps.usages;
+            if masked.is_empty() {
+                wgpu::TextureUsages::RENDER_ATTACHMENT
+            } else {
+                masked
+            }
+        };
+        let present_mode = if caps.present_modes.contains(&self.present_mode) {
+            self.present_mode
+        } else {
+            wgpu::PresentMode::Fifo
+        };
+
+        // view_formats：桌面允许 Unorm↔Srgb 重解释视图；WebGL2 交换链不支持
+        // 视图格式重解释，configure 校验直接失败 → Web 上置空
+        #[cfg(target_arch = "wasm32")]
+        let view_formats = Vec::new();
+        #[cfg(not(target_arch = "wasm32"))]
+        let view_formats = Self::default_view_formats(format);
+
         SurfaceConfiguration {
             desired_maximum_frame_latency: self.desired_maximum_frame_latency,
-            present_mode: self.present_mode,
+            present_mode,
             alpha_mode,
             format,
-            usage: self.usage,
+            usage,
             color_space: self.color_space,
-            view_formats: Self::default_view_formats(format),
+            view_formats,
             width: size.0.max(1),
             height: size.1.max(1),
         }
