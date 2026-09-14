@@ -310,8 +310,8 @@ starfish = { git = "https://github.com/GuYeying/starfish", default-features = fa
 - **Phase 3 · 接口文档**：reference/ 设计笔记体系已起步（视频跨平台架构笔记已就位），
   持续补全各模块文档，让开发者和 AI 更容易了解该库
 - **Phase 4 · Pygame 风格高层 API**：窗口、事件、图像、字体、音频、时间等通用接口封装
-- **设备接口第二批**：摄像头（活水视频源，复用 video 的 NV12→纹理管线）→
-  GPS（统一 Permission 权限模型，五平台后端）
+- **设备接口第二批（已取消）**：摄像头/GPS——评估结论：与硬件/系统强绑定的
+  能力，跨平台抽象层不如针对目标平台直调 API；此类需求出现时按平台直采
 - **Phase 5 · PyO3 分层绑定**：面向 free-threaded Python 3.14t 契约，分批导出
   窗口、纹理、网格、音频等核心能力
 - **Phase 6 · pygame 规范接口文档**：对齐规范、注明与 pygame 的细致差异
@@ -322,7 +322,7 @@ starfish = { git = "https://github.com/GuYeying/starfish", default-features = fa
 
 - **引擎安卓引导立项**（android-activity + gradle 模板 + ndk_context 注入）——
   解锁 video/Android 实测、Android 手柄输入与后续 Android 侧设备能力
-- GPS / 摄像头的移动端实现依赖统一权限模型设计
+- ~~GPS / 摄像头~~：已取消（见设备接口第二批条目）
 
 ---
 

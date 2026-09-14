@@ -6,7 +6,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::{yuv, DecodeBackend, DecodedFrame, FramePixels, Poll, VideoError};
+use crate::base::yuv;
+use super::{DecodeBackend, DecodedFrame, FramePixels, Poll, VideoError};
 
 /// 视频播放句柄（对象直绑：自带解码状态机与帧纹理）
 pub struct Video {

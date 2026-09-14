@@ -38,9 +38,15 @@ cargo check --no-default-features # 最小核心（渲染/窗口/循环/时间/�
 | `font` | `base/font` | ttf-parser | 无文本渲染 |
 | `video` | `base/video`（六平台硬解） | windows(MF)/gstreamer/objc2系/jni/ndk-context/mp4/js-sys | 不用视频——**Linux 构建因此不再强制要求 gstreamer dev 包** |
 | `gamepad` | `base/gamepad`（手柄状态表） | gilrs（win/linux/mac 原生；wasm 自持 Gamepad API 轮询；android/ios 空实现占位） | 无手柄需求 |
+| `dialog` | `base/dialog`（统一异步对话框；桌面 rfd / Web alert·confirm+文件选择读入内存 / 移动端 robius DocumentPicker） | rfd（桌面）/ robius 系（移动端；**Android 构建需 ANDROID_JAR**） | 无弹窗/文件交互 |
+| `net` | `base/net`（TCP 消息连接/UDP 轮询，`Connection` trait 统一接口，后台线程） | js-sys（仅 wasm WebSocket；**零 tokio**——线程直连） | 无网络需求 |
 
-剔除不影响核心（渲染/窗口/循环/audio 恒参与编译；audio/video/gfx/font 互零引用）。
-示例 06/07/13 已声明 `required-features`，特性未开时自动跳过。
+剔除不影响核心（渲染/窗口/循环/audio 恒参与编译；各可选模块互零引用）。
+示例 06/07/13/14 已声明 `required-features`，特性未开时自动跳过。
+
+**文件 IO 不设库模块**（原 iofi 已移除）：桌面/移动直接用 `std::fs`（标准库
+能力完整），选文件用 `dialog::pick_file`（返回路径或内存内容），Web 用
+`dialog` 读内存 + `net` 间接完成——包装 std 无增值，故不设。
 
 ## 架构
 
