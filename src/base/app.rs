@@ -51,6 +51,10 @@ use winit::event::{ElementState, WindowEvent as WinitEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::PhysicalKey;
 use winit::window::{Window as WinitWindow, WindowId};
+#[cfg(target_os = "android")]
+use winit::platform::android::EventLoopBuilderExtAndroid;
+#[cfg(target_os = "android")]
+use winit::platform::android::activity::AndroidApp;
 
 /// 窗口/循环配置（[`run`] 入参）
 #[derive(Debug, Clone)]
@@ -108,13 +112,10 @@ impl WindowConfig {
 /// 键鼠状态表由引擎从事件流维护——轮询式输入（`ctx.keyboard().is_pressed(..)`）
 /// 与事件式输入并存，对齐 pygame 的 `get_pressed` / `event.get` 双轨。
 ///
-/// 多窗口：[`create_window`](Self::create_window) 运行时创建新窗口（返回
-/// [`InitSlot`]`<Window>`，下一周期物化）；[`windows`](Self::windows) 枚举全部窗口。
+/// **单窗口模型**：引擎持有一个主窗口，`ctx.window()` 即它。
 pub struct Ctx {
-    /// 窗口注册表（句柄即 [`Window`] 本体，Clone 廉价；windows[0] = 主窗）
-    windows: Vec<Window>,
-    /// 待物化的动态窗口请求（需要 ActiveEventLoop，下一周期处理）
-    pending_windows: Vec<PendingWindow>,
+    /// 主窗口（引擎持有，唯一）
+    window: Window,
     keyboard: KeyboardState,
     mouse: MouseState,
     /// 手柄状态表（feature = "gamepad"；每帧帧前刷新，见 [`Self::gamepad`]）
@@ -125,32 +126,9 @@ pub struct Ctx {
 }
 
 impl Ctx {
-    /// 主窗口（windows[0]；单窗口应用的唯一窗口）
+    /// 主窗口（单窗口模型的唯一窗口）
     pub fn window(&self) -> &Window {
-        &self.windows[0]
-    }
-
-    /// 全部窗口（按创建顺序）
-    pub fn windows(&self) -> &[Window] {
-        &self.windows
-    }
-
-    /// 窗口数
-    pub fn window_count(&self) -> usize {
-        self.windows.len()
-    }
-
-    /// 运行时创建新窗口（多窗口）
-    ///
-    /// 窗口创建需要 `ActiveEventLoop`（仅引擎回调内可得），故本方法**登记请求**，
-    /// 返回 [`InitSlot`] 槽位——窗口在下一周期物化并自动填入（与资源惰性初始化
-    /// 同款模式）。物化后触发 [`Application::window_created`]。
-    ///
-    /// Web 注意：每个窗口需指定不同的 `web_canvas_id`（多 canvas）。
-    pub fn create_window(&mut self, cfg: WindowConfig) -> InitSlot<Window> {
-        let slot = InitSlot::new();
-        self.pending_windows.push(PendingWindow { cfg, slot: slot.clone() });
-        slot
+        &self.window
     }
 
     /// 键盘状态表（v1：全局，取最后聚焦窗口）
@@ -174,7 +152,7 @@ impl Ctx {
 
     /// 主窗口客户区尺寸（物理像素）
     pub fn size(&self) -> (u32, u32) {
-        self.windows[0].size()
+        self.window.size()
     }
 
     /// 本帧真实间隔（秒，未缩放）——由引擎时钟在每帧前更新
@@ -193,33 +171,19 @@ impl Ctx {
     }
 }
 
-/// 待物化的动态窗口请求
-struct PendingWindow {
-    cfg: WindowConfig,
-    slot: InitSlot<Window>,
-}
-
-/// 应用 trait：引擎回调的时机表（多窗口）
+/// 应用 trait：引擎回调的时机表（单窗口模型）
 pub trait Application {
-    /// 首个窗口获得**首个有效尺寸**后调用一次：建渲染表面、加载资源。
+    /// 主窗口获得**首个有效尺寸**后调用一次：建渲染表面、加载资源。
     /// Web 上此时 ctx.size() 已可信（早于 GPU 初始化，尺寸竞态从顺序上消除）。
     /// 注意：最早的若干事件（含携带真实尺寸的 Resized）可能先于 start 到达，
     /// 句柄未就绪时跳过即可。
     fn start(&mut self, _ctx: &mut Ctx) {}
 
-    /// 动态创建的窗口物化后调用（首窗由 [`start`](Self::start) 覆盖，不重复触发）
-    fn window_created(&mut self, _win: &Window, _ctx: &mut Ctx) {}
-
     /// 平台事件（每帧前按到达顺序逐个派发；最早的事件可能先于 start）
-    /// `win` = 事件所属窗口
+    /// `win` = 主窗口
     fn event(&mut self, _win: &Window, _event: &WindowEvent, _ctx: &mut Ctx) {}
 
-    /// 窗口销毁后调用：清理该窗口的渲染表面与 GPU 资源
-    /// （最后一个窗口关闭 → 应用退出）
-    fn window_closed(&mut self, _win: &Window, _ctx: &mut Ctx) {}
-
-    /// 帧回调：更新 + 逐窗口渲染提交 + present 在这里
-    /// （[`ctx.windows()`](Ctx::windows) 枚举全部窗口）
+    /// 帧回调：更新 + 渲染提交 + present 在这里
     fn frame(&mut self, ctx: &mut Ctx);
 }
 
@@ -302,11 +266,6 @@ impl<T: 'static> InitSlot<T> {
             *self.slot.borrow_mut() = Some(pollster::block_on(fut));
         }
     }
-
-    /// 引擎内部：直接填入就绪值（动态窗口物化）
-    pub(crate) fn fill(&self, value: T) {
-        *self.slot.borrow_mut() = Some(value);
-    }
 }
 
 /// 运行应用直至 [`Ctx::exit`] 或窗口关闭。**必须在主线程调用。**
@@ -322,9 +281,68 @@ pub fn run(app: impl Application + 'static, config: WindowConfig) {
 }
 
 /// 运行应用直至 [`Ctx::exit`] 或窗口关闭。**必须在主线程调用。**
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
 pub fn run(app: impl Application, config: WindowConfig) -> ! {
     inner_run(app, config)
+}
+
+/// Android 入口：由 `android_main` 调用（应用在 cdylib 中导出 `android_main`，
+/// 拿到 `AndroidApp` 后传给本函数）。`app` = 应用游戏逻辑（impl Application）。
+///
+/// Android 上 winit 经 `android-activity` 驱动事件循环，生命周期（onShow/onHide）
+/// 由 Android AMS 管理，starfish 不做 process::exit（由系统管控进程）。
+#[cfg(target_os = "android")]
+pub fn run_android(android_app: AndroidApp, app: impl Application, config: WindowConfig) {
+    crate::base::rt::mark_main_thread();
+    // 把 ndk-context 里的 Application 换成**真正的 NativeActivity**：
+    // android-activity 初始化时存的是 Application（init.rs get_application），
+    // 而 requestPermissions / getFragmentManager 等 Activity 独有方法在
+    // Application 上不存在——dialog（robius show）与录音权限申请曾因此
+    // 全线失败（实机报 "no non-static method ... on android/app/Application"，
+    // 2026-09-18 探针定位）。Activity 本身也是 Context，既有消费方（video 的
+    // MediaCodec 链路）不受影响。
+    // SAFETY：android-activity 已初始化 ndk-context（持有 Application 全局引用）；
+    // 此处 release 后立刻以同一 VM + NativeActivity 全局引用重初始化，两步之间
+    // 无并发读取（同一线程、启动期）。指针有效性由 android-activity 的全局引用保证。
+    unsafe {
+        ndk_context::release_android_context();
+        ndk_context::initialize_android_context(
+            android_app.vm_as_ptr().cast(),
+            android_app.activity_as_ptr().cast(),
+        );
+    }
+    let event_loop = match winit::event_loop::EventLoop::builder()
+        .with_android_app(android_app)
+        .build()
+    {
+        Ok(l) => l,
+        // 同缓存进程的二次实例（winit 每进程一次 EventLoop 的硬限制，
+        // EVENT_LOOP_CREATED 静态量 Android 上永不复位）：不再 panic 闪退，
+        // 而是干净退出本进程——僵尸进程随之清除，用户下一次点击即正常进入。
+        Err(e) => {
+            eprintln!("[starfish] 二次实例进入（{e:?}），退出残留进程");
+            std::process::exit(0);
+        }
+    };
+    event_loop.set_control_flow(ControlFlow::Poll);
+    let mut adapter = Adapter {
+        app,
+        config,
+        ctx: None,
+        clock: Clock::new(),
+        event_buf: Vec::with_capacity(16),
+        started: false,
+        start_wait: 0,
+    };
+    let _result = event_loop.run_app(&mut adapter);
+    drop(adapter);
+    // 事件循环结束 = 应用语义上的"退出"。Android 系统此时只 finish Activity、
+    // 保留缓存进程，而 winit 每进程仅允许创建一次 EventLoop——用户从桌面图标
+    // 再进时，系统在同一缓存进程里起第二个 activity 实例，二次 android_main
+    // 必然 RecreationAttempt panic（实测：返回退出后再点图标闪退，后台划掉才
+    // 正常）。因此这里显式收掉整个进程，对齐桌面"run 返回即进程结束"语义
+    //（游戏退出即杀进程在 Android 生态是常规做法；drop 已先行清理音频流等）。
+    std::process::exit(0);
 }
 
 fn inner_run<A: Application>(app: A, config: WindowConfig) -> ! {
@@ -393,8 +411,7 @@ impl<A: Application> ApplicationHandler for Adapter<A> {
             .create_window(build_attrs(&self.config))
             .expect("窗口创建失败");
         self.ctx = Some(Ctx {
-            windows: vec![Window::from_winit(winit_window)],
-            pending_windows: Vec::new(),
+            window: Window::from_winit(winit_window),
             keyboard: KeyboardState::default(),
             mouse: MouseState::default(),
             #[cfg(feature = "gamepad")]
@@ -407,18 +424,18 @@ impl<A: Application> ApplicationHandler for Adapter<A> {
         // 中"首个有效尺寸"时执行（见下），让 GPU/服务以正确尺寸初始化，
         // 从顺序上消除尺寸竞态；request_redraw 踢第一脚启动事件循环。
         let ctx = self.ctx.as_mut().unwrap();
-        ctx.windows[0].request_redraw();
+        ctx.window.request_redraw();
     }
 
     fn window_event(&mut self, _event_loop: &ActiveEventLoop, id: WindowId, event: WinitEvent) {
         let Some(ctx) = self.ctx.as_mut() else {
             return;
         };
-        // 多窗口：按 WindowId 路由到对应窗口；未知窗口忽略
-        let Some(pos) = ctx.windows.iter().position(|w| w.winit().id() == id) else {
+        // 单窗口：非主窗事件忽略
+        if ctx.window.winit().id() != id {
             return;
-        };
-        let win = ctx.windows[pos].clone();
+        }
+        let win = ctx.window.clone();
 
         // 状态表更新 + 事件翻译（一次 winit 事件可产生多个语义事件，
         // 如 KeyDown + TextInput）
@@ -428,15 +445,13 @@ impl<A: Application> ApplicationHandler for Adapter<A> {
             self.app.event(&win, ev, ctx);
         }
 
-        // 多窗口关闭语义：CloseRequested = 销毁该窗口（应用在此前的 event
-        // 派发里已收到收尾通知）；从注册表移除并回调 window_closed；
-        // 最后一个窗口关闭 → 应用退出
-        if self.event_buf.iter().any(|e| matches!(e, WindowEvent::CloseRequested)) {
-            let closed = ctx.windows.remove(pos);
-            self.app.window_closed(&closed, ctx);
-            if ctx.windows.is_empty() {
-                ctx.exit = true; // 最后一窗关闭 → 应用退出
-            }
+        // 关闭语义：主窗口关闭 → 应用退出
+        if self
+            .event_buf
+            .iter()
+            .any(|e| matches!(e, WindowEvent::CloseRequested))
+        {
+            ctx.exit = true;
         }
     }
 
@@ -449,31 +464,25 @@ impl<A: Application> ApplicationHandler for Adapter<A> {
             return;
         }
 
-        // ── 物化动态窗口请求（窗口创建需要 ActiveEventLoop，仅回调内可得）──
-        let pending = std::mem::take(&mut ctx.pending_windows);
-        for p in &pending {
-            match event_loop.create_window(build_attrs(&p.cfg)) {
-                Ok(winit_window) => {
-                    let win = Window::from_winit(winit_window);
-                    p.slot.fill(win.clone());
-                    ctx.windows.push(win.clone());
-                    self.app.window_created(&win, ctx);
-                }
-                Err(e) => eprintln!("[starfish] 窗口创建失败: {e}"),
-            }
-        }
-
         // ── 启动门：等首个有效窗口尺寸，再执行 app.start ──
         // Web 上真实尺寸由 ResizeObserver 异步送达（桌面在窗口创建后立即可得）。
         // 让事件先跑起来、尺寸先就位，GPU/服务再以正确尺寸初始化——
         // 尺寸竞态从顺序上消除（自愈仅作兜底）。等待期保持 rAF 轮询；
         // 超时（60 帧仍 0×0，如极端无头环境）按当前尺寸兜底启动。
         if !self.started {
+            // Android 追加硬门：winit 的 inner_size 在该平台返回显示器尺寸（恒非零，
+            // 探不出真窗口就绪）；ANativeWindow 由 onNativeWindowCreated 异步送达，
+            // 早于它建 GPU 表面会拿空句柄 → configure 报 "Invalid surface"。
+            // 句柄可用性（Err=Unavailable）即就绪信号；不设兜底超时——
+            // 可见 Activity 的 native window 必然到达（实测崩溃修复，2026-09-17）。
+            #[cfg(target_os = "android")]
+            if raw_window_handle::HasWindowHandle::window_handle(&ctx.window).is_err() {
+                ctx.window.request_redraw();
+                return;
+            }
             if ctx.size() == (0, 0) && self.start_wait < 60 {
                 self.start_wait += 1;
-                for w in &ctx.windows {
-                    w.request_redraw();
-                }
+                ctx.window.request_redraw();
                 return;
             }
             self.started = true;
@@ -488,13 +497,11 @@ impl<A: Application> ApplicationHandler for Adapter<A> {
         #[cfg(feature = "gamepad")]
         ctx.gamepad.poll();
         self.app.frame(ctx);
-        for w in &ctx.windows {
-            w.request_redraw();
-        }
+        ctx.window.request_redraw();
     }
 }
 
-/// WindowConfig → winit 窗口属性（主窗与动态窗口共用）
+/// WindowConfig → winit 窗口属性（主窗）
 fn build_attrs(cfg: &WindowConfig) -> winit::window::WindowAttributes {
     let mut attrs = WinitWindow::default_attributes()
         .with_title(cfg.title.clone())
@@ -524,6 +531,17 @@ fn build_attrs(cfg: &WindowConfig) -> winit::window::WindowAttributes {
 fn translate(event: &WinitEvent, ctx: &mut Ctx, out: &mut Vec<WindowEvent>) {
     match event {
         WinitEvent::KeyboardInput { event: key, .. } => {
+            // Android 返回键：NativeActivity 的输入队列接管按键后，系统默认的
+            // "返回 = 结束 Activity"不再生效 → 引擎把 BrowserBack 翻译成
+            // CloseRequested，对齐"窗口关闭 = 应用退出"语义（桌面 × 不受影响；
+            // 实测卓易通/鸿蒙，2026-09-17）
+            #[cfg(target_os = "android")]
+            if key.logical_key == winit::keyboard::Key::Named(winit::keyboard::NamedKey::BrowserBack) {
+                if key.state == ElementState::Pressed {
+                    out.push(WindowEvent::CloseRequested);
+                }
+                return;
+            }
             if let PhysicalKey::Code(code) = key.physical_key {
                 let k = map_key(code);
                 match key.state {
@@ -592,7 +610,7 @@ fn translate(event: &WinitEvent, ctx: &mut Ctx, out: &mut Vec<WindowEvent>) {
             out.push(WindowEvent::MouseWheel { x, y });
         }
         WinitEvent::CloseRequested => {
-            // 多窗口语义：关闭该窗口（Adapter 负责从注册表移除并回调
+            // 关闭语义：
             // window_closed；最后一窗关闭 → 应用退出）。仍派发事件供应用收尾。
             out.push(WindowEvent::CloseRequested);
         }

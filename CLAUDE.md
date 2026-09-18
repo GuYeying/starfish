@@ -38,9 +38,19 @@ cargo check --no-default-features # 最小核心（渲染/窗口/循环/时间/�
 | `font` | `base/font` | ttf-parser | 无文本渲染 |
 | `video` | `base/video`（六平台硬解） | windows(MF)/gstreamer/objc2系/jni/ndk-context/mp4/js-sys | 不用视频——**Linux 构建因此不再强制要求 gstreamer dev 包** |
 | `gamepad` | `base/gamepad`（手柄状态表） | gilrs（win/linux/mac 原生；wasm 自持 Gamepad API 轮询；android/ios 空实现占位） | 无手柄需求 |
+| `dialog` | `base/dialog`（统一异步对话框；桌面 rfd / Web alert·confirm+文件选择读入内存 / 移动端 robius DocumentPicker） | rfd（桌面）/ robius 系（移动端；**Android 构建需 ANDROID_JAR**） | 无弹窗/文件交互 |
+| `net` | `base/net`（TCP 消息连接/UDP 轮询，`Connection` trait 统一接口，后台线程） | js-sys（仅 wasm WebSocket；**零 tokio**——线程直连） | 无网络需求 |
+| `io` | `base/io`（统一异步 read/write/exists；原生 std::fs / Web fetch） | 无新增依赖（web-sys 特性已并入 wasm 段） | 只用 std::fs 的桌面项目 |
 
-剔除不影响核心（渲染/窗口/循环/audio 恒参与编译；audio/video/gfx/font 互零引用）。
-示例 06/07/13 已声明 `required-features`，特性未开时自动跳过。
+剔除不影响核心（渲染/窗口/循环/audio 恒参与编译；各可选模块互零引用）。
+示例 06/07/13/14 已声明 `required-features`，特性未开时自动跳过。
+
+**文件 IO 模块（`base/io.rs`，feature `io`，2026-09-18 重启旧 iofi 场景）**：
+统一异步 API `read / read_text / write / write_text / exists`——原生 std::fs
+直实现（阻塞包 async 壳），Web fetch 直实现（GET 读 / POST 保存，path 即
+URL）。与批次 14 撤销的 iofi 的区别：Web 有 fetch 真实现，模块价值回归。
+其余文件管理操作（list_dir/create_dir/删除等）v1 不设：原生用 std::fs，
+Web fetch 无对应语义。
 
 ## 架构
 
@@ -67,7 +77,7 @@ impl Application for App {
 ```
 
 - 事件模型（`base/window/event.rs`）**平台中立**：自有 `WindowEvent`/`KeyCode`/`MouseButton` 枚举，后端（winit）翻译；pygame 常量（`K_w` 等）未来由 pygame/ 层做别名。
-- **多窗口**：`ctx.create_window(cfg)` 运行时创建（返回 `InitSlot<Window>`，下一周期物化）；事件按窗路由（`event` 首参为窗口句柄）；`window_created`/`window_closed` 钩子；最后一窗关闭 = 退出。渲染侧每窗一个 `RenderSurface`（`surface_from_context` 共享设备）。键鼠状态 v1 全局（最后聚焦窗）。
+- **单窗口模型**（2026-09-14 定稿，多窗口剔除）：引擎持一个主窗口，`ctx.window()` 直取；窗口关闭（点 ×）= 应用退出。渲染侧 `RenderSurface` 与窗口 1:1。键鼠状态全局。
 - 键鼠状态表由引擎维护（`ctx.keyboard().is_pressed(..)` 轮询 + 事件双轨，对齐 pygame）。
 - 窗口关闭（CloseRequested）v1 语义：自动退出，不可否决。
 - 选型记录：放弃"Python 持 while 的 poll 泵"双门设计，统一单门回调；未来 PyO3 层用生成器门面（每帧一个 `yield`）包装回 pygame 风格。
@@ -119,6 +129,28 @@ cd web && python -m http.server 8000            # 浏览器打开 http://localho
 4. **view_formats（Unorm↔Srgb 重解释）WebGL2 不支持**：`SurfaceSettings::to_wgpu` 已在 Web 上置空并做 usage/present_mode 掩码；WebGL2 交换链格式仅 `[Rgba8Unorm, Rgba8UnormSrgb, Rgba16Float]`。
 5. **未捕获错误处理器**（render_entry.rs wasm 分支）沿 source 链展开完整原因——Web 上 wgpu 错误直接给精确信息，别删。
 6. 诊断工具链：无头 `msedge --headless=new --enable-logging=stderr --virtual-time-budget=6000 --screenshot=x.png <url>` + Python 裸解析 PNG 像素，可闭环定位渲染问题。启动时控制台的 "Using exceptions for control flow" 是 winit 既定机制，非错误。
+7. **无头虚拟时间会冻结 `ctx.delta()`（实测 2026-09-18）**：`--virtual-time-budget` 下 rAF 自续链（每帧 request_redraw）且无外部真实事件解锁时，`performance.now()` 帧间不前进 → delta≡0 → 视频时钟/一切 dt 累计停滞，且**无任何报错**。虚拟时间模式只适用于纯渲染类静态验证；**时间相关测试（视频/动画/计时）用存活模式**：不带 budget/screenshot 启动 `msedge --headless=new <url>`，`--enable-logging=stderr` 收割 console 流（诊断输出必须走 `console_log`，wasm 上 `println!` 无处可去），真实时间等足后 `taskkill /T /F` 收尾。`--screenshot` 相对路径会落到 Edge 版本目录，一律用绝对路径。
+
+## Android 构建（arm64-v8a，已打通）
+
+> 完整指南（前置/分步/新示例接入/APK 模板）见 `reference/android构建与运行指南.md`。
+
+```bash
+cargo xtask list                                            # 全部示例 + Android 支持注册表
+cargo xtask android 03_texture                              # 自动解析 *_android；构建→打包→部署
+cargo xtask android 16_dialog --build                       # 仅出 APK（target/android-apk/）
+cargo xtask android 15_empty_window --abi x86_64            # 模拟器 ABI
+cargo xtask android 15_empty_window --no-default-features --features dialog,gfx   # 特性勾选
+```
+
+- 工具本体 = `xtask/` crate（xtask 模式，Rust 原生跨平台；特性→Android 支持登记在
+  `FEATURE_ANDROID_SUPPORT` 表，**新增模块加一行**）。旧 bash 脚本 `scripts/android_run_example.sh`
+  兼容保留。
+- winit 走 `android-native-activity`：APK 用系统 `NativeActivity` 模板（`android/AndroidManifest.xml`），`android_main` → `run_android` 与桌面回调一致。
+- **API 26 是硬性下限**（cpal 的 AAudio；cargo-ndk 默认 21 会报找不到 `libaaudio`），且 platform flag 是大写 `-P`/`--platform`。
+- Android 示例采用**同源双注册**：同一文件注册两条 `[[example]]`（桌面 bin + `*_android` cdylib；bin 与 cdylib 不能混用），文件内 `#[unsafe(no_mangle)] fn android_main`（cfg 分家）。资源 cfg 分家：桌面读 `resources/`，Android 内嵌/私有目录落盘。
+- dialog 需要 APK 内 **classes.dex**（robius 的 FilePickerFragment）+ `hasCode="true"`——xtask 自动并入。
+- Rust 日志/panic 进 logcat tag `RustStdoutStderr`：`adb logcat -s RustStdoutStderr`。
 
 ## 文档惯例
 

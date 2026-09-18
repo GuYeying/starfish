@@ -42,11 +42,9 @@
     <td align="center">07_draw_text — 字体图集文本渲染</td>
   </tr>
   <tr>
-    <td><img src="./assets/multi_window.png" width="400"/></td>
     <td><img src="./assets/video_decode.png" width="400"/></td>
   </tr>
   <tr>
-    <td align="center">12_multi_window — 运行时多窗口</td>
     <td align="center">13_video_decode — 视频硬解播放（六平台）</td>
   </tr>
 </table>
@@ -80,8 +78,6 @@
 - **查询**：时间戳 / 遮挡查询集创建、解析与回读（profiler 地基）
 - **Uniform + Storage Buffer**：StructLayout 自动对齐、dirty 跟踪、实时更新
 - **Compute Pipeline**：计算着色器管线 + dispatch
-- **多窗口**：运行时 `ctx.create_window(cfg)` 创建（InitSlot 惰性物化），
-  `surface_from_context` 共享设备；事件按窗路由
 
 ### 🎬 视频硬解（六平台）
 
@@ -137,13 +133,13 @@
 
 - **引擎持循环**：`run(app, WindowConfig)` 唯一入口，`Application` 三回调
   （start / event / frame）；桌面 Poll、Web Wait+rAF 双节流策略
-- 全屏、无边框、窗口模式切换；多窗口运行时创建
+- 全屏、无边框、窗口模式切换
 - 鼠标锁定、相对模式（FPS 相机）、高 DPI 支持
 - **交换链自愈**：尺寸竞态免疫（Web 初始 0×0 场景从顺序上消除）
 
 ### 🧩 特性裁剪（Cargo features）
 
-- 默认 `["gfx", "font", "video", "gamepad"]` 全包含，开箱即用
+- 默认 `["gfx", "font", "video", "gamepad", "dialog", "net", "io"]` 全包含，开箱即用
 - 不需要的场景可剔除：`--no-default-features` 或按特性组合——
   **剔除 `video` 后 Linux 构建不再要求 gstreamer dev 系统包**
 
@@ -159,7 +155,7 @@ starfish/
 │   ├── render/             #   渲染进阶（03/04/05）
 │   ├── draw/               #   几何与文本（06/07）
 │   ├── audio/              #   音频（08/09/10）
-│   ├── platform/           #   平台能力（11 Web / 12 多窗口）
+│   ├── platform/           #   平台能力（11 Web / 16 对话框 / 17-18 探针）
 │   └── media/              #   媒体与设备（13 视频 / 14 手柄）
 ├── resources/              # 资源文件（纹理、着色器、字体、音频、视频）
 ├── doc/log/                # 更新日志（按日归档）
@@ -173,7 +169,11 @@ starfish/
     │   ├── font/           #   字体（feature = "font"）
     │   ├── audio/          #   音频（混音器/流式/录音/解码器）
     │   ├── video/          #   视频硬解（feature = "video"；windows/linux/apple/web/android 后端）
+    │   ├── camera/         #   摄像头（feature = "camera"；已移除——决策记录见 doc/log）
     │   ├── gamepad.rs      #   手柄状态表（feature = "gamepad"）
+    │   ├── dialog.rs       #   文件打开/保存对话框（feature = "dialog"）
+    │   ├── net.rs          #   网络 TCP 消息 + UDP（feature = "net"）
+    │   ├── yuv.rs          #   NV12 → RGBA 转换共享层（video/camera 系）
     │   ├── time/           #   时间（Clock/FixedTimestep/节流）
     │   ├── window/         #   窗口封装 + 事件模型（WindowEvent/键鼠状态表）
     │   ├── web.rs          #   Web 入口辅助（console_log / panic hook）
@@ -256,9 +256,10 @@ starfish = { git = "https://github.com/GuYeying/starfish", default-features = fa
 | 09_play_music_stream | 流式 BGM + 排队切歌 | `music_load_file`, `music_queue_file`, `music_fade_*` |
 | 10_record_mic | 麦克风录音 → WAV | `AudioRecorder::new`, `save_wav`, `dropped` |
 | 11_web_triangles | Web(wasm32-unknown-unknown) 双后端 | `web_entry!`, `with_web_canvas_id` |
-| 12_multi_window | 运行时多窗口 | `ctx.create_window`, `window_created/closed` |
 | 13_video_decode | 视频硬解播放（六平台） | `VideoModule::open`, `video.update(dt)`, `texture_view` |
 | 14_gamepad | 手柄状态轮询 | `ctx.gamepad()`, `is_pressed`, `just_pressed`, `axis` |
+| 15_empty_window | 跨平台空窗口模板（桌面 + Android 同源双注册） | `run_android`, `FORCE_BACKEND` 后端可视化, `surface.resize` |
+| 16_dialog | 文件选择/保存对话框（桌面 rfd / Android robius） | `dialog::pick_file`, `dialog::save_bytes`, 文本上屏诊断 |
 
 ---
 
@@ -282,6 +283,51 @@ starfish = { git = "https://github.com/GuYeying/starfish", default-features = fa
 
 ---
 
+## 🧪 跨平台进度与测试
+
+> 2026-09-18 更新。状态含义：✅ 已验证可用 · ⚠️ 可用但受限 · ⏳ 待验证（实现就绪，未实测）· ❌ 明确不支持
+
+### 模块 × 平台矩阵
+
+| 模块 | Windows | Linux | macOS | Web | Android（arm64） | 鸿蒙 NEXT（卓易通） |
+|---|:-:|:-:|:-:|:-:|:-:|:-:|
+| 渲染系统 | ✅ | ✅ | ⏳ | ✅ | ✅ | ✅ |
+| 窗口 / 循环模型 | ✅ | ✅ | ⏳ | ✅ | ✅ | ✅ |
+| 键鼠 / 触摸输入 | ✅ | ✅ | ⏳ | ✅ | ✅ | ✅ |
+| 音频播放（混音/流式） | ✅ | ✅ | ⏳ | ✅ | ✅ | ✅ |
+| 录音 | ✅ | ✅ | ⏳ | ✅ | ✅ | ✅ |
+| 字体（图集文本） | ✅ | ✅ | ⏳ | ✅ | ✅ | ✅ |
+| 几何绘制（gfx） | ✅ | ✅ | ⏳ | ✅ | ✅ | ✅ |
+| 视频硬解 | ✅ MF | ✅ GStreamer | ⏳ VideoToolbox | ✅ WebCodecs | ✅ MediaCodec | ✅ MediaCodec |
+| 手柄 | ✅ gilrs | ✅ gilrs | ⏳ gilrs | ⏳ Gamepad API | ❌ 空实现占位 | ❌ 空实现占位 |
+| 对话框（文件选择/保存） | ✅ rfd | ⏳ rfd(GTK3) | ⏳ rfd | ✅ input[file] | ✅ | ✅ |
+| 网络（TCP / UDP） | ✅ | ⏳ | ⏳ | ⚠️ WS ✅ 实测 / UDP ❌ | ✅ 实测 | ✅ 实测 |
+| 文件读取 / 保存（io） | ✅ std::fs | ✅ std::fs | ⏳ std::fs | ✅ fetch | ✅ std::fs | ✅ std::fs |
+| 构建工具（APK 出包） | — | — | — | — | ✅ xtask 一键 | ✅ 卓易通直装 |
+
+> Android / 鸿蒙列的验证环境 = **卓易通容器**（鸿蒙 NEXT，原生 arm64 Android 运行时）；
+> 渲染/循环/触摸/返回退出均为实机确认，标准 Android 真机预期等同或更好。
+
+### 自动化测试
+
+| 项目 | 结果 |
+|---|---|
+| `cargo test --lib`（纯逻辑测试） | **55 passed / 0 failed** |
+| `cargo check --examples`（桌面全示例） | ✅ 零 error |
+| `cargo check --lib --target aarch64-linux-android`（Android 目标） | ✅ 零 error |
+| 14 个 Android 示例 APK 全量出包（含签名校验） | ✅ |
+
+### 构建工具
+
+```bash
+cargo xtask list                              # 全部示例 + Android 支持注册表
+cargo xtask android 03_texture                # 编译→打包→签名→部署 一键完成
+cargo xtask android 13_video_decode --orientation portrait   # 横竖屏可选
+cargo xtask android 15_empty_window --no-default-features --features dialog,gfx   # 特性勾选
+```
+
+---
+
 ## 🗺️ 开发路线图
 
 > 依据 `doc/log/` 批次记录（2026-09-08 ~ 09-12）与 `doc/starfish_开发进度记录.md` 整理。
@@ -297,11 +343,14 @@ starfish = { git = "https://github.com/GuYeying/starfish", default-features = fa
 | **Cargo features 场景化裁剪**（gfx / font / video 可剔除，默认全包含） | 2026-09-11 |
 | **设备接口 · 手柄**（gilrs 桌面三平台 + Web 自持轮询；Android/iOS 空占位） | 2026-09-11 |
 | **文档体系**（视频跨平台架构笔记 / 开发进度活文档 / 示例分类目录化） | 2026-09-12 |
+| **Android 全链路打通**：NativeActivity 无 Java 模板 + 同源双注册示例（12 个 APK）+ 卓易通（鸿蒙 NEXT）实机验证（渲染/循环/返回退出/纹理/3D）+ 引擎级修复（view_formats 掩码 / 启动门句柄探测 / draw 索引路由） | 2026-09-17 |
+| **xtask 构建工具**：`cargo xtask android <示例>` 一键出包（特性勾选 / 横竖屏 / ABI 可选 / dex 自动并入） | 2026-09-17 |
 
 ### 🚧 进行中
 
-- **设备实机验证清单**：Ubuntu(GStreamer) / macOS(VideoToolbox) / Web / Android 四路后端为
-  类型级验证（盲写），按 `doc/starfish_开发进度记录.md` 清单逐台过
+- **设备实机验证清单**：Linux(GStreamer) / macOS(VideoToolbox) 视频路为类型级验证，
+  按 `doc/starfish_开发进度记录.md` 清单逐台过；Android 侧渲染/循环已卓易通实机验证，
+  dialog（容器 SAF 受限）与录音授权框依赖真机 Android 环境
 - **video v2 体验优化**：NV12→GPU 采样着色器转换（CPU 转换成本归零）、
   Web 字节范围流式加载、音轨注入（待 mixer 流声部 API）
 
@@ -310,8 +359,8 @@ starfish = { git = "https://github.com/GuYeying/starfish", default-features = fa
 - **Phase 3 · 接口文档**：reference/ 设计笔记体系已起步（视频跨平台架构笔记已就位），
   持续补全各模块文档，让开发者和 AI 更容易了解该库
 - **Phase 4 · Pygame 风格高层 API**：窗口、事件、图像、字体、音频、时间等通用接口封装
-- **设备接口第二批**：摄像头（活水视频源，复用 video 的 NV12→纹理管线）→
-  GPS（统一 Permission 权限模型，五平台后端）
+- **设备接口第二批（已取消）**：摄像头/GPS——评估结论：与硬件/系统强绑定的
+  能力，跨平台抽象层不如针对目标平台直调 API；此类需求出现时按平台直采
 - **Phase 5 · PyO3 分层绑定**：面向 free-threaded Python 3.14t 契约，分批导出
   窗口、纹理、网格、音频等核心能力
 - **Phase 6 · pygame 规范接口文档**：对齐规范、注明与 pygame 的细致差异
@@ -320,9 +369,10 @@ starfish = { git = "https://github.com/GuYeying/starfish", default-features = fa
 
 ### ⛔ 阻塞项（前置依赖）
 
-- **引擎安卓引导立项**（android-activity + gradle 模板 + ndk_context 注入）——
-  解锁 video/Android 实测、Android 手柄输入与后续 Android 侧设备能力
-- GPS / 摄像头的移动端实现依赖统一权限模型设计
+- ~~**引擎安卓引导立项**（android-activity + gradle 模板 + ndk_context 注入）~~
+  **已解除（2026-09-17）**：android-activity 引导 + NativeActivity 模板 +
+  xtask 一键打包已落地（无需 gradle），Android 实机验证通道全面打开
+- ~~GPS / 摄像头~~：已取消（见设备接口第二批条目）
 
 ---
 

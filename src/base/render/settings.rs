@@ -95,6 +95,7 @@ impl SurfaceSettings {
         self,
         caps: &SurfaceCapabilities,
         size: &(u32, u32),
+        downlevel_caps: &wgpu::DownlevelCapabilities,
     ) -> SurfaceConfiguration {
         // format/alpha_mode 依赖 caps 运行时数据，只能保留 Option
         let format = self.color_format.unwrap_or(caps.formats[0]);
@@ -117,12 +118,21 @@ impl SurfaceSettings {
             wgpu::PresentMode::Fifo
         };
 
-        // view_formats：桌面允许 Unorm↔Srgb 重解释视图；WebGL2 交换链不支持
-        // 视图格式重解释，configure 校验直接失败 → Web 上置空
+        // view_formats（Unorm↔Srgb 重解释视图）需 DownlevelFlags::SURFACE_VIEW_FORMATS：
+        // 桌面 Vulkan/DX12/Metal 支持；GLES/WebGL 与 Android Vulkan 均不支持
+        // （wgpu 明确标注），configure 校验直接失败 → Web 恒置空（坑位 4），
+        // native 按适配器能力运行时掩码（实测：Android 上未掩码时 configure 直接 panic）
         #[cfg(target_arch = "wasm32")]
         let view_formats = Vec::new();
         #[cfg(not(target_arch = "wasm32"))]
-        let view_formats = Self::default_view_formats(format);
+        let view_formats = if downlevel_caps
+            .flags
+            .contains(wgpu::DownlevelFlags::SURFACE_VIEW_FORMATS)
+        {
+            Self::default_view_formats(format)
+        } else {
+            Vec::new()
+        };
 
         SurfaceConfiguration {
             desired_maximum_frame_latency: self.desired_maximum_frame_latency,

@@ -1,5 +1,6 @@
 pub mod app;
 pub mod resources;
+pub mod yuv;
 pub mod time;
 pub mod render;
 pub mod color;
@@ -13,6 +14,12 @@ pub mod font;
 pub mod video;
 #[cfg(feature = "gamepad")]
 pub mod gamepad;
+#[cfg(feature = "dialog")]
+pub mod dialog;
+#[cfg(feature = "net")]
+pub mod net;
+#[cfg(feature = "io")]
+pub mod io;
 pub mod web;
 pub mod window;
 mod rt;

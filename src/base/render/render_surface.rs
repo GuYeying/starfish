@@ -50,13 +50,14 @@ impl RenderSurface{
         size:&(u32, u32),
         surface_settings: SurfaceSettings,
         caps: &SurfaceCapabilities,
+        downlevel_caps: &wgpu::DownlevelCapabilities,
 
     )->Self{
 
         let depth_format = surface_settings.depth_format.unwrap_or_else( || wgpu::TextureFormat::Depth24Plus);
         // 先读出 MSAA 采样数（to_wgpu 按值消费 settings）
         let sample_count = surface_settings.sample_count.max(1);
-        let config = surface_settings.to_wgpu(caps, size);
+        let config = surface_settings.to_wgpu(caps, size, downlevel_caps);
 
 
         // ==============================================

@@ -14,16 +14,16 @@
 
 use std::time::Duration;
 
-use gst::prelude::*;
+use gstreamer::prelude::*;
 
 use super::{DecodedFrame, DecodeBackend, FramePixels, Poll, VideoError};
 
 /// 逐候选硬解器建管线并推到 PLAYING（含协商），失败返回 None 由调用方换下一个
-fn try_build_pipeline(hw_factory: &gst::ElementFactory, path: &str) -> Option<GstPipeline> {
-    gst::init().ok()?;
+fn try_build_pipeline(hw_factory: &gstreamer::ElementFactory, path: &str) -> Option<GstPipeline> {
+    gstreamer::init().ok()?;
 
-    let make = |factory: &str, err: &str| -> Option<gst::Element> {
-        gst::ElementFactory::make(factory)
+    let make = |factory: &str, err: &str| -> Option<gstreamer::Element> {
+        gstreamer::ElementFactory::make(factory)
             .build()
             .map_err(|_| err.to_string())
             .ok()
@@ -39,8 +39,10 @@ fn try_build_pipeline(hw_factory: &gst::ElementFactory, path: &str) -> Option<Gs
     let hwdec = hw_factory.create().build().ok()?;
     let videoconvert = make("videoconvert", "缺少 gst-plugins-base（videoconvert）")?;
 
-    let caps = gst::Caps::new_simple("video/x-raw", &[("format", &"NV12")]);
-    let appsink_el = gst::ElementFactory::make("appsink")
+    let caps = gstreamer::Caps::builder("video/x-raw")
+        .field("format", "NV12")
+        .build();
+    let appsink_el = gstreamer::ElementFactory::make("appsink")
         .property("caps", caps)
         .property("sync", false)
         .property("max-buffers", 2u32)
@@ -48,21 +50,21 @@ fn try_build_pipeline(hw_factory: &gst::ElementFactory, path: &str) -> Option<Gs
         .build()
         .ok()?;
     let appsink = appsink_el
-        .dynamic_cast::<gst_app::AppSink>()
+        .dynamic_cast::<gstreamer_app::AppSink>()
         .ok()?;
 
-    let pipeline = gst::Pipeline::new();
+    let pipeline = gstreamer::Pipeline::new();
     for el in [&filesrc, &qtdemux, &h264parse, &hwdec, &videoconvert] {
         pipeline.add(el).ok()?;
     }
-    pipeline.add(appsink_el.upcast_ref()).ok()?;
+    pipeline.add(&appsink).ok()?;
 
     // 静态链：filesrc → qtdemux；h264parse → 硬解器 → videoconvert → appsink
     filesrc.link(&qtdemux).ok()?;
     h264parse.link(&hwdec).ok()?;
     hwdec.link(&videoconvert).ok()?;
     videoconvert
-        .link(&appsink.upcast_ref::<gst::Element>())
+        .link(appsink.upcast_ref::<gstreamer::Element>())
         .ok()?;
 
     // qtdemux 动态 pad：只接视频轨（音频轨保持未链接，数据自然丢弃）
@@ -85,25 +87,25 @@ fn try_build_pipeline(hw_factory: &gst::ElementFactory, path: &str) -> Option<Gs
     // 推到 PLAYING：协商失败/无硬解可用会在此处表现为状态切换失败，
     // 拉取语义要求先等 preroll 完成（首帧就位）再返回
     pl.pipeline
-        .set_state(gst::State::Playing)
+        .set_state(gstreamer::State::Playing)
         .ok()?;
-    let (result, _, _) = pl.pipeline.get_state(gst::ClockTime::from_seconds(5));
-    if result != gst::StateChangeSuccess::Success {
+    let (result, _, _) = pl.pipeline.state(gstreamer::ClockTime::from_seconds(5));
+    if !matches!(result, Ok(gstreamer::StateChangeSuccess::Success)) {
         return None;
     }
     Some(pl)
 }
 
 struct GstPipeline {
-    pipeline: gst::Pipeline,
-    appsink: gst_app::AppSink,
+    pipeline: gstreamer::Pipeline,
+    appsink: gstreamer_app::AppSink,
     /// 持有硬解器引用（管线内已 add，此字段只为错误信息可读性）
-    _hwdec: gst::Element,
+    _hwdec: gstreamer::Element,
 }
 
 impl Drop for GstPipeline {
     fn drop(&mut self) {
-        let _ = self.pipeline.set_state(gst::State::Null);
+        let _ = self.pipeline.set_state(gstreamer::State::Null);
     }
 }
 
@@ -115,16 +117,17 @@ pub(crate) struct GstReader {
 
 impl GstReader {
     pub(crate) fn open(path: &str) -> Result<Self, VideoError> {
-        gst::init().map_err(|e| VideoError::Backend(e.to_string()))?;
+        gstreamer::init().map_err(|e| VideoError::Backend(e.to_string()))?;
 
         // 硬解器发现：视频解码器工厂 ∩ Hardware 类 ∩ 可吃 H264，rank 降序
         // （factories_with_type 已按 rank 降序返回）
-        let h264_caps = gst::Caps::new_simple("video/x-h264", &[]);
-        let hw_decoders: Vec<_> = gst::ElementFactory::factories_with_type(
-            gst::ElementFactoryType::VIDEO_DECODER,
-            gst::Rank::MARGINAL,
+        let h264_caps = gstreamer::Caps::builder("video/x-h264").build();
+        let hw_decoders: Vec<_> = gstreamer::ElementFactory::factories_with_type(
+            gstreamer::ElementFactoryType::DECODER,
+            gstreamer::Rank::MARGINAL,
         )
-        .filter(|f| f.has_type(gst::ElementFactoryType::HARDWARE))
+        .into_iter()
+        .filter(|f| f.has_type(gstreamer::ElementFactoryType::HARDWARE))
         .filter(|f| f.can_sink_any_caps(h264_caps.as_ref()))
         .collect();
 
@@ -158,11 +161,11 @@ impl GstReader {
         // 上游错误/EOS 非阻塞窥探（无 MainLoop，轮询式）
         let bus = self.pipe.pipeline.bus().unwrap();
         while let Some(msg) = bus.timed_pop_filtered(
-            gst::ClockTime::ZERO,
-            &[gst::MessageType::Error, gst::MessageType::Eos],
+            gstreamer::ClockTime::ZERO,
+            &[gstreamer::MessageType::Error, gstreamer::MessageType::Eos],
         ) {
             match msg.view() {
-                gst::MessageView::Error(e) => {
+                gstreamer::MessageView::Error(e) => {
                     return Err(VideoError::Backend(format!(
                         "{}: {}（debug: {}）",
                         e.src()
@@ -172,7 +175,7 @@ impl GstReader {
                         e.debug().unwrap_or_default()
                     )));
                 }
-                gst::MessageView::Eos(..) => return Ok(None),
+                gstreamer::MessageView::Eos(..) => return Ok(None),
                 _ => unreachable!(),
             }
         }
@@ -201,7 +204,7 @@ impl GstReader {
             .map_readable()
             .map_err(|e| VideoError::Backend(format!("缓冲映射失败: {e}")))?;
 
-        let pts = sample
+        let pts = buffer
             .pts()
             .map(|t| Duration::from_nanos(t.nseconds()))
             .unwrap_or(self.position);

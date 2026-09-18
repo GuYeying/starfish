@@ -5,11 +5,18 @@
 //! frame 每帧绘制贴图四边形。点 × 关窗自动退出。
 //!
 //! 运行：cargo run --example 03_texture（需 resources/textures/wall.jpg）
+//! Android：./scripts/android_run_example.sh 03_texture_android
+//! （同源文件双注册；资源装载 cfg 分家——桌面读相对路径，Android 内嵌二进制）
 
-use std::{fs, sync::Arc};
+#[cfg(not(target_os = "android"))]
+use std::fs;
+use std::sync::Arc;
 use bytemuck::cast_slice;
+#[cfg(not(target_os = "android"))]
 use image::ImageReader;
-use starfish::base::app::{run, Application, Ctx, WindowConfig};
+use starfish::base::app::{Application, Ctx};
+#[cfg(not(target_os = "android"))]
+use starfish::base::app::{run, WindowConfig};
 use starfish::base::render::bind_group::bind_group::BindGroup;
 use starfish::base::render::mesh::mesh::Mesh;
 use starfish::base::render::pipeline::RenderPipeline;
@@ -67,7 +74,11 @@ impl Application for TextureApp {
         let (context, resouce, surface) =
             RenderEntry::new(ctx.window(), Some(surface_settings), Some(gpu_settings))
                 .expect("RenderContext 初始化失败");
-        //  1: Shader
+        //  1: Shader（桌面读文件；Android 内嵌——APK 无 cwd 文件系统可依赖）
+        #[cfg(target_os = "android")]
+        let shader_source: String =
+            include_str!("../../resources/shaders/texture.wgsl").to_string();
+        #[cfg(not(target_os = "android"))]
         let shader_source: String = fs::read_to_string("resources/shaders/texture.wgsl").unwrap();
         let shader = resouce.shader_module_builder(Shader::new(shader_source))
             .build(Some("shader"));
@@ -103,6 +114,12 @@ impl Application for TextureApp {
         );
         // 创建GPU纹理资源
         let texture = {
+            #[cfg(target_os = "android")]
+            let img: image::ImageBuffer<image::Rgba<u8>, Vec<u8>> =
+                image::load_from_memory(include_bytes!("../../resources/textures/wall.jpg"))
+                    .unwrap()
+                    .into_rgba8();
+            #[cfg(not(target_os = "android"))]
             let img: image::ImageBuffer<image::Rgba<u8>, Vec<u8>> = ImageReader::open("resources/textures/wall.jpg").unwrap().decode().unwrap().into_rgba8();
             let image = ImageData::Rgba8(img);
             Arc::new(resouce.create_texture("test_texture",&image,texture_desc))
@@ -166,6 +183,25 @@ impl Application for TextureApp {
     }
 }
 
+// ── Android 入口（cdylib）──
+#[cfg(target_os = "android")]
+mod entry {
+    use super::TextureApp;
+    use starfish::base::app::{run_android, WindowConfig};
+
+    #[unsafe(no_mangle)]
+    fn android_main(app: winit::platform::android::activity::AndroidApp) {
+        unsafe { std::env::set_var("RUST_BACKTRACE", "1") };
+        run_android(
+            app,
+            TextureApp::new(),
+            WindowConfig::new("texture", 800, 600).with_fps_cap(60),
+        );
+    }
+}
+
+// ── 桌面入口（bin）──
+#[cfg(not(target_os = "android"))]
 fn main() {
     // 帧率控制：120 FPS（with_fps_cap 替代原 Clock::tick 节流）
     run(

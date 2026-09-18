@@ -33,25 +33,73 @@ pub struct StreamSpec {
 ///
 /// cpal 0.17+ 的 `Stream` 为 Send+Sync，本结构可安全跨线程持有
 ///（对应 free-threaded 线程契约：混音器/录音器可从任意线程创建与销毁）。
+#[cfg(not(target_arch = "wasm32"))]
 pub struct DeviceStream {
     stream: cpal::Stream,
     pub spec: StreamSpec,
 }
 
+/// wasm 变体：输出走 cpal（WebAudio 后端）；输入为 web-sys 自持采集
+/// （cpal 的 WebAudio 后端未实现输入，采集后端独立在 device_web.rs）
+#[cfg(target_arch = "wasm32")]
+pub struct DeviceStream {
+    stream: Option<cpal::Stream>,
+    input: Option<super::device_web::WebInput>,
+    pub spec: StreamSpec,
+}
+
 impl DeviceStream {
     /// 暂停流（设备保持打开，回调停发）
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn pause(&self) -> Result<(), AudioError> {
         self.stream
             .pause()
             .map_err(|e| AudioError::Device(format!("流 pause 失败: {e}")))
     }
 
+    /// 暂停流
+    #[cfg(target_arch = "wasm32")]
+    pub fn pause(&self) -> Result<(), AudioError> {
+        if let Some(input) = &self.input {
+            input.pause();
+            return Ok(());
+        }
+        if let Some(stream) = &self.stream {
+            return stream
+                .pause()
+                .map_err(|e| AudioError::Device(format!("流 pause 失败: {e}")));
+        }
+        Ok(())
+    }
+
     /// 恢复流
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn resume(&self) -> Result<(), AudioError> {
         self.stream
             .play()
             .map_err(|e| AudioError::Device(format!("流 resume 失败: {e}")))
     }
+
+    /// 恢复流
+    #[cfg(target_arch = "wasm32")]
+    pub fn resume(&self) -> Result<(), AudioError> {
+        if let Some(input) = &self.input {
+            input.resume();
+            return Ok(());
+        }
+        if let Some(stream) = &self.stream {
+            return stream
+                .play()
+                .map_err(|e| AudioError::Device(format!("流 resume 失败: {e}")));
+        }
+        Ok(())
+    }
+}
+
+impl super::AudioOutputBackend for DeviceStream {
+    fn spec(&self) -> super::device::StreamSpec { self.spec }
+    fn pause(&self) -> Result<(), AudioError> { DeviceStream::pause(self) }
+    fn resume(&self) -> Result<(), AudioError> { DeviceStream::resume(self) }
 }
 
 /// 打开默认播放设备：数据面 = 用户回调周期性填充立体声帧（构造即播放）
@@ -84,12 +132,18 @@ pub fn open_output_stream(
         .map_err(|e| AudioError::Device(format!("播放流启动失败: {e}")))?;
 
     Ok(DeviceStream {
+        #[cfg(target_arch = "wasm32")]
+        stream: Some(stream),
+        #[cfg(not(target_arch = "wasm32"))]
         stream,
+        #[cfg(target_arch = "wasm32")]
+        input: None,
         spec: StreamSpec { sample_rate, channels },
     })
 }
 
 /// 打开默认录音设备：数据面 = 用户回调周期性收到采集帧（构造即采集）
+#[cfg(not(target_arch = "wasm32"))]
 pub fn open_input_stream(
     user_cb: impl AudioUserCallback + Send + 'static,
 ) -> Result<DeviceStream, AudioError> {
@@ -133,6 +187,22 @@ pub fn open_input_stream(
     })
 }
 
+/// 打开默认录音设备（wasm）：cpal 的 WebAudio 后端未实现输入（build_input_stream_raw
+/// 直接 Err）→ 用浏览器标准接口自持采集：getUserMedia 授权 → ScriptProcessor 逐块
+/// 单声道 PCM → 立体声帧喂给既有 RingSink。公开 API（AudioRecorder）不变；
+/// 将来 cpal 支持输入后，删除本分支与 `device_web.rs` 模块即可回退。
+#[cfg(target_arch = "wasm32")]
+pub fn open_input_stream(
+    user_cb: impl AudioUserCallback + Send + 'static,
+) -> Result<DeviceStream, AudioError> {
+    let (input, sample_rate) = super::device_web::open_input(Box::new(user_cb))?;
+    Ok(DeviceStream {
+        stream: None,
+        input: Some(input),
+        spec: StreamSpec { sample_rate, channels: 2 },
+    })
+}
+
 /// 枚举播放设备名（诊断用）
 pub fn output_device_names() -> Result<Vec<String>, AudioError> {
     let host = cpal::default_host();
@@ -143,12 +213,19 @@ pub fn output_device_names() -> Result<Vec<String>, AudioError> {
 }
 
 /// 枚举录音设备名（诊断用）
+#[cfg(not(target_arch = "wasm32"))]
 pub fn input_device_names() -> Result<Vec<String>, AudioError> {
     let host = cpal::default_host();
     let devices = host
         .input_devices()
         .map_err(|e| AudioError::Device(format!("枚举录音设备失败: {e}")))?;
     Ok(devices.map(device_name).collect())
+}
+
+/// wasm 无设备枚举接口（浏览器不暴露输入设备列表）：返回单个虚拟设备名
+#[cfg(target_arch = "wasm32")]
+pub fn input_device_names() -> Result<Vec<String>, AudioError> {
+    Ok(vec!["WebAudio 默认麦克风".into()])
 }
 
 /// 设备名（0.18 起 name() 并入 description()）
@@ -202,3 +279,10 @@ fn is_stereo_f32(c: &cpal::SupportedStreamConfig) -> bool {
 fn is_stereo_f32_range(c: &cpal::SupportedStreamConfigRange) -> bool {
     c.sample_format() == SampleFormat::F32 && c.channels() == 2
 }
+
+// ───────────────────────── wasm 输入采集（web-sys 自持） ─────────────────────────
+//
+// 背景：cpal 的 WebAudio 后端未实现输入（build_input_stream_raw 直接 Err，
+// 0.18.2 实查），浏览器能力本身完备——getUserMedia 授权 → ScriptProcessor
+// 逐块回调原始 PCM。本模块在设备层补齐采集，公开 API（AudioRecorder）不变。
+// 将来 cpal 支持输入后：删除本模块 + open_input_stream 的 wasm 分支即可回退。

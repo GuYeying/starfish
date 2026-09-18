@@ -13,7 +13,9 @@ use std::sync::Arc;
 
 use bytemuck;
 use glam::{Mat4, Vec2, Vec3};
-use starfish::base::app::{run, Application, Ctx, WindowConfig};
+use starfish::base::app::{Application, Ctx};
+#[cfg(not(target_os = "android"))]
+use starfish::base::app::{run, WindowConfig};
 use starfish::base::gfx::{self, geometry};
 use starfish::base::render::bind_group::bind_group::BindGroup;
 use starfish::base::render::mesh::mesh::Mesh;
@@ -295,6 +297,25 @@ impl Application for GfxShapesApp {
     }
 }
 
+// ── Android 入口（cdylib）──
+#[cfg(target_os = "android")]
+mod entry {
+    use super::GfxShapesApp;
+    use starfish::base::app::{run_android, WindowConfig};
+
+    #[unsafe(no_mangle)]
+    fn android_main(app: winit::platform::android::activity::AndroidApp) {
+        unsafe { std::env::set_var("RUST_BACKTRACE", "1") };
+        run_android(
+            app,
+            GfxShapesApp::new(),
+            WindowConfig::new("gfx_shapes", 1280, 720).with_fps_cap(60),
+        );
+    }
+}
+
+// ── 桌面入口（bin）──
+#[cfg(not(target_os = "android"))]
 fn main() {
     run(
         GfxShapesApp::new(),

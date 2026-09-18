@@ -1,5 +1,6 @@
 # ── 构建产物 ──
 /target
+/jniLibs
 
 # ── 示例运行输出 ──
 recording.wav
@@ -20,3 +21,6 @@ Thumbs.db
 /reference
 /pygame reference
 /web
+
+
+/xtask/target/

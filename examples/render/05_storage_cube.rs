@@ -7,16 +7,24 @@
 //! 资源布局：Group0 相机 Uniform / Group1 物体 Storage（实例化绘制）/ Group2 纹理采样。
 //!
 //! 运行：cargo run --example 05_storage_cube
+//! Android：./scripts/android_run_example.sh 05_storage_cube_android
+//! （同源文件双注册；资源装载 cfg 分家——桌面读相对路径，Android 内嵌二进制。
+//!   注：Esc/鼠标锁定等桌面交互在触屏上无效果，仅影响演示操作方式）
 
-use std::{fs, sync::Arc};
+#[cfg(not(target_os = "android"))]
+use std::fs;
+use std::sync::Arc;
 use bytemuck::{cast_slice, Pod, Zeroable};
+#[cfg(not(target_os = "android"))]
 use image::ImageReader;
 use glam::{Mat4, Vec2, Vec3};
 use wgpu::{
     AddressMode, Color, FilterMode, InstanceFlags, MemoryHints, MipmapFilterMode,
     PowerPreference, TextureUsages,
 };
-use starfish::base::app::{run, Application, Ctx, WindowConfig};
+use starfish::base::app::{Application, Ctx};
+#[cfg(not(target_os = "android"))]
+use starfish::base::app::{run, WindowConfig};
 use starfish::base::window::{KeyCode, Window, WindowEvent};
 use starfish::base::{
     render::{
@@ -210,6 +218,10 @@ impl Application for StorageCubeApp {
         .expect("RenderContext 初始化失败");
 
         // ===================== 1. 着色器模块 =====================
+        #[cfg(target_os = "android")]
+        let shader_source =
+            include_str!("../../resources/shaders/storage_cube.wgsl").to_string();
+        #[cfg(not(target_os = "android"))]
         let shader_source = fs::read_to_string("resources/shaders/storage_cube.wgsl").unwrap();
         let shader = resouce.shader_module_builder(Shader::new(shader_source))
             .build(Some("storage_cube_shader"));
@@ -231,6 +243,11 @@ impl Application for StorageCubeApp {
             None,
             None,
         );
+        #[cfg(target_os = "android")]
+        let img = image::load_from_memory(include_bytes!("../../resources/textures/container.jpg"))
+            .unwrap()
+            .into_rgba8();
+        #[cfg(not(target_os = "android"))]
         let img = ImageReader::open("resources/textures/container.jpg")
             .unwrap()
             .decode()
@@ -239,13 +256,15 @@ impl Application for StorageCubeApp {
         let image = ImageData::Rgba8(img);
         let texture = Arc::new(resouce.create_texture("cube_container_tex", &image, texture_desc));
 
+        // ClampToEdge：立方体 UV 仅 0..1，Repeat 无意义；规避 GLES 驱动
+        // NPOT+Repeat 采样异常（同 04）
         let sampler_config = SamplerDescriptor::new(
             FilterMode::Linear,
             FilterMode::Linear,
             MipmapFilterMode::Linear,
-            AddressMode::Repeat,
-            AddressMode::Repeat,
-            AddressMode::Repeat,
+            AddressMode::ClampToEdge,
+            AddressMode::ClampToEdge,
+            AddressMode::ClampToEdge,
             None,
         );
         let sampler = Arc::new(resouce.create_sampler("cube_linear_sampler", &sampler_config));
@@ -418,6 +437,25 @@ impl Application for StorageCubeApp {
     }
 }
 
+// ── Android 入口（cdylib）──
+#[cfg(target_os = "android")]
+mod entry {
+    use super::StorageCubeApp;
+    use starfish::base::app::{run_android, WindowConfig};
+
+    #[unsafe(no_mangle)]
+    fn android_main(app: winit::platform::android::activity::AndroidApp) {
+        unsafe { std::env::set_var("RUST_BACKTRACE", "1") };
+        run_android(
+            app,
+            StorageCubeApp::new(),
+            WindowConfig::new("storage_cube", 800, 600).with_fps_cap(60),
+        );
+    }
+}
+
+// ── 桌面入口（bin）──
+#[cfg(not(target_os = "android"))]
 fn main() {
     run(
         StorageCubeApp::new(),

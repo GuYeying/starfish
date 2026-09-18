@@ -128,10 +128,11 @@ impl AudioRecorder {
         self._stream.resume()
     }
 
-    /// 把缓冲内全部已采集数据写出为 16-bit PCM 立体声 WAV，返回帧数
+    /// 拉空缓冲并构建 16-bit PCM 立体声 WAV 字节
     ///
-    /// 调用后缓冲被清空。
-    pub fn save_wav(&mut self, path: &str) -> Result<u64, AudioError> {
+    /// 供 [`dialog::save_bytes`](crate::base::dialog::save_bytes) 上传保存
+    /// （Android SAF 保存到用户可见位置），调用后缓冲被清空。
+    pub fn wav_bytes(&mut self) -> Result<Vec<u8>, AudioError> {
         let mut frames = Vec::with_capacity(self.ring.available());
         let mut buf = vec![StereoFrame::SILENT; 4096];
         loop {
@@ -141,8 +142,18 @@ impl AudioRecorder {
             }
             frames.extend_from_slice(&buf[..n]);
         }
-        write_wav_16(path, &frames, self.sample_rate)?;
-        Ok(frames.len() as u64)
+        Ok(build_wav_16(&frames, self.sample_rate))
+    }
+
+    /// 把缓冲内全部已采集数据写出为 16-bit PCM 立体声 WAV，返回帧数
+    ///
+    /// 调用后缓冲被清空。
+    pub fn save_wav(&mut self, path: &str) -> Result<u64, AudioError> {
+        let bytes = self.wav_bytes()?;
+        let frames = bytes.len() as u64 / 4; // 16-bit × 2ch = 4 B/帧
+        std::fs::write(path, bytes)
+            .map_err(|e| AudioError::custom(format!("写入 WAV 失败 {path}: {e}")))?;
+        Ok(frames)
     }
 
     /// 采样率（Hz）——设备真实采样率
@@ -151,12 +162,8 @@ impl AudioRecorder {
     }
 }
 
-/// 将帧数据写为 16-bit PCM 立体声 WAV（纯函数，可脱离设备测试）
-pub(crate) fn write_wav_16(
-    path: &str,
-    frames: &[StereoFrame],
-    sample_rate: u32,
-) -> Result<(), AudioError> {
+/// 构建 16-bit PCM 立体声 WAV 字节（纯函数，可脱离设备测试）
+pub(crate) fn build_wav_16(frames: &[StereoFrame], sample_rate: u32) -> Vec<u8> {
     let mut data = Vec::with_capacity(frames.len() * 4);
     for f in frames {
         let l = (f.left.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
@@ -181,7 +188,16 @@ pub(crate) fn write_wav_16(
     wav.extend_from_slice(b"data");
     wav.extend_from_slice(&data_len.to_le_bytes());
     wav.extend_from_slice(&data);
+    wav
+}
 
+/// 将帧数据写为 16-bit PCM 立体声 WAV 文件（[`build_wav_16`] + 落盘）
+pub(crate) fn write_wav_16(
+    path: &str,
+    frames: &[StereoFrame],
+    sample_rate: u32,
+) -> Result<(), AudioError> {
+    let wav = build_wav_16(frames, sample_rate);
     std::fs::write(path, wav)
         .map_err(|e| AudioError::custom(format!("写入 WAV 失败 {path}: {e}")))
 }

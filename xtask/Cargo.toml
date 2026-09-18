@@ -1,0 +1,10 @@
+[package]
+name = "xtask"
+version = "0.1.0"
+edition = "2024"
+
+# Starfish 构建工具（仅工具链依赖，不影响库本体）
+
+[dependencies]
+# APK 内嵌文件（.so / classes.dex）——仅构建工具使用
+zip = { version = "2", default-features = false, features = ["deflate"] }

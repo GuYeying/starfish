@@ -1,9 +1,31 @@
+//! 音频播放演示：SFX + BGM + 自定义效果器（回声延时）——**窗口化**（有画面、可返回退出）
+//!
+//! 循环模型：引擎持循环（`run`/`run_android`），应用实现 `Application` 三回调：
+//! start 创建混音器并启动播放 → frame 显示状态（绿=播放中 / 红=失败），
+//! 播放完成自动退出；返回键（Android）随时退出。
+//!
+//! 效果器：SFX→回声 80ms/20%，BGM→回声 150ms/30%。
+//!
+//! 运行：cargo run --example 08_play_sound
+//! Android：cargo xtask android 08_play_sound
+//! （资源装载 cfg 分家：桌面读 resources/，Android 内嵌→私有目录落盘）
+
 use std::sync::Arc;
+
+use starfish::base::app::{Application, Ctx};
+#[cfg(not(target_os = "android"))]
+use starfish::base::app::{run, WindowConfig};
+#[cfg(target_os = "android")]
+use starfish::base::app::{run_android, WindowConfig};
 use starfish::base::audio::sfx::AudioEffect;
 use starfish::base::audio::decoder::SymphoniaDecoder;
 use starfish::base::audio::AudioMixer;
 use starfish::base::audio::common::StereoFrame;
-use starfish::base::time::Clock;
+use starfish::base::render::render_entry::RenderEntry;
+use starfish::base::render::render_resource_access::RenderResourceAccess;
+use starfish::base::render::render_surface::RenderSurface;
+use starfish::base::render::RenderContext;
+use wgpu::Color;
 
 // ============================================================================
 // 示例效果器：回声延时
@@ -63,20 +85,79 @@ impl AudioEffect for EchoDelay {
 }
 
 // ============================================================================
-// 主程序
+// 窗口化应用：混音状态上屏（绿=播放中，红=失败），播完自动退出
 // ============================================================================
 
-fn main() {
-    let sfx_path = "resources/audio/sample-3s.wav";
-    let bgm_path = "resources/audio/sample-speech-1m.wav";
+struct AudioApp {
+    _context: Option<RenderContext>,
+    resouce: Option<RenderResourceAccess>,
+    surface: Option<RenderSurface>,
+    /// Ok((混音器, SFX 声道))；Err = 音频链路失败信息
+    audio: Result<(AudioMixer, usize), String>,
+}
 
+impl AudioApp {
+    fn new() -> Self {
+        Self {
+            _context: None,
+            resouce: None,
+            surface: None,
+            audio: Err("未初始化".into()),
+        }
+    }
+}
+
+impl Application for AudioApp {
+    fn start(&mut self, ctx: &mut Ctx) {
+        let (context, resouce, surface) =
+            RenderEntry::new(ctx.window(), None, None).expect("RenderContext 初始化失败");
+        self._context = Some(context);
+        self.resouce = Some(resouce);
+        self.surface = Some(surface);
+
+        let (sfx_path, bgm_path) = audio_paths();
+        self.audio = setup_audio(&sfx_path, &bgm_path);
+        if let Err(e) = &self.audio {
+            println!("[08] 音频初始化失败: {e}");
+        }
+    }
+
+    fn frame(&mut self, ctx: &mut Ctx) {
+        let clear = match &mut self.audio {
+            Ok((mixer, ch)) => {
+                if mixer.is_channel_busy(*ch) || mixer.music_is_playing() {
+                    Color { r: 0.05, g: 0.25, b: 0.08, a: 1.0 } // 绿=播放中
+                } else {
+                    println!("[08] 播放完成，退出");
+                    ctx.exit();
+                    Color::BLACK
+                }
+            }
+            Err(_) => Color { r: 0.40, g: 0.05, b: 0.05, a: 1.0 }, // 红=失败
+        };
+
+        let Some(surface) = self.surface.as_mut() else { return };
+        let Some(resouce) = self.resouce.as_ref() else { return };
+        surface.begin_frame(clear, 1.0);
+        let color_attachment = surface.get_current_color_attachment();
+        let mut encoder = resouce.create_command_encoder();
+        let color_atts = [&color_attachment];
+        let mut pass = encoder.begin_render_pass("audio_bg", &color_atts, None, None, None, None);
+        pass.end();
+        surface.submit([encoder.finish()]);
+        surface.present();
+    }
+}
+
+/// 音频初始化：解码 → 采样率适配 → SFX/BGM 播放 + 效果器挂载
+fn setup_audio(sfx_path: &str, bgm_path: &str) -> Result<(AudioMixer, usize), String> {
     // ── 创建引擎（cpal 默认播放设备，混音域 = 设备真实采样率） ──
-    let mut engine = AudioMixer::new(8).expect("AudioMixer 创建失败");
+    let mut engine = AudioMixer::new(8).map_err(|e| format!("AudioMixer 创建失败: {e:?}"))?;
     let sample_rate = engine.output_sample_rate;
 
     // ── 解码音频 ──
-    let sfx = SymphoniaDecoder::from_file(sfx_path).expect("sample-3s.wav 解码失败");
-    let bgm = SymphoniaDecoder::from_file(bgm_path).expect("sample-speech-1m.wav 解码失败");
+    let sfx = SymphoniaDecoder::from_file(sfx_path).map_err(|e| format!("{sfx_path} 解码失败: {e:?}"))?;
+    let bgm = SymphoniaDecoder::from_file(bgm_path).map_err(|e| format!("{bgm_path} 解码失败: {e:?}"))?;
 
     // 采样率适配
     let sfx = if sfx.sample_rate != engine.output_sample_rate {
@@ -90,66 +171,78 @@ fn main() {
         Arc::new(bgm)
     };
 
-    // ── 为 SFX 添加回声效果器（80ms 延时，20% 反馈） ──
-    // SFX 将通过 play_with 的 fade_in_ms 参数淡入
+    // ── SFX 播放（淡入 500ms） ──
     let sfx_ch = engine
-        .play_with(sfx.clone(), 0, 500.0)
-        .expect("SFX 播放失败")
-        .expect("所有声道繁忙，SFX 无法播放");
-    engine.channel_fade_out(sfx_ch, 500); // 到末尾会自动停止
+        .play_with(sfx, 0, 500.0)
+        .map_err(|e| format!("SFX 播放失败: {e:?}"))?
+        .ok_or("所有声道繁忙，SFX 无法播放")?;
+    engine.channel_fade_out(sfx_ch, 500);
 
-    // ── 为 BGM 添加回声效果器（150ms 延时，30% 反馈） ──
-    engine.music_load(bgm.clone());
+    // ── BGM 播放（淡入 2000ms）+ 回声 ──
+    engine.music_load(bgm);
     engine.music_play(0);
     engine.music_fade_in(2000);
-
-    // BGM 添加回声效果
     engine.music_add_effect(Box::new(EchoDelay::new(150, 0.3, sample_rate)));
-
     let _ = engine.sfx_add_effect(sfx_ch, Box::new(EchoDelay::new(150, 0.3, sample_rate)));
-
-    // 也可以给 SFX 的某个声道添加独立效果器：
-    // 直接在 SfxChannel 上操作 — 暂不演示
 
     engine.set_master_volume(1.0);
     engine.set_sfx_volume(0.8);
     engine.set_channel_volume(0, 0.5);
 
-    if let Some(sound) = engine.get_channel_sound(0) {
-        println!(
-            "声道 0 播放音频：{:.1}s，{}Hz{}",
-            sound.duration(),
-            sound.sample_rate,
-            if sound.frame_count() > 0 { " ✅" } else { " ⚠️ 无数据" },
-        );
+    println!("[08] 播放中（SFX→回声80ms/20%，BGM→回声150ms/30%），完成或返回键退出");
+    Ok((engine, sfx_ch))
+}
+
+// ── 资源路径：桌面读 resources/；Android 内嵌 → 私有目录落盘 ──
+#[cfg(not(target_os = "android"))]
+fn audio_paths() -> (String, String) {
+    (
+        "resources/audio/sample-3s.wav".into(),
+        "resources/audio/sample-speech-1m.wav".into(),
+    )
+}
+
+#[cfg(target_os = "android")]
+fn audio_paths() -> (String, String) {
+    fn extract(dir: &str, name: &str, bytes: &[u8]) -> String {
+        std::fs::write(format!("{dir}/{name}"), bytes).expect("私有目录写入失败");
+        format!("{dir}/{name}")
     }
+    let dir = DATA_DIR
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("DATA_DIR 未初始化（android_main 未先执行）");
+    (
+        extract(&dir, "sample-3s.wav", include_bytes!("../../resources/audio/sample-3s.wav")),
+        extract(&dir, "sample-speech-1m.wav", include_bytes!("../../resources/audio/sample-speech-1m.wav")),
+    )
+}
 
-    println!("播放中（SFX→回声80ms/20%，BGM→回声150ms/30%）");
-    println!("SFX 和 BGM 结束后自动退出...");
+// Android 应用私有目录：android_main 注入，audio_paths() 消费（文件级单例）
+#[cfg(target_os = "android")]
+static DATA_DIR: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
-    let mut bgm_fadeout_started = false;
-    let mut clock = Clock::new();
-
-    loop {
-        clock.tick(120);
-
-        // BGM 快结束时淡出
-        if !bgm_fadeout_started {
-            let remaining = engine.music_duration() - engine.music_position();
-            if remaining <= 3.0 {
-                println!("BGM 淡出...");
-                engine.music_fade_out(3000);
-                bgm_fadeout_started = true;
-            }
-        }
-
-        // 都播完则退出
-        let sfx_busy = engine.is_channel_busy(sfx_ch);
-        let music_busy = engine.music_is_playing();
-        if !sfx_busy && !music_busy {
-            println!("全部播放完成，程序退出");
-            break;
-        }
+// ── Android 入口（cdylib）──
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+fn android_main(app: winit::platform::android::activity::AndroidApp) {
+    unsafe { std::env::set_var("RUST_BACKTRACE", "1") };
+    {
+        let mut dir = DATA_DIR.lock().unwrap();
+        *dir = app
+            .internal_data_path()
+            .map(|p| p.to_string_lossy().into_owned());
     }
-    println!("停止播放，程序退出");
+    run_android(
+        app,
+        AudioApp::new(),
+        WindowConfig::new("audio", 800, 600).with_fps_cap(60),
+    );
+}
+
+// ── 桌面入口（bin）──
+#[cfg(not(target_os = "android"))]
+fn main() {
+    run(AudioApp::new(), WindowConfig::new("Play Sound", 800, 600).with_fps_cap(60));
 }

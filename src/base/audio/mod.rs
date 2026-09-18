@@ -9,7 +9,21 @@ use std::sync::{
 };
 
 use self::common::{AudioError, AudioUserCallback, StereoFrame};
-use self::device::DeviceStream;
+
+/// 音频输出后端抽象——平台实现直调各自原生音频 API，混音逻辑不变。
+///
+/// 桌面（cpal）内置实现；其他平台（wx WebAudio / 嵌入式）按此接口实现
+/// 即可接入 `AudioMixer`，混音管线零改动。
+pub(crate) trait AudioOutputBackend: Send {
+    /// 设备端实际生效的流规格（采样率 / 声道数）
+    fn spec(&self) -> device::StreamSpec;
+    /// 暂停流（设备保持打开，回调停发）
+    fn pause(&self) -> Result<(), AudioError>;
+    /// 恢复流
+    fn resume(&self) -> Result<(), AudioError>;
+    // Drop = 停止并释放设备
+}
+
 
 #[inline]
 fn atomic_f32_store(v: f32) -> u32 {
@@ -22,6 +36,9 @@ fn atomic_f32_load(v: u32) -> f32 {
 
 pub mod common;
 pub mod device;
+/// wasm 输入采集后端（cpal WebAudio 无输入实现；见 device_web.rs 头注释）
+#[cfg(target_arch = "wasm32")]
+mod device_web;
 pub mod record;
 pub mod sfx;
 mod music;
@@ -156,8 +173,8 @@ pub struct AudioMixer {
     master_volume: Arc<AtomicU32>,
     sfx_volume: Arc<AtomicU32>,
     music_volume: Arc<AtomicU32>,
-    /// cpal 设备流（Drop 即停止并释放设备）
-    _stream: DeviceStream,
+    /// 音频输出后端（Drop 即停止并释放设备）
+    _output: Box<dyn AudioOutputBackend>,
     pub output_sample_rate: u32,
     group_id_counter: u32,
 }
@@ -201,7 +218,7 @@ impl AudioMixer {
             master_volume,
             sfx_volume,
             music_volume,
-            _stream: stream,
+            _output: Box::new(stream),
             output_sample_rate,
             group_id_counter: 1,
         })

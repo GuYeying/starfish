@@ -18,7 +18,9 @@ use std::sync::Arc;
 
 use bytemuck::cast_slice;
 use glam::{Mat4, Vec3};
-use starfish::base::app::{run, Application, Ctx, WindowConfig};
+use starfish::base::app::{Application, Ctx};
+#[cfg(not(target_os = "android"))]
+use starfish::base::app::{run, WindowConfig};
 use starfish::base::font::{self, Font};
 use starfish::base::render::bind_group::bind_group::BindGroup;
 use starfish::base::render::mesh::mesh::Mesh;
@@ -66,6 +68,14 @@ impl Application for TextApp {
             .expect("RenderContext 初始化失败");
 
         // ── 1. 字体：加载 → 图集（一次构建，多次渲染） ──
+        // Android 内嵌字体（APK 无 cwd 文件系统可依赖）
+        #[cfg(target_os = "android")]
+        let font = Font::from_bytes(
+            include_bytes!("../../resources/fonts/Antonio-Regular.ttf").to_vec(),
+            48.0,
+        )
+        .expect("字体加载失败");
+        #[cfg(not(target_os = "android"))]
         let font = Font::from_file("resources/fonts/Antonio-Regular.ttf", 48.0)
             .expect("字体加载失败");
         let sample = "Hello, starfish! 0123456789 .,!?";
@@ -193,6 +203,25 @@ impl Application for TextApp {
     }
 }
 
+// ── Android 入口（cdylib）──
+#[cfg(target_os = "android")]
+mod entry {
+    use super::TextApp;
+    use starfish::base::app::{run_android, WindowConfig};
+
+    #[unsafe(no_mangle)]
+    fn android_main(app: winit::platform::android::activity::AndroidApp) {
+        unsafe { std::env::set_var("RUST_BACKTRACE", "1") };
+        run_android(
+            app,
+            TextApp::new(),
+            WindowConfig::new("text", 800, 600).with_fps_cap(60),
+        );
+    }
+}
+
+// ── 桌面入口（bin）──
+#[cfg(not(target_os = "android"))]
 fn main() {
     run(
         TextApp::new(),

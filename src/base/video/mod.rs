@@ -4,7 +4,7 @@
 //!
 //! 模块分区：
 //! - [`player`]：播放状态机（主时钟 / 追帧纪律 / 帧纹理管理，平台中立）
-//! - [`yuv`]：NV12 → RGBA 整数定点转换（纯函数 + 色值锚点测试）
+//! - NV12 → RGBA 转换共享层已上移 `base/yuv`（camera 共用）
 //! - 平台后端（按平台命名，`DecodeBackend` 为 seam，输出统一 NV12 系统内存）：
 //!   · [`windows`]：Media Foundation SourceReader（D3D11 前置硬解探测）
 //!   · [`linux`]：GStreamer 硬解聚合（klass=Hardware 过滤，Ubuntu 为准）
@@ -26,7 +26,6 @@
 //! 引擎帧链对 video 模块零感知。
 
 mod player;
-mod yuv;
 
 // 解复用共享层：android / web 后端用；test cfg 使 Windows 测试构建亦可编译
 // （用真实示例视频做集成测试）

@@ -1,7 +1,13 @@
 [package]
 name = "starfish"
-version = "0.5.0"
+version = "0.7.0"
 edition = "2024"
+
+
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
 
 # ── 特性（场景化裁剪：默认全包含；可选剔除 gfx / font / video）──
 # - 渲染/窗口/循环/时间/资源/Web入口 为核心，恒参与编译
@@ -9,10 +15,13 @@ edition = "2024"
 # - video 为重依赖特性：Linux 构建需 gstreamer dev 包、Windows 编译 MF/D3D11
 #   探测、Apple 编译 objc2 系、Android 编译 jni——不用视频的场景剔除之
 [features]
-default = ["gfx", "font", "video", "gamepad"]
+default = ["gfx", "font", "video", "gamepad", "dialog", "net", "io"]
 gfx = []
 font = ["dep:ttf-parser"]
 gamepad = ["dep:gilrs"]
+dialog = ["dep:rfd", "dep:js-sys", "dep:robius-file-picker", "dep:robius-android-env", "dep:jni"]
+net = ["dep:js-sys"]
+io = []
 video = [
     "dep:windows",
     "dep:gstreamer",
@@ -26,7 +35,6 @@ video = [
     "dep:objc2-video-toolbox",
     "dep:objc2-core-foundation",
     "dep:jni",
-    "dep:ndk-context",
     "dep:mp4",
     "dep:js-sys",
 ]
@@ -85,6 +93,10 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 once_cell = "1.21.4"
 
+# ── 对话框（桌面原生 rfd：文件选择/保存/消息框，同步阻塞 API；见 base/dialog.rs）──
+# wasm：消息框走 window.alert/confirm（稳定 API）；文件选择 v1 不支持（浏览器异步不可阻塞）
+# Linux 后端为 GTK3：构建需 libgtk-3-dev（仅启用 dialog 特性时）
+
 # ── 视频：MP4 解复用（纯 Rust；base/video/mp4_demux.rs）──
 # Windows 等桌面原生后端（MF/VT）自带解复用不参与编译；供 android/web 后端共用
 mp4 = { version = "0.14", optional = true }
@@ -107,6 +119,24 @@ web-sys = { version = "0.3", features = [
     "Element",
     "HtmlCanvasElement", # app：嵌入 canvas 接管
     "Response",      # video：fetch 响应（WebCodecs 后端，见 base/video/web.rs）
+    "MessageEvent",  # net：WebSocket 消息（见 base/net.rs）
+    "HtmlInputElement", # dialog：Web 文件选择（见 base/dialog.rs）
+    "Headers",       # io：POST Content-Type（见 base/io.rs）
+    "Request", "RequestInit",  # io：fetch 读取/保存（见 base/io.rs）
+    "File", "FileList",  # dialog：选择的文件对象与列表
+    "Blob", "Url",       # dialog：保存 = Blob + objectURL 触发下载
+    # 录音采集（device.rs wasm 输入分支）：getUserMedia → ScriptProcessor → PCM
+    "Navigator",
+    "MediaDevices",
+    "MediaStreamConstraints",
+    "MediaStream",
+    "MediaStreamAudioSourceNode",
+    "AudioContext",
+    "ScriptProcessorNode",
+    "AudioProcessingEvent",
+    "AudioBuffer",
+    "AudioDestinationNode",
+    "Location",
 ] }
 console_error_panic_hook = "0.1"        # web_entry! 的 panic → 浏览器控制台转发
 
@@ -119,6 +149,11 @@ js-sys = { version = "0.3", optional = true }
 # Web 示例：web_entry! 宏展开的 #[wasm_bindgen(start)] 属性路径
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen = "0.2"
+
+# Android 示例：log→logcat 桥（wgpu/内部 log::error 无桥时在 Android 上不可见）
+[target.'cfg(target_os = "android")'.dev-dependencies]
+android_logger = "0.15"
+log = "0.4"
 
 # ── Windows 平台（视频硬解：Media Foundation SourceReader，见 base/video）──
 [target.'cfg(target_os = "windows")'.dependencies]
@@ -167,13 +202,24 @@ objc2-core-foundation = { version = "0.3", optional = true }
 # ── 手柄（gilrs：win/linux/mac 原生，见 base/gamepad.rs）──
 # wasm：Gamepad API 为稳定接口，自持 js_sys Reflect 轮询（不给构建链添 flag）
 # Android/iOS 无 gilrs 支持：状态表空实现占位（待引擎事件管线立项）
+# 对话框（桌面原生 rfd：文件选择/保存/消息框，同步阻塞 API，见 base/dialog.rs）：
+# wasm 消息框走 window.alert/confirm（稳定 API）；文件选择 v1 不支持；
+# Linux 后端为 GTK3，构建需 libgtk-3-dev（仅 dialog 特性）
 [target.'cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))'.dependencies]
 gilrs = { version = "0.11", optional = true }
+rfd = { version = "0.15", optional = true }
 
 # ── Android 视频硬解（MediaCodec via JNI + mp4 解复用，见 base/video/android.rs）──
 [target.'cfg(target_os = "android")'.dependencies]
 jni = { version = "0.21", optional = true }
-ndk-context = { version = "0.1", optional = true }
+# app.rs：run_android 把 ndk-context 的 Application 换成真实 Activity（录音权限/dialog 依赖）
+ndk-context = "0.1"
+# dialog 诊断探针 / 录音权限申请用（robius 环境桥）
+robius-android-env = { version = "0.2", optional = true }
+
+# ── 移动端对话框文件选择（robius-file-picker，见 base/dialog.rs）──
+[target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
+robius-file-picker = { version = "0.3", optional = true }
 
 # ── 示例（按目录分类：basics/render/draw/audio/platform/media；名称保持稳定，
 #     经显式段映射路径；按特性声明依赖，未启用时不参与编译）──
@@ -184,6 +230,13 @@ path = "examples/basics/01_hello_world.rs"
 [[example]]
 name = "02_triangles"
 path = "examples/basics/02_triangles.rs"
+
+# Android 实机验证示例（仅 android 目标有实体；桌面跑 dummy main）
+# crate-type cdylib：NativeActivity 需 dlopen 的共享库（cargo 1.61+ 支持）
+[[example]]
+name = "02_triangles_android"
+path = "examples/basics/02_triangles_android.rs"
+crate-type = ["cdylib"]
 
 [[example]]
 name = "03_texture"
@@ -224,10 +277,6 @@ name = "11_web_triangles"
 path = "examples/platform/11_web_triangles.rs"
 
 [[example]]
-name = "12_multi_window"
-path = "examples/platform/12_multi_window.rs"
-
-[[example]]
 name = "13_video_decode"
 path = "examples/media/13_video_decode.rs"
 required-features = ["video"]
@@ -236,3 +285,125 @@ required-features = ["video"]
 name = "14_gamepad"
 path = "examples/media/14_gamepad.rs"
 required-features = ["gamepad"]
+
+# 跨平台空窗口模板：同一源文件双注册（bin+cdylib 不能混用，见下）
+# - 桌面：cargo run --example 15_empty_window
+# - Android：./scripts/android_run_example.sh 15_empty_window_android
+[[example]]
+name = "15_empty_window"
+path = "examples/basics/15_empty_window.rs"
+
+[[example]]
+name = "15_empty_window_android"
+path = "examples/basics/15_empty_window.rs"
+crate-type = ["cdylib"]
+
+# 对话框模块跨平台验证（桌面 rfd / Android robius）
+[[example]]
+name = "16_dialog"
+path = "examples/platform/16_dialog.rs"
+
+[[example]]
+name = "16_dialog_android"
+path = "examples/platform/16_dialog.rs"
+crate-type = ["cdylib"]
+
+# Android 运行时权限全流程探针（hello 窗口 + 权限 + 屏显诊断）
+[[example]]
+name = "17_permission_probe"
+path = "examples/platform/17_permission_probe.rs"
+
+[[example]]
+name = "17_permission_probe_android"
+path = "examples/platform/17_permission_probe.rs"
+crate-type = ["cdylib"]
+
+# 退出/重进链路探针（无渲染，模拟器可复现）
+[[example]]
+name = "18_exit_probe"
+path = "examples/platform/18_exit_probe.rs"
+
+[[example]]
+name = "18_exit_probe_android"
+path = "examples/platform/18_exit_probe.rs"
+crate-type = ["cdylib"]
+
+# 跨平台 IO 探针（io 模块全流程：写/存在/读回/文本往返）
+[[example]]
+name = "19_io_probe"
+path = "examples/platform/19_io_probe.rs"
+
+[[example]]
+name = "19_io_probe_android"
+path = "examples/platform/19_io_probe.rs"
+crate-type = ["cdylib"]
+
+# 网络探针（UDP 广播发现 → TCP echo → UDP echo）
+[[example]]
+name = "20_net_probe"
+path = "examples/platform/20_net_probe.rs"
+
+[[example]]
+name = "20_net_probe_android"
+path = "examples/platform/20_net_probe.rs"
+crate-type = ["cdylib"]
+
+# Web 平台能力总探针（输入/音频/录音/视频/手柄/对话框/网络；桌面同样可跑）
+[[example]]
+name = "21_web_probe"
+path = "examples/platform/21_web_probe.rs"
+
+# Web 视频解码独立探针
+[[example]]
+name = "22_video_web"
+path = "examples/platform/22_video_web.rs"
+
+# 渲染族同源双注册（桌面 bin + Android cdylib，资源 cfg 分家）
+[[example]]
+name = "03_texture_android"
+path = "examples/render/03_texture.rs"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "04_coord_system_android"
+path = "examples/render/04_coord_system.rs"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "05_storage_cube_android"
+path = "examples/render/05_storage_cube.rs"
+crate-type = ["cdylib"]
+
+# 几何/文本/音频/视频族同源双注册
+[[example]]
+name = "06_draw_gfx_android"
+path = "examples/draw/06_draw_gfx.rs"
+crate-type = ["cdylib"]
+required-features = ["gfx"]
+
+[[example]]
+name = "07_draw_text_android"
+path = "examples/draw/07_draw_text.rs"
+crate-type = ["cdylib"]
+required-features = ["font"]
+
+[[example]]
+name = "08_play_sound_android"
+path = "examples/audio/08_play_sound.rs"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "09_play_music_stream_android"
+path = "examples/audio/09_play_music_stream.rs"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "10_record_mic_android"
+path = "examples/audio/10_record_mic.rs"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "13_video_decode_android"
+path = "examples/media/13_video_decode.rs"
+crate-type = ["cdylib"]
+required-features = ["video"]

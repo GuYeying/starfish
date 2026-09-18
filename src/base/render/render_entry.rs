@@ -1,16 +1,11 @@
 //! 渲染入口（RenderEntry）
 //!
-//! **多窗口支持（2026-09-08 起）**：base 的窗口层已支持运行时多窗口
-//! （`ctx.create_window` + `window_created`/`window_closed`/按窗事件路由）。
-//! 多窗口的渲染形态 = 每窗一个渲染目标：
+//! **单窗口模型**（2026-09-14 定稿，多窗口剔除）：引擎持一个主窗口，
+//! [`RenderEntry::new`] / [`RenderEntry::async_new`] 建立其 wgpu 上下文
+//! 与渲染表面。
 //!
-//! - 首窗：[`RenderEntry::new`] / [`RenderEntry::async_new`]（建立 wgpu 上下文）
-//! - 其余窗：[`RenderEntry::surface_from_context`] /
-//!   [`RenderEntry::async_surface_from_context`]（共享同一设备/队列，
-//!   各窗独立表面与独立 present）
-//!
-//! 平台注记：桌面全后端验证路径；Web（多 canvas）与移动端表面语义
-//! 未经验证，不构成支持承诺。
+//! `surface_from_context` / `async_surface_from_context`（共享设备/队列的
+//! 附加表面能力）作为渲染层基础能力保留，引擎侧不再使用。
 
 use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
@@ -122,6 +117,8 @@ impl RenderEntry{
         // ==============================================
         let caps = surface.get_capabilities(&adapter);
         println!("Supported formats: {:?}", caps.formats);
+        // downlevel 能力（view_formats 掩码用，见 SurfaceSettings::to_wgpu）
+        let downlevel_caps = adapter.get_downlevel_capabilities();
 
         // ==============================================
         // 请求逻辑设备 + 命令队列
@@ -164,7 +161,7 @@ impl RenderEntry{
         super::features::report(gpu_settings.desired_features, granted_features);
         
 
-        let render_frame: RenderSurface = 
+        let render_frame: RenderSurface =
                 RenderSurface::new(
                 &surface,
                 &device,
@@ -172,6 +169,7 @@ impl RenderEntry{
                 &size,
                 surface_settings,
                 &caps,
+                &downlevel_caps,
         );
         
         let render_resource_access: RenderResourceAccess = 
@@ -239,9 +237,10 @@ impl RenderEntry{
 
         let adapter = context.adapter();
         let caps = surface.get_capabilities(adapter);
+        let downlevel_caps = adapter.get_downlevel_capabilities();
         let size: (u32, u32) = window.size();
 
-        let render_frame = RenderSurface::new(&surface, &device, &queue, &size, surface_settings, &caps);
+        let render_frame = RenderSurface::new(&surface, &device, &queue, &size, surface_settings, &caps, &downlevel_caps);
 
         let render_context = RenderContext::new(
             instance,

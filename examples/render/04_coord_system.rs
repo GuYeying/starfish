@@ -5,16 +5,23 @@
 //! 上传 MVP Uniform 并绘制。点 × 关窗自动退出。
 //!
 //! 运行：cargo run --example 04_coord_system（需 resources/textures/container.jpg）
+//! Android：./scripts/android_run_example.sh 04_coord_system_android
+//! （同源文件双注册；资源装载 cfg 分家——桌面读相对路径，Android 内嵌二进制）
 
-use std::{fs, sync::{Arc}};
+#[cfg(not(target_os = "android"))]
+use std::fs;
+use std::{sync::{Arc}};
 use bytemuck::{cast_slice};
+#[cfg(not(target_os = "android"))]
 use image::ImageReader;
 use glam::{Mat4, Vec3};
 use wgpu::{
     AddressMode, Color, FilterMode, InstanceFlags, MemoryHints, MipmapFilterMode,
     PowerPreference, TextureUsages,
 };
-use starfish::base::app::{run, Application, Ctx, WindowConfig};
+use starfish::base::app::{Application, Ctx};
+#[cfg(not(target_os = "android"))]
+use starfish::base::app::{run, WindowConfig};
 use starfish::base::{
     render::{
         bind_group::{
@@ -54,7 +61,7 @@ const CUBE_UNIQUE_VERTS: &[f32] = &[
     -0.5,-0.5,-0.5, 0.0,0.0,
     -0.5,-0.5, 0.5, 1.0,0.0,
     -0.5, 0.5, 0.5, 1.0,1.0,
-    -0.5, 0.5,-0.5, 1.0,1.0,
+    -0.5, 0.5,-0.5, 0.0,1.0,
 
     // ---------- Right (+X)
      0.5,-0.5, 0.5, 0.0,0.0,
@@ -108,6 +115,8 @@ struct CubeApp {
     matrix_bind_group: Option<BindGroup>,
     mvp_buffer: Option<UniformBuffer>,
     pipeline: Option<Arc<RenderPipeline>>,
+    /// 累积旋转角（弧度）：每帧 += delta，勿直接用 delta 当角度
+    rot: f32,
 }
 
 impl CubeApp {
@@ -122,6 +131,7 @@ impl CubeApp {
             matrix_bind_group: None,
             mvp_buffer: None,
             pipeline: None,
+            rot: 0.0,
         }
     }
 }
@@ -143,6 +153,10 @@ impl Application for CubeApp {
             RenderEntry::new(ctx.window(), Some(surface_settings), Some(gpu_settings))
                 .expect("RenderContext 初始化失败");
         // ===================== 1. 着色器模块 =====================
+        #[cfg(target_os = "android")]
+        let shader_source =
+            include_str!("../../resources/shaders/coord_system.wgsl").to_string();
+        #[cfg(not(target_os = "android"))]
         let shader_source = fs::read_to_string("resources/shaders/coord_system.wgsl").unwrap();
         let shader = resouce.shader_module_builder(Shader::new(shader_source))
             .build(Some("cube_transform_shader"));
@@ -165,6 +179,11 @@ impl Application for CubeApp {
             None,
         );
         // 加载纹理
+        #[cfg(target_os = "android")]
+        let img = image::load_from_memory(include_bytes!("../../resources/textures/container.jpg"))
+            .unwrap()
+            .into_rgba8();
+        #[cfg(not(target_os = "android"))]
         let img = ImageReader::open("resources/textures/container.jpg")
             .unwrap()
             .decode()
@@ -172,14 +191,15 @@ impl Application for CubeApp {
             .into_rgba8();
         let image = ImageData::Rgba8(img);
         let texture = Arc::new(resouce.create_texture("cube_container_tex", &image, texture_desc));
-        // 线性重复采样器
+        // 线性采样器（ClampToEdge：立方体 UV 仅 0..1，Repeat 无意义；部分 GLES
+        // 驱动对 NPOT 纹理 + Repeat 采样异常——单面呈"单像素拉伸"涂抹，实测踩过）
         let sampler_config = SamplerDescriptor::new(
             FilterMode::Linear,
             FilterMode::Linear,
             MipmapFilterMode::Linear,
-            AddressMode::Repeat,
-            AddressMode::Repeat,
-            AddressMode::Repeat,
+            AddressMode::ClampToEdge,
+            AddressMode::ClampToEdge,
+            AddressMode::ClampToEdge,
             None,
         );
         let sampler = Arc::new(resouce.create_sampler("cube_linear_sampler", &sampler_config));
@@ -218,15 +238,18 @@ impl Application for CubeApp {
         let matrix_bind_group = self.matrix_bind_group.as_ref().unwrap();
         let mvp_buffer = self.mvp_buffer.as_mut().unwrap();
 
-        // 相机&矩阵计算（帧间隔来自 ctx.delta()，替代原 Clock::tick 返回值）
-        let time = ctx.delta();
+        // 相机&矩阵计算
+        // ⚠ 旋转角必须【累积】帧间隔（delta 是"距上帧的秒数"，直接当角度用
+        //    每帧只转 ~0.017 弧度且互不叠加 → 视觉上完全静止，实测踩过）
+        self.rot += ctx.delta();
         let camera_pos = Vec3::new(0.0, 0.0, 3.0);
         let view = look_at_mat4(camera_pos, Vec3::ZERO, Vec3::Y);
         let fov = std::f32::consts::PI / 4.0;
         let aspect = WIN_SIZE.0 as f32 / WIN_SIZE.1 as f32;
         let proj = perspective(fov, aspect, 0.01, 500.0);
 
-        // 模型旋转
+        // 模型旋转（累积角）
+        let time = self.rot;
         let mut model = Mat4::IDENTITY;
         model *= Mat4::from_rotation_y(time);
         model *= Mat4::from_rotation_x(time * 0.7);
@@ -263,6 +286,25 @@ impl Application for CubeApp {
     }
 }
 
+// ── Android 入口（cdylib）──
+#[cfg(target_os = "android")]
+mod entry {
+    use super::CubeApp;
+    use starfish::base::app::{run_android, WindowConfig};
+
+    #[unsafe(no_mangle)]
+    fn android_main(app: winit::platform::android::activity::AndroidApp) {
+        unsafe { std::env::set_var("RUST_BACKTRACE", "1") };
+        run_android(
+            app,
+            CubeApp::new(),
+            WindowConfig::new("cube", 800, 600).with_fps_cap(60),
+        );
+    }
+}
+
+// ── 桌面入口（bin）──
+#[cfg(not(target_os = "android"))]
 fn main() {
     // 帧率控制：120 FPS（with_fps_cap 替代原 Clock::tick 节流）
     run(

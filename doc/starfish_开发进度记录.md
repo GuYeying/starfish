@@ -4,7 +4,7 @@
 > 历史细节见 `doc/log/starfish_changelog_YYYY-MM-DD.md`（按日归档）；
 > 视频架构设计见 `reference/video模块跨平台架构笔记.md`。
 >
-> 最后更新：2026-09-11
+> 最后更新：2026-09-14
 
 ---
 
@@ -15,10 +15,10 @@
 | 平台 | 后端 | 硬解框架 | 状态 |
 |---|---|---|---|
 | Windows | `base/video/windows.rs` | Media Foundation（DXVA） | ✅ 实机验证 |
-| Linux(Ubuntu) | `base/video/linux.rs` | GStreamer 聚合（vaapi/nvdec） | ✅ 编译验证，待实机 |
+| Linux(Ubuntu) | `base/video/linux.rs` | GStreamer 聚合（vaapi/nvdec） | ✅ **实机验证**（用户更新后端后跑通；用户已接管该文件维护） |
 | macOS/iOS | `base/video/apple.rs` | VideoToolbox（Require-HW 键） | ✅ 编译验证，待实机 |
-| Web | `base/video/web.rs` | WebCodecs（prefer-hardware） | ✅ 编译验证，待实机 |
-| Android | `base/video/android.rs` | MediaCodec（JNI） | ✅ 编译验证，待引擎安卓引导 |
+| Web | `base/video/web.rs` | WebCodecs（prefer-hardware） | ✅ **实测通过**（2026-09-18，fetch + 解复用 + 解码 + 全屏播放，22_video_web） |
+| Android | `base/video/android.rs` | MediaCodec（JNI） | ✅ **实机验证**（2026-09-18，卓易通 MediaCodec 全链路播放） |
 
 - **硬解唯一策略**：无硬件解码器直接报 `VideoError::NoHardwareDecoder`，不落软解
 - 格式承诺收敛：仅 H.264/MP4
@@ -28,8 +28,16 @@
 | 设备 | 模块 | 覆盖 | 状态 |
 |---|---|---|---|
 | 手柄 | `base/gamepad`（feature `gamepad`） | win/linux/mac = gilrs；web = 自持 Gamepad API 轮询；android/ios = 空占位 | ✅ 编译验证，待实机手柄 |
-| GPS | 未立项 | — | 路线：异步 + 权限层（五平台后端各自一套） |
-| 摄像头 | 未立项 | — | 路线：活水视频源，复用 video 的 NV12/纹理管线（web 走 getUserMedia→HTMLVideoElement→wgpu 直拷） |
+| ~~GPS~~ | **取消**（用户决策 2026-09-14） | — | 定位类需求出现时，建议直接针对目标平台调 API |
+| ~~摄像头~~ | **取消**（用户决策 2026-09-14，camera 模块已移除） | — | 同上：跨平台抽象层不如针对目标平台直调 API |
+
+### 系统/网络能力（第二批）
+
+| 能力 | 模块 | 覆盖 | 状态 |
+|---|---|---|---|
+| ~~本地文件~~ **已移除**（原 `base/iofi`） | — | 决策：std::fs 透传包装无增值；Web 无文件系统。IO 定位 = 桌面 std::fs 直用 + dialog 选文件；Web dialog 读内存 + net | 移除完成 |
+| 对话框（统一异步，**定稿只做打开/保存**） | `base/dialog`（feature `dialog`） | 桌面 rfd / Web input[file]+Blob 下载 / 移动端 robius（**Android 构建需 ANDROID_JAR**） | ✅ 编译验证，待实机 |
+| 网络（TCP 消息 + UDP） | `base/net`（feature `net`，`Connection` trait 统一接口） | 原生五平台 std::net 线程直连；Web WebSocket；**Web-UDP 显式不支持** | ✅ TCP 回环自动测试；**WS 实测通过**（2026-09-18，21_web_probe echo PASS） |
 
 ### 手柄 API 速查
 
@@ -46,7 +54,7 @@ gp.axis(id, Axis::LeftStickX) -> f32
 
 ## 二、Cargo 特性矩阵
 
-`default = ["gfx", "font", "video", "gamepad"]`（默认全包含）
+`default = ["gfx", "font", "video", "gamepad", "dialog", "net"]`（默认全包含）
 
 | 特性 | 剔除模块 | 剔除的外部依赖 |
 |---|---|---|
@@ -54,12 +62,14 @@ gp.axis(id, Axis::LeftStickX) -> f32
 | `font` | base/font | ttf-parser |
 | `video` | base/video | windows / gstreamer×3 / objc2×7 / jni / ndk-context / mp4 / js-sys |
 | `gamepad` | base/gamepad | gilrs（win/linux/mac；wasm 自持绑定不依赖 gilrs） |
+| `dialog` | base/dialog | rfd（桌面；web 消息框用 js-sys） |
+| `net` | base/net | js-sys（仅 wasm WebSocket；零 tokio） | |
 
 恒编译核心：渲染 / 窗口 / 循环 / 时间 / 资源 / **audio** / web 入口。
 
 ---
 
-## 三、已完成批次索引（2026-09-11，详见当日 changelog）
+## 三、已完成批次索引（详见 doc/log/ 按日 changelog）
 
 | 批次 | 内容 |
 |---|---|
@@ -70,6 +80,18 @@ gp.axis(id, Axis::LeftStickX) -> f32
 | 5 | 批次 B/C：Web(WebCodecs) + Android(MediaCodec) 后端 |
 | 6 | Cargo features 场景化裁剪（gfx/font/video 可剔除，默认全包含） |
 | 7 | 设备接口第一批：手柄（gilrs 四平台 + 空占位） |
+| 8 | 文档体系同步（README 现代化 / 进度活文档 / 跨会话记忆）——09-12 |
+| 9 | 示例分类目录化（basics/render/draw/audio/platform/media）+ README 截图更新——09-12 |
+| 10 | iofi + dialog + net 三件套（阻塞本地 IO / 原生对话框 / 零 tokio 网络）——09-14 |
+| 11 | 三件套平台行为一致化（异步 dialog / 统一 iofi / `Connection` trait 化 net）——09-14 |
+| 12 | iofi Web 补全（localStorage）+ dialog 移动端实装（robius）——09-14 |
+| 13 | iofi 回退 Web 实现 → 编译期显式报错——09-14 |
+| 14 | 移除 iofi 模块（std::fs 透传无增值）——09-14 |
+| 15 | dialog/net 模块说明文档 + 行为审计——09-14 |
+| 16 | dialog 范围定稿：只做打开/保存（save_bytes 数据驱动、消息框移除、TLS 定稿不做）——09-14 |
+| 17 | 移除多选文件（pick_files）——09-14 |
+| 18 | 移除 camera 模块 + GPS 取消——09-14 |
+| 19 | **多窗口与相关接口整体剔除，回归单窗口模型**（Linux 实机验证质量差 + 平台支持度不一；video/Linux 实机由用户更新跑通）——09-14 |
 
 ---
 
@@ -84,9 +106,17 @@ gp.axis(id, Axis::LeftStickX) -> f32
 
 ### 设备接口后续批次
 
-- [ ] **摄像头**：Windows MF 采集 / Linux v4l2src(gst) / Apple AVCapture / Web getUserMedia / Android Camera2——复用 video 的 NV12→纹理管线与 `texture_view` 直绑
-- [ ] **GPS**：WinRT Geolocator / GeoClue(D-Bus) / CoreLocation / Web Geolocation / Android LocationManager；需先设计统一 Permission 模型（web/mobile 强权限）
+- [x] ~~摄像头 / GPS~~：**已取消**（2026-09-14 用户决策——此类与硬件/系统强绑定的能力，跨平台抽象层不如针对目标平台直调 API；camera 半成品模块已整体移除）
 - [ ] Android 手柄：需引擎安卓事件管线（android-activity 输入桥）
+
+### 新三件套待办
+
+- [ ] dialog 实机验证：打开/保存全流程（桌面 rfd 原生 / Web input[file]+下载 / 移动端 robius）
+- [ ] dialog/Android 构建需 `ANDROID_JAR` 环境变量（robius 编译 Java 胶水）——随引擎安卓引导配齐
+- [ ] dialog/iOS 构建验证（darwin 目标已过；iOS 真机待引擎引导）
+- [ ] WebSocket 真服务器联调（当前仅 TCP 回环自动验证；浏览器侧 URL 需 ws:// 前缀或裸 host:port 自动归一）
+- [ ] Linux dialog 构建需 libgtk-3-dev（rfd GTK3 后端）——CI/文档注明
+- [ ] iofi/Web 配额 5MB 上限——大文件需求出现时评估 OPFS 异步版
 
 ### 引擎级前置（阻塞项）
 

@@ -15,7 +15,7 @@
 use std::io::BufReader;
 use std::time::Duration;
 
-use jni::objects::{GlobalRef, JObject, JString, JValue};
+use jni::objects::{GlobalRef, JByteBuffer, JObject, JString, JValue};
 use jni::JavaVM;
 
 use super::mp4_demux::Demuxer;
@@ -126,9 +126,9 @@ impl MediaCodecReader {
                 JValue::Int(0),
             ],
         )
-        .map_err(|e| VideoError::Backend(format!("MediaCodec configure 失败: {e}")))?;
+        .map_err(|e| jerr_ex(env, "MediaCodec configure 失败", e))?;
         env.call_method(&codec, "start", "()V", &[])
-            .map_err(jerr("MediaCodec start 失败"))?;
+            .map_err(|e| jerr_ex(env, "MediaCodec start 失败", e))?;
 
         let buffer_info = env
             .new_object("android/media/MediaCodec$BufferInfo", "()V", &[])
@@ -248,6 +248,36 @@ fn jerr(msg: &'static str) -> impl Fn(jni::errors::Error) -> VideoError {
     move |e| VideoError::Backend(format!("{msg}: {e}"))
 }
 
+/// 捕获当前线程 pending 的 Java 异常消息（jni 的 check 不清除异常，读后手动清）
+fn java_exception_msg(env: &mut jni::JNIEnv) -> Option<String> {
+    if !env.exception_check().ok()? {
+        return None;
+    }
+    let t = env.exception_occurred().ok()?;
+    env.exception_clear().ok()?;
+    if t.is_null() {
+        return None;
+    }
+    let msg = env
+        .call_method(&t, "getMessage", "()Ljava/lang/String;", &[])
+        .and_then(|v| v.l())
+        .ok()?;
+    if msg.is_null() {
+        return Some("unknown Java exception".into());
+    }
+    let js = jni::objects::JString::from(msg);
+    let js = env.auto_local(js);
+    Some(env.get_string(&js).ok()?.to_string_lossy().into_owned())
+}
+
+/// 错误构建：附带 pending Java 异常详情（关键路径诊断用）
+fn jerr_ex(env: &mut jni::JNIEnv, msg: &'static str, e: jni::errors::Error) -> VideoError {
+    match java_exception_msg(env) {
+        Some(d) => VideoError::Backend(format!("{msg}: {e:?} | java: {d}")),
+        None => VideoError::Backend(format!("{msg}: {e:?}")),
+    }
+}
+
 fn set_int(
     env: &mut jni::JNIEnv,
     format: &JObject,
@@ -271,7 +301,7 @@ fn jni_byte_buffer<'local>(
 ) -> Result<JObject<'local>, VideoError> {
     let arr = env
         .new_byte_array(bytes.len() as i32)
-        .map_err(jerr("new_byte_array 失败"))?;
+        .map_err(|e| jerr_ex(env, "new_byte_array 失败", e))?;
     // jni jbyte = i8；视频字节按位等价转视图
     let as_i8 = unsafe { std::slice::from_raw_parts(bytes.as_ptr().cast::<i8>(), bytes.len()) };
     env.set_byte_array_region(&arr, 0, as_i8)
@@ -296,8 +326,8 @@ fn set_buffer(
     Ok(())
 }
 
-fn get_int(env: &mut jni::JNIEnv, obj: &JObject, key: &str) -> Option<i32> {
-    let jkey = env.new_string(key).ok()?;
+fn get_int(env: &mut jni::JNIEnv, obj: &JObject, key: &str) -> Result<Option<i32>, String> {
+    let jkey = env.new_string(key).map_err(|e| format!("new_string: {e:?}"))?;
     let integer = env
         .call_method(
             obj,
@@ -305,11 +335,26 @@ fn get_int(env: &mut jni::JNIEnv, obj: &JObject, key: &str) -> Option<i32> {
             "(Ljava/lang/String;)Ljava/lang/Integer;",
             &[JValue::Object(&jkey)],
         )
-        .and_then(|v| v.l())
-        .ok()?;
-    env.call_method(&integer, "intValue", "()I", &[])
+        .map_err(|e| {
+            let d = java_exception_msg(env).unwrap_or_default();
+            format!("getInteger({key}): {e:?} | java: {d}")
+        })?
+        .l()
+        .map_err(|e| {
+            let d = java_exception_msg(env).unwrap_or_default();
+            format!("getInteger l(): {e:?}")
+        })?;
+    if integer.is_null() {
+        return Ok(None);
+    }
+    let v = env
+        .call_method(&integer, "intValue", "()I", &[])
         .and_then(|v| v.i())
-        .ok()
+        .map_err(|e| {
+            let d = java_exception_msg(env).unwrap_or_default();
+            format!("intValue: {e:?} | java: {d}")
+        })?;
+    Ok(Some(v))
 }
 
 impl DecodeBackend for MediaCodecReader {
@@ -330,11 +375,11 @@ impl DecodeBackend for MediaCodecReader {
                     .call_method(
                         codec,
                         "dequeueInputBuffer",
-                        "(I)I",
+                        "(J)I",
                         &[JValue::Long(DEQUEUE_TIMEOUT_US)],
                     )
                     .and_then(|v| v.i())
-                    .map_err(jerr("dequeueInputBuffer 失败"))?;
+                    .map_err(|e| jerr_ex(env, "dequeueInputBuffer 失败", e))?;
                 if in_idx >= 0 {
                     match self.demux.next_sample()? {
                         Some((data, pts, _)) => {
@@ -346,15 +391,27 @@ impl DecodeBackend for MediaCodecReader {
                                     &[JValue::Int(in_idx)],
                                 )
                                 .and_then(|v| v.l())
-                                .map_err(jerr("getInputBuffer 失败"))?;
-                            let arr = jni_byte_buffer(env, &data)?;
-                            env.call_method(
-                                &buf,
-                                "put",
-                                "([B)Ljava/nio/ByteBuffer;",
-                                &[JValue::Object(&arr)],
-                            )
-                            .map_err(jerr("ByteBuffer.put 失败"))?;
+                                .map_err(|e| jerr_ex(env, "getInputBuffer 失败", e))?;
+                            // 直接写入 direct 输入缓冲（零 Java 堆分配）
+                            let jbb = JByteBuffer::from(buf);
+                            let dst = env
+                                .get_direct_buffer_address(&jbb)
+                                .map_err(|e| VideoError::Backend(format!("输入缓冲地址: {e}")))?;
+                            let cap = env
+                                .get_direct_buffer_capacity(&jbb)
+                                .unwrap_or(data.len());
+                            if data.len() > cap {
+                                return Err(VideoError::Backend(format!(
+                                    "样本 {}B 超过输入缓冲容量 {}B",
+                                    data.len(),
+                                    cap
+                                )));
+                            }
+                            // SAFETY：dst 指向 MediaCodec 输入缓冲（direct），
+                            // 容量已校验 ≥ data.len()；队列前缓冲归本线程所有
+                            unsafe {
+                                std::ptr::copy_nonoverlapping(data.as_ptr(), dst, data.len());
+                            }
                             env.call_method(
                                 codec,
                                 "queueInputBuffer",
@@ -367,7 +424,7 @@ impl DecodeBackend for MediaCodecReader {
                                     JValue::Int(0),
                                 ],
                             )
-                            .map_err(jerr("queueInputBuffer 失败"))?;
+                            .map_err(|e| jerr_ex(env, "queueInputBuffer 失败", e))?;
                         }
                         None => {
                             // 样本耗尽：下发 EOS 标志
@@ -383,7 +440,7 @@ impl DecodeBackend for MediaCodecReader {
                                     JValue::Int(BUFFER_FLAG_EOS),
                                 ],
                             )
-                            .map_err(jerr("queueInputBuffer(EOS) 失败"))?;
+                            .map_err(|e| jerr_ex(env, "queueInputBuffer(EOS) 失败", e))?;
                             self.eos_sent = true;
                         }
                     }
@@ -395,30 +452,33 @@ impl DecodeBackend for MediaCodecReader {
                 .call_method(
                     codec,
                     "dequeueOutputBuffer",
-                    "(Landroid/media/MediaCodec$BufferInfo;I)I",
+                    "(Landroid/media/MediaCodec$BufferInfo;J)I",
                     &[
                         JValue::Object(self.buffer_info.as_obj()),
                         JValue::Long(DEQUEUE_TIMEOUT_US),
                     ],
                 )
                 .and_then(|v| v.i())
-                .map_err(jerr("dequeueOutputBuffer 失败"))?;
+                .map_err(|e| jerr_ex(env, "dequeueOutputBuffer 失败", e))?;
 
             if out_idx >= 0 {
                 let size = env
                     .get_field(self.buffer_info.as_obj(), "size", "I")
                     .and_then(|v| v.i())
-                    .map_err(jerr("BufferInfo.size 失败"))? as usize;
+                    .map_err(|e| jerr_ex(env, "BufferInfo.size 失败", e))? as usize;
                 let pts_us = env
                     .get_field(self.buffer_info.as_obj(), "presentationTimeUs", "J")
                     .and_then(|v| v.j())
-                    .map_err(jerr("BufferInfo.pts 失败"))?;
+                    .map_err(|e| jerr_ex(env, "BufferInfo.pts 失败", e))?;
                 let flags = env
                     .get_field(self.buffer_info.as_obj(), "flags", "I")
                     .and_then(|v| v.i())
-                    .map_err(jerr("BufferInfo.flags 失败"))?;
+                    .map_err(|e| jerr_ex(env, "BufferInfo.flags 失败", e))?;
 
                 // 先拷后还（release 后缓冲归还解码器，顺序不可颠倒）
+                // 直接读 MediaCodec 输出缓冲（direct ByteBuffer）——零 Java 堆分配。
+                // 旧路径每帧在 Java 堆 new ~3MB 数组（1080p NV12），30fps 分配率
+                // ~90MB/s → Java 堆 OOM（实测 2026-09-18）。
                 let nv12 = if size > 0 {
                     let buf = env
                         .call_method(
@@ -428,19 +488,15 @@ impl DecodeBackend for MediaCodecReader {
                             &[JValue::Int(out_idx)],
                         )
                         .and_then(|v| v.l())
-                        .map_err(jerr("getOutputBuffer 失败"))?;
-                    let arr = env
-                        .new_byte_array(size as i32)
-                        .map_err(jerr("new_byte_array 失败"))?;
-                    env.call_method(
-                        &buf,
-                        "get",
-                        "([B)Ljava/nio/ByteBuffer;",
-                        &[JValue::Object(&arr)],
-                    )
-                    .map_err(jerr("ByteBuffer.get 失败"))?;
-                    env.convert_byte_array(arr)
-                        .map_err(jerr("convert_byte_array 失败"))?
+                        .map_err(|e| jerr_ex(env, "getOutputBuffer 失败", e))?;
+                    let jbb = JByteBuffer::from(buf);
+                    let ptr = env
+                        .get_direct_buffer_address(&jbb)
+                        .map_err(|e| VideoError::Backend(format!("输出缓冲地址: {e}")))?;
+                    // SAFETY：缓冲存活至 releaseOutputBuffer（拷贝在其后），
+                    // size 由 BufferInfo 给出且不超过缓冲容量
+                    let slice = unsafe { std::slice::from_raw_parts(ptr, size) };
+                    slice.to_vec()
                 } else {
                     Vec::new()
                 };
@@ -451,7 +507,7 @@ impl DecodeBackend for MediaCodecReader {
                     "(IZ)V",
                     &[JValue::Int(out_idx), JValue::Bool(0)],
                 )
-                .map_err(jerr("releaseOutputBuffer 失败"))?;
+                .map_err(|e| jerr_ex(env, "releaseOutputBuffer 失败", e))?;
 
                 if flags & BUFFER_FLAG_EOS != 0 {
                     self.eos_seen = true;
@@ -476,22 +532,14 @@ impl DecodeBackend for MediaCodecReader {
                     pts,
                 }));
             } else if out_idx == INFO_FORMAT_CHANGED {
-                // 输出几何以实测为准（stride/slice-height 由驱动给出）
-                let fmt = env
+                // 输出格式变化：仅需消费事件（getOutputFormat）。
+                // ⚠️ 不读 format 键——容器兼容层的 MediaFormat 包装对象上
+                // getInteger 方法解析失败（NoSuchMethodError 会挂起线程并污染
+                // 后续所有 JNI 调用，实测 2026-09-18）。几何以 demux 为准，
+                // stride 暂取 width（NV12 常见连续布局）。
+                let _ = env
                     .call_method(codec, "getOutputFormat", "()Landroid/media/MediaFormat;", &[])
-                    .and_then(|v| v.l())
-                    .map_err(jerr("getOutputFormat 失败"))?;
-                if let Some(w) = get_int(env, &fmt, "width") {
-                    self.width = w as u32;
-                }
-                if let Some(h) = get_int(env, &fmt, "height") {
-                    self.height = h as u32;
-                }
-                if let Some(s) = get_int(env, &fmt, "stride") {
-                    if s > 0 {
-                        self.stride = s as usize;
-                    }
-                }
+                    .map_err(|e| jerr_ex(env, "getOutputFormat 消费失败", e))?;
                 continue;
             } else if out_idx == INFO_TRY_AGAIN {
                 // 无输出可收：输入已全喂且 EOS 已见 → 结束；否则回环继续喂

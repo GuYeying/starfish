@@ -77,3 +77,21 @@ examples/
 
 - `cargo check --examples`（默认特性）与 `--features video` 全量：零 error
 - `cargo run --example` 列表确认 14 个示例名称全部保持
+
+## 批次 10：README 路线图重写（基于批次 1–9 实际记录）
+
+### 设计方案
+
+路线图从"计划式 Phase 平铺列表"重构为四段式：
+
+- **✅ 已完成**（7 项里程碑带完成日期）：Phase 1/2、SDL3→winit+cpal 迁移、
+  视频六平台硬解、feature 裁剪、手柄、文档体系
+- **🚧 进行中**：四路后端实机验证清单、video v2 体验优化（GPU 采样转换/
+  Web 流式/音轨注入）
+- **📋 下一步**：Phase 3 接口文档（已起步）→ Phase 4 pygame 风格 API →
+  设备接口第二批 → Phase 5 PyO3 → Phase 6/7/8
+- **⛔ 阻塞项**：引擎安卓引导立项、统一权限模型（显性化自日志"已知边界"）
+
+### 说明
+
+- 与 `doc/starfish_开发进度记录.md` 互为镜像（README 精简版 / 进度文档详尽版）
