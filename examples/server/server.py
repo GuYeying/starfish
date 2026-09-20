@@ -44,6 +44,7 @@ CHUNK_TTL_SECONDS = 3600  # 分片临时目录的清理时限（1 小时未完�
 
 SAVES_DIR = pathlib.Path("./saves").resolve()
 WEB_DIR = pathlib.Path("./web").resolve()
+RESOURCES_DIR = pathlib.Path("./resources").resolve()
 CHUNKS_DIR = pathlib.Path("./saves/.chunks").resolve()
 
 
@@ -156,12 +157,22 @@ class IoHandler(http.server.BaseHTTPRequestHandler):
                 self._reply(200, b"starfish io demo server (web/index.html not found)")
             return
         file = WEB_DIR / path
+        if not file.is_file():
+            # 资源目录挂载：URL `resources/<rel>` → RESOURCES_DIR/<rel>
+            # （probe 资产逻辑路径 = "resources/..."，三平台同一字符串；带穿越防护）
+            if RESOURCES_DIR is not None and path.startswith("resources/"):
+                rel = path[len("resources/"):]
+                cand = (RESOURCES_DIR / rel).resolve()
+                if cand.is_file() and cand.is_relative_to(RESOURCES_DIR):
+                    file = cand
         if file.is_file():
             ext = file.suffix.lower()
             ctype = {
                 ".html": "text/html; charset=utf-8", ".js": "text/javascript",
                 ".wasm": "application/wasm", ".json": "application/json",
-                ".mp4": "video/mp4",
+                ".mp4": "video/mp4", ".ttf": "font/ttf",
+                ".wav": "application/octet-stream", ".png": "image/png",
+                ".jpg": "image/jpeg",
             }.get(ext, "application/octet-stream")
             self._reply(200, file.read_bytes(), ctype)
         else:
@@ -361,16 +372,19 @@ def start_net_services(net_port: int = 8022, disc_port: int = 8023, ws_port: int
 
 
 def main() -> None:
-    global SAVES_DIR, WEB_DIR, CHUNKS_DIR
+    global SAVES_DIR, WEB_DIR, CHUNKS_DIR, RESOURCES_DIR
     parser = argparse.ArgumentParser(description="starfish io/net demo server")
     parser.add_argument("--port", type=int, default=8021)
     parser.add_argument("--ws-port", type=int, default=8024)
     parser.add_argument("--saves-dir", default="./saves")
     parser.add_argument("--web-dir", default="./web", help="wasm 构建输出目录（同源部署）")
+    parser.add_argument("--resources-dir", default="./resources",
+                        help="资源目录挂载（probe 家族的 assets 逻辑路径 = 相对路径；置空禁用）")
     args = parser.parse_args()
 
     SAVES_DIR = pathlib.Path(args.saves_dir).resolve()
     WEB_DIR = pathlib.Path(args.web_dir).resolve()
+    RESOURCES_DIR = pathlib.Path(args.resources_dir).resolve() if args.resources_dir else None
     CHUNKS_DIR = SAVES_DIR / ".chunks"
     CHUNKS_DIR.mkdir(parents=True, exist_ok=True)
     SAVES_DIR.mkdir(parents=True, exist_ok=True)
@@ -380,6 +394,7 @@ def main() -> None:
     server = IoServer(("0.0.0.0", args.port), IoHandler)
     print(f"[io] 保存目录: {SAVES_DIR}")
     print(f"[io] 静态目录: {WEB_DIR}（若存在则同源服务 wasm 页面）")
+    print(f"[io] 资源挂载: {RESOURCES_DIR}（probe 资产逻辑路径直读）")
     print(f"[io] 上限: {MAX_UPLOAD_BYTES // (1024 * 1024)}MB | 分片 TTL: {CHUNK_TTL_SECONDS}s")
     print(f"[io] 监听 http://0.0.0.0:{args.port}")
     try:

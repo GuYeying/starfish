@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::base::yuv;
+use super::audio_track::AudioPump;
 use super::{DecodeBackend, DecodedFrame, FramePixels, Poll, VideoError};
 
 /// 视频播放句柄（对象直绑：自带解码状态机与帧纹理）
@@ -25,6 +26,8 @@ pub struct Video {
     /// 视频解码开关（遮挡场景：关 = 只走音频/冻结画面）
     enabled: bool,
     ended: bool,
+    /// 音轨泵（`open_with_audio` 挂接；`open` 打开时为 None）
+    audio: Option<AudioPump>,
 }
 
 impl Video {
@@ -44,12 +47,27 @@ impl Video {
             position: Duration::ZERO,
             enabled: true,
             ended: false,
+            audio: None,
+        }
+    }
+
+    /// 带音轨泵的构造（`VideoModule::open_with_audio` 专用）
+    pub(super) fn with_audio(
+        backend: Box<dyn DecodeBackend>,
+        device: Arc<wgpu::Device>,
+        queue: Arc<wgpu::Queue>,
+        audio: AudioPump,
+    ) -> Self {
+        Self {
+            audio: Some(audio),
+            ..Self::new(backend, device, queue)
         }
     }
 
     /// 非侵入式手动泵：推进解码到主时钟、上传最新帧纹理。
     ///
     /// - `enabled = false`（遮挡）：时钟继续推进，解码停——恢复时自动追帧
+    ///   （音轨泵不受此开关影响：遮挡 = 只走音频/冻结画面）
     /// - 追帧（解码落后主时钟多帧）只上传最新帧，中间帧解码即弃
     /// - Web 后端帧在途（`Poll::Pending`）：时钟照走，本泵提前收工
     /// - 流结束：`ended()` 置位，后续调用为 no-op
@@ -58,6 +76,10 @@ impl Video {
             return Ok(());
         }
         self.clock += dt;
+        // 音轨泵跟随主时钟（背压满即停推；画面与音轨共用同一时钟源）
+        if let Some(pump) = self.audio.as_mut() {
+            pump.pump(self.clock);
+        }
         let mut pending: Option<DecodedFrame> = None;
 
         // 遮挡关闭时解码停走：恢复（enabled 翻回）后 position 落后于 clock，
@@ -155,6 +177,25 @@ impl Video {
 
     pub fn video_enabled(&self) -> bool {
         self.enabled
+    }
+
+    /// 是否带音轨（`open_with_audio` 打开）
+    pub fn has_audio(&self) -> bool {
+        self.audio.is_some()
+    }
+
+    /// 音轨音量（0.0 ~ 1.0；直通声部。无声打开时 no-op）
+    pub fn set_audio_volume(&self, volume: f32) {
+        if let Some(pump) = &self.audio {
+            pump.voice().set_volume(volume.clamp(0.0, 1.0));
+        }
+    }
+
+    /// 音轨静音（与音量独立；直通声部。无声打开时 no-op）
+    pub fn set_muted(&self, muted: bool) {
+        if let Some(pump) = &self.audio {
+            pump.voice().set_muted(muted);
+        }
     }
 
     /// 流已结束

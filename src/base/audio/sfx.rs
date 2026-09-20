@@ -58,17 +58,11 @@ impl SfxChannel {
     }
 
     /// 创建带音效数据的声道（播放就绪）
-    pub fn with_sound(
-        sound: Arc<SoundData>,
-        loops: i32,
-        fade_in_ms: f32,
-    ) -> Self {
+    pub fn with_sound(sound: Arc<SoundData>, loops: i32) -> Self {
         let sample_rate = sound.sample_rate;
-        let fade = if fade_in_ms > 0.0 {
-            Some(FadeState::new_fade_in(fade_in_ms as u32, sample_rate))
-        } else {
-            None
-        };
+        // 进场淡变已上收至通道级 `channel_fade_in`（SFX 一次性声部的
+        // fade 能力在通道层，见 2026-09-19 批次 6①）
+        let fade = None;
 
         Self {
             state: ChannelState::Playing,

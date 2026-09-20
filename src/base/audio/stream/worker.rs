@@ -338,7 +338,12 @@ mod tests {
     }
 
     fn make_test_reader() -> SymphoniaReader {
-        let path = std::env::temp_dir().join("starfish_pump_test.wav");
+        // 独立文件名：并行测试下共享路径会被"边写边读"撞车（读到写一半的
+        // WAV → 解码器打开失败）——这是偶发测试失败的根因
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static SEQ: AtomicU32 = AtomicU32::new(0);
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("starfish_pump_test_{n}.wav"));
         crate::base::audio::test_support::write_test_wav(&path, 44100, 1.0);
         SymphoniaReader::open(path.to_str().unwrap()).unwrap()
     }

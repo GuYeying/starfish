@@ -145,6 +145,29 @@ pub(crate) struct WebDecoder {
     position: Duration,
 }
 
+/// fetch 全文件字节（视频后端与音轨泵共用的加载前端）
+pub(crate) async fn fetch_bytes(path: &str) -> Result<Vec<u8>, String> {
+    let window = web_sys::window().ok_or("无 window")?;
+    let resp_val = wasm_bindgen_futures::JsFuture::from(window.fetch_with_str(path))
+        .await
+        .map_err(|e| format!("fetch 失败: {e:?}"))?;
+    let resp: web_sys::Response = resp_val
+        .dyn_into()
+        .map_err(|_| "fetch 响应类型异常".to_string())?;
+    if !resp.ok() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+    let buf_val = wasm_bindgen_futures::JsFuture::from(
+        resp.array_buffer().map_err(|e| format!("{e:?}"))?,
+    )
+    .await
+    .map_err(|e| format!("读取响应失败: {e:?}"))?;
+    let buf: js_sys::ArrayBuffer = buf_val
+        .dyn_into()
+        .map_err(|_| "ArrayBuffer 类型异常".to_string())?;
+    Ok(js_sys::Uint8Array::new(&buf).to_vec())
+}
+
 /// 解复用终点为帧步进兜底 pts 的便利读取
 fn chunk_init(data: &[u8], pts_us: f64, key: bool) -> Result<Object, JsValue> {
     let init = Object::new();
@@ -175,31 +198,7 @@ impl WebDecoder {
                 };
 
                 // ── fetch 全文件（字节范围流式为后续优化）──
-                let bytes = (|| async {
-                    let window = web_sys::window().ok_or("无 window")?;
-                    let resp_val = wasm_bindgen_futures::JsFuture::from(
-                        window.fetch_with_str(&path),
-                    )
-                    .await
-                    .map_err(|e| format!("fetch 失败: {e:?}"))?;
-                    let resp: web_sys::Response = resp_val
-                        .dyn_into()
-                        .map_err(|_| "fetch 响应类型异常".to_string())?;
-                    if !resp.ok() {
-                        return Err(format!("HTTP {}", resp.status()));
-                    }
-                    let buf_val = wasm_bindgen_futures::JsFuture::from(
-                        resp.array_buffer().map_err(|e| format!("{e:?}"))?,
-                    )
-                    .await
-                    .map_err(|e| format!("读取响应失败: {e:?}"))?;
-                    let buf: js_sys::ArrayBuffer = buf_val
-                        .dyn_into()
-                        .map_err(|_| "ArrayBuffer 类型异常".to_string())?;
-                    Ok(js_sys::Uint8Array::new(&buf).to_vec())
-                })()
-                .await;
-                let bytes = match bytes {
+                let bytes = match fetch_bytes(&path).await {
                     Ok(b) => b,
                     Err(msg) => return set_failed(&state, false, msg),
                 };

@@ -20,17 +20,23 @@
 //! - 解码输出 NV12（系统内存）→ CPU 转 RGBA → wgpu 纹理
 //!   （YUV→RGB 着色器转换与显存零拷贝 = v2）
 //! - 格式承诺收敛：仅 H.264/MP4（各平台统一的最通用格式）
-//! - 音轨注入：待 mixer 流声部 API（待定项 7）——v1 为纯画面核心
+//! - 音轨（2026-09-20）：`open_with_audio` 挂接 mixer 流式声部——画面各平台
+//!   硬解，音轨统一 symphonia AAC 软解（见 audio_track.rs）
 //!
 //! 非侵入式契约：解码/上传只发生在 [`Video::update`]（手动泵），
 //! 引擎帧链对 video 模块零感知。
 
 mod player;
 
-// 解复用共享层：android / web 后端用；test cfg 使 Windows 测试构建亦可编译
-// （用真实示例视频做集成测试）
-#[cfg(any(target_os = "android", target_arch = "wasm32", test))]
+// 视频音轨泵（mp4 音轨 → symphonia AAC → 流式声部；全平台一份）
+mod audio_track;
+
+// 解复用共享层：android / web 后端用（视频轨）；音轨部分全平台；
+// test cfg 使 Windows 测试构建亦可编译（用真实示例视频做集成测试）
 mod mp4_demux;
+
+use audio_track::AudioPump;
+use crate::base::audio::StreamVoice;
 
 #[cfg(target_os = "windows")]
 mod windows;
@@ -156,27 +162,64 @@ impl VideoModule {
     /// 硬解唯一策略：平台无硬件 H.264 解码器时返回 [`VideoError::NoHardwareDecoder`]，
     /// 不落任何软解兜底。
     pub fn open(&self, path: impl Into<String>) -> Result<Video, VideoError> {
-        let path = path.into();
+        let backend = self.open_backend(path.into().as_str())?;
+        Ok(Video::new(backend, self.device.clone(), self.queue.clone()))
+    }
 
-        // 平台后端分发（设计笔记 §六 平台矩阵）
+    /// 打开视频文件并挂接音轨（mixer 流式声部直通）
+    ///
+    /// 音频链统一为 symphonia AAC 软解（音频无平台硬解承诺）——画面走各平台
+    /// 硬解后端，音轨走 `mp4_demux::AudioDemuxer` + symphonia，全平台同一份
+    /// 代码（源文件双开：视频后端与音轨泵各自打开，与桌面现状同构）。
+    ///
+    /// - 音轨按视频主时钟推入声部（首帧对齐：从当前时钟起，"同帧起播"）
+    /// - 推帧按声部采样率（`StreamVoice::sample_rate()` = 混音域），源 44100/
+    ///   48000 等自动线性插值适配；环形缓冲背压满即停推，不阻塞帧
+    /// - 控制面：[`Video::set_audio_volume`] / [`Video::set_muted`] 直通声部；
+    ///   结束收尾推荐 `voice` 的 `fade_out_and_close`（或在 [`Video::ended`]
+    ///   后静置——ring 残余由混音侧自然排空）
+    /// - native 无音轨/坏音轨返回 Err（可感知）；web 异步装配失败仅静音降级
+    pub fn open_with_audio(
+        &self,
+        path: impl Into<String>,
+        voice: StreamVoice,
+    ) -> Result<Video, VideoError> {
+        let path = path.into();
+        let backend = self.open_backend(path.as_str())?;
+
+        #[cfg(not(target_arch = "wasm32"))]
+        let pump = AudioPump::open(path.as_str(), voice)?;
+        #[cfg(target_arch = "wasm32")]
+        let pump = AudioPump::open(path.as_str(), voice);
+
+        Ok(Video::with_audio(
+            backend,
+            self.device.clone(),
+            self.queue.clone(),
+            pump,
+        ))
+    }
+
+    /// 平台视频后端分发（设计笔记 §六 平台矩阵；`open` / `open_with_audio` 共用）
+    fn open_backend(&self, path: &str) -> Result<Box<dyn DecodeBackend>, VideoError> {
         #[cfg(target_os = "windows")]
         let backend: Box<dyn DecodeBackend> = {
             if !windows::hardware_h264_available() {
                 return Err(VideoError::NoHardwareDecoder);
             }
             Box::new(
-                windows::MfReader::open(&path)
+                windows::MfReader::open(path)
                     .map_err(|e| VideoError::Backend(e.to_string()))?,
             )
         };
         #[cfg(target_os = "linux")]
-        let backend: Box<dyn DecodeBackend> = Box::new(linux::GstReader::open(&path)?);
+        let backend: Box<dyn DecodeBackend> = Box::new(linux::GstReader::open(path)?);
         #[cfg(any(target_os = "macos", target_os = "ios"))]
-        let backend: Box<dyn DecodeBackend> = Box::new(apple::VtReader::open(&path)?);
+        let backend: Box<dyn DecodeBackend> = Box::new(apple::VtReader::open(path)?);
         #[cfg(target_arch = "wasm32")]
-        let backend: Box<dyn DecodeBackend> = Box::new(web::WebDecoder::open(&path)?);
+        let backend: Box<dyn DecodeBackend> = Box::new(web::WebDecoder::open(path)?);
         #[cfg(target_os = "android")]
-        let backend: Box<dyn DecodeBackend> = Box::new(android::MediaCodecReader::open(&path)?);
+        let backend: Box<dyn DecodeBackend> = Box::new(android::MediaCodecReader::open(path)?);
         #[cfg(not(any(
             target_os = "windows",
             target_os = "linux",
@@ -189,7 +232,6 @@ impl VideoModule {
             let _ = path;
             return Err(VideoError::UnsupportedPlatform);
         };
-
-        Ok(Video::new(backend, self.device.clone(), self.queue.clone()))
+        Ok(backend)
     }
 }

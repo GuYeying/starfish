@@ -1,15 +1,19 @@
-//! MP4(H.264) 解复用共享层——android / web 后端共用的纯 Rust 解复用
+//! MP4 解复用共享层——纯 Rust（`mp4` crate）
 //!
-//! 平台硬解框架（MediaCodec / WebCodecs）都吃裸 H.264 码流，不经各自系统
-//! 解容器：本层用 `mp4` crate（纯 Rust）拉出视频轨样本，统一转 Annex-B
-//! （00 00 00 01 起始码），并携带 SPS/PPS（Annex-B 帧，关键帧前置）。
+//! 两部分：
+//! - [`Demuxer`]（视频轨）：android / web 硬解后端共用的 H.264 样本提取，
+//!   统一转 Annex-B（00 00 00 01 起始码），携带 SPS/PPS（关键帧前置）。
+//!   Windows/Linux/macOS 的 MF/GStreamer/VideoToolbox 自带解复用不参与。
+//! - [`AudioDemuxer`]（音轨，2026-09-20）：视频音轨泵（`audio_track.rs`）
+//!   的数据源，全平台同一份——音频解码统一走 symphonia（无平台硬解音频），
+//!   桌面硬解后端解画面、本层解音轨，源文件双开是既定架构。
 //!
-//! Windows 上 MF/VT 自带解复用，不参与本模块——但 `test` cfg 使其在
-//! `cargo test` 时可用真文件（`resources/videos/sample-5s.mp4`）做集成测试。
-
-#![cfg(any(target_os = "android", target_arch = "wasm32", test))]
+//! `test` cfg 使视频部分在 `cargo test` 时可用真文件
+//! （`resources/videos/sample-5s.mp4`）做集成测试。
 
 use std::io::{Read, Seek};
+// Duration 仅视频轨部分使用（pts/帧步进），桌面非测试构建视频轨整体门控
+#[cfg(any(target_os = "android", target_arch = "wasm32", test))]
 use std::time::Duration;
 
 use super::VideoError;
@@ -17,6 +21,8 @@ use super::VideoError;
 /// 恒定帧率兜底（拿不到 frame_rate 时按 30fps 步进）
 const FALLBACK_FPS: f64 = 30.0;
 
+/// 视频轨解复用（android / web 后端共用；桌面后端自解复用故门控之）
+#[cfg(any(target_os = "android", target_arch = "wasm32", test))]
 pub(crate) struct Demuxer<R: Read + Seek> {
     reader: mp4::Mp4Reader<R>,
     track_id: u32,
@@ -35,6 +41,7 @@ pub(crate) struct Demuxer<R: Read + Seek> {
     pub(crate) codec_string: String,
 }
 
+#[cfg(any(target_os = "android", target_arch = "wasm32", test))]
 impl<R: Read + Seek> Demuxer<R> {
     pub fn new(mut reader: R) -> Result<Self, VideoError> {
         let size = reader
@@ -180,7 +187,104 @@ impl<R: Read + Seek> Demuxer<R> {
     }
 }
 
+// ───────────────────────── 音轨解复用（全平台） ─────────────────────────
+
+/// mp4 音轨元数据（AAC-LC 契约内的事实源，解码器装配参数）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AudioTrackInfo {
+    /// 采样率（Hz，mp4a 声明的 AAC 采样率，常见 44100/48000）
+    pub sample_rate: u32,
+    /// 声道数（1 = 单声道，2 = 立体声；AAC-LC 解码上限）
+    pub channels: u8,
+}
+
+/// mp4 音轨解复用（全平台：视频音轨泵的数据源，见 `audio_track.rs`）
+///
+/// 拉出 AAC 轨的**原始样本**（raw AAC 帧，无 ADTS/无 ASC 包装）——
+/// symphonia 的 AAC 解码入口吃的正是这种裸 GA 帧（解码器源码 `decode_inner`
+/// 直读 `packet.buf()` 进 `decode_ga`，**不解析 ADTS 头**），采样率/声道由
+/// `CodecParameters` 声明，零包装零 esds 解析。
+pub(crate) struct AudioDemuxer<R: Read + Seek> {
+    reader: mp4::Mp4Reader<R>,
+    track_id: u32,
+    sample_count: u32,
+    next_id: u32,
+    info: AudioTrackInfo,
+}
+
+impl<R: Read + Seek> AudioDemuxer<R> {
+    pub fn new(mut reader: R) -> Result<Self, VideoError> {
+        let size = reader
+            .seek(std::io::SeekFrom::End(0))
+            .map_err(|e| VideoError::Backend(format!("mp4 seek 失败: {e}")))?;
+        reader
+            .seek(std::io::SeekFrom::Start(0))
+            .map_err(|e| VideoError::Backend(format!("mp4 解析失败: {e}")))?;
+        let mp4_reader = mp4::Mp4Reader::read_header(reader, size)
+            .map_err(|e| VideoError::Backend(format!("mp4 解析失败: {e}")))?;
+
+        // 找 AAC 音轨（媒体类型契约：mp4 音频即 AAC-LC，与各平台视频硬解
+        // "仅 H.264" 的格式承诺同构）
+        let mut found: Option<(u32, &mp4::Mp4Track)> = None;
+        for (id, track) in mp4_reader.tracks() {
+            if matches!(track.track_type(), Ok(mp4::TrackType::Audio))
+                && matches!(track.media_type(), Ok(mp4::MediaType::AAC))
+            {
+                found = Some((*id, track));
+                break;
+            }
+        }
+        let Some((track_id, track)) = found else {
+            return Err(VideoError::Backend("mp4 中无 AAC 音轨".into()));
+        };
+
+        let sample_rate = track
+            .sample_freq_index()
+            .map_err(|e| VideoError::Backend(format!("音轨采样率缺失: {e}")))?
+            .freq();
+        let channels = track
+            .channel_config()
+            .map_err(|e| VideoError::Backend(format!("音轨声道缺失: {e}")))? as u8;
+        if channels == 0 || channels > 2 {
+            return Err(VideoError::Backend(format!(
+                "音轨声道数 {channels} 超出 AAC-LC 立体声契约"
+            )));
+        }
+        let sample_count = track.sample_count();
+
+        Ok(Self {
+            reader: mp4_reader,
+            track_id,
+            sample_count,
+            next_id: 1, // mp4 crate 样本编号从 1 起
+            info: AudioTrackInfo { sample_rate, channels },
+        })
+    }
+
+    /// 音轨元数据（采样率 / 声道数）
+    pub fn info(&self) -> AudioTrackInfo {
+        self.info
+    }
+
+    /// 下一帧原始 AAC 样本：`Ok(None)` = 音轨结束
+    pub fn next_sample(&mut self) -> Result<Option<Vec<u8>>, VideoError> {
+        if self.next_id > self.sample_count {
+            return Ok(None);
+        }
+        let Some(sample) = self
+            .reader
+            .read_sample(self.track_id, self.next_id)
+            .map_err(|e| VideoError::Backend(format!("mp4 读音频样本失败: {e}")))?
+        else {
+            return Ok(None);
+        };
+        self.next_id += 1;
+        Ok(Some(sample.bytes.to_vec()))
+    }
+}
+
 /// AVCC（4 字节长度前缀 NAL 串）→ Annex-B（00 00 00 01 起始码）
+#[cfg(any(target_os = "android", target_arch = "wasm32", test))]
 fn avcc_to_annexb(data: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(data.len() + 16);
     let mut i = 0;
@@ -231,6 +335,28 @@ mod tests {
         }
         // 5s 视频应有可观帧数（30fps → ~150）
         assert!(count > 60, "帧数异常: {count}");
+    }
+
+    #[test]
+    fn audio_demux_real_sample_file() {
+        let bytes = std::fs::read(SAMPLE).expect("示例视频存在");
+        let mut demux = AudioDemuxer::new(Cursor::new(bytes)).expect("音轨解复用成功");
+        let info = demux.info();
+        // 实测资产：AAC-LC / 44100Hz / 立体声（esds ASC 12 10）
+        assert_eq!(info.sample_rate, 44100);
+        assert_eq!(info.channels, 2);
+
+        // 整轨拉完：样本量可观，末尾 None
+        let mut count = 0u32;
+        let mut total = 0usize;
+        while let Some(data) = demux.next_sample().expect("读音频样本") {
+            assert!(!data.is_empty());
+            total += data.len();
+            count += 1;
+        }
+        // 5.76s @44100Hz，AAC 每样本 1024 帧 → ~250 样本
+        assert!(count > 100, "音频样本数异常: {count}");
+        assert!(total > 10_000, "音频字节量异常: {total}");
     }
 
     #[test]

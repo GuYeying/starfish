@@ -40,7 +40,10 @@ pub mod device;
 #[cfg(target_arch = "wasm32")]
 mod device_web;
 pub mod record;
+/// 流式线性插值重采样（视频音轨泵等推式声源按混音域推帧前的采样率适配）
+pub mod resample;
 pub mod sfx;
+pub mod voice;
 mod music;
 mod sound_data;
 mod ring;
@@ -54,6 +57,7 @@ pub use sfx::{AudioEffect, ChannelState, FadeState, FadeType, SfxChannel};
 pub use music::MusicPlayer;
 pub use record::AudioRecorder;
 pub use stream::MusicStream;
+pub use voice::StreamVoice;
 pub use sound_data::SoundData;
 
 use self::music::MusicSource;
@@ -69,6 +73,8 @@ struct Inner {
     reserved: usize,
     /// 组总线音量（稠密索引 = group_id - 1），混音时在锁内查表
     group_volumes: Vec<f32>,
+    /// 流式声部（推式 PCM：视频音轨 / 程序化合成 / 网络音频流）
+    stream_voices: Vec<Arc<voice::StreamVoiceSlot>>,
 }
 
 impl Inner {
@@ -79,6 +85,7 @@ impl Inner {
             scratch: Vec::with_capacity(2048),
             reserved: 0,
             group_volumes: Vec::new(),
+            stream_voices: Vec::new(),
         }
     }
 
@@ -139,6 +146,39 @@ impl Inner {
                         output[i].right += scratch[i].right * g;
                     }
                 }
+            }
+        }
+
+        // 流式声部（推式 PCM：推方 = 应用/解码泵，读者 = 本回调）
+        self.stream_voices
+            .retain(|v| !v.closed.load(Ordering::Relaxed));
+        for v in &self.stream_voices {
+            if v.muted.load(Ordering::Relaxed) {
+                continue;
+            }
+            scratch.fill(StereoFrame::SILENT);
+            let written = v.ring.read(&mut scratch[..output.len()]);
+            if written == 0 {
+                continue;
+            }
+            let mut g = master_vol * *v.volume.lock().unwrap();
+            let mut fade = v.fade.lock().unwrap();
+            if let Some(f) = fade.as_mut() {
+                g *= f.gain();
+                if f.advance(written) {
+                    if matches!(f.fade_type, crate::base::audio::common::FadeType::Out) {
+                        v.closed.store(true, Ordering::Relaxed);
+                    }
+                    *fade = None;
+                }
+            }
+            drop(fade);
+            if g <= 0.0 {
+                continue;
+            }
+            for i in 0..written {
+                output[i].left += scratch[i].left * g;
+                output[i].right += scratch[i].right * g;
             }
         }
 
@@ -227,7 +267,7 @@ impl AudioMixer {
     // ── SFX API ──
 
     pub fn play(&mut self, sound: Arc<SoundData>) -> Result<Option<usize>, AudioError> {
-        self.play_with(sound, 0, 0.0)
+        self.play_with(sound, 0)
     }
 
     pub fn play_on(&mut self, sound: Arc<SoundData>, channel: usize) -> Result<(), AudioError> {
@@ -237,17 +277,12 @@ impl AudioMixer {
             .sfx_channels
             .get_mut(channel)
             .ok_or(AudioError::custom("channel out of range"))?;
-        *ch = SfxChannel::with_sound(sound, 0, 0.0);
+        *ch = SfxChannel::with_sound(sound, 0);
         Ok(())
     }
 
-    pub fn play_with(
-        &mut self,
-        sound: Arc<SoundData>,
-        loops: i32,
-        fade_in_ms: f32,
-    ) -> Result<Option<usize>, AudioError> {
-        self.play_in_group(None, sound, loops, fade_in_ms)
+    pub fn play_with(&mut self, sound: Arc<SoundData>, loops: i32) -> Result<Option<usize>, AudioError> {
+        self.play_in_group(None, sound, loops)
     }
 
     pub fn play_in_group(
@@ -255,7 +290,6 @@ impl AudioMixer {
         group: Option<GroupHandle>,
         sound: Arc<SoundData>,
         loops: i32,
-        fade_in_ms: f32,
     ) -> Result<Option<usize>, AudioError> {
         let sound = resample_to_domain(sound, self.output_sample_rate);
         let mut inner = self.inner.lock().unwrap();
@@ -276,11 +310,23 @@ impl AudioMixer {
         };
         match idx {
             Some(i) => {
-                inner.sfx_channels[i] = SfxChannel::with_sound(sound, loops, fade_in_ms);
+                inner.sfx_channels[i] = SfxChannel::with_sound(sound, loops);
                 Ok(Some(i))
             }
             None => Ok(None),
         }
+    }
+
+    /// 打开一路流式声部（推式 PCM；每路独立管道，互不干扰）
+    ///
+    /// 三段式生命周期：`push_interleaved` 推帧（环形缓冲满 = 背压少收）
+    /// → `set_volume` / `set_muted` / `fade_in` / `fade_out_and_close`
+    /// → `close` 释放。典型客户：视频音轨、程序化合成、网络音频流。
+    /// 声部按设备采样率推帧（[`Self::output_sample_rate`]）。
+    pub fn open_stream_voice(&mut self) -> StreamVoice {
+        let slot = Arc::new(voice::StreamVoiceSlot::new(self.output_sample_rate));
+        self.inner.lock().unwrap().stream_voices.push(Arc::clone(&slot));
+        StreamVoice { slot }
     }
 
     pub fn create_group(&mut self) -> GroupHandle {
@@ -717,7 +763,7 @@ mod tests {
         let mut inner = Inner::new(4);
         let samples = vec![0.1f32; 200];
         let data = Arc::new(SoundData::from_interleaved_f32(&samples, 44100));
-        let mut ch = SfxChannel::with_sound(data, 0, 0.0);
+        let mut ch = SfxChannel::with_sound(data, 0);
         ch.group = Some(GroupHandle(1));
         inner.sfx_channels[0] = ch;
         inner.group_volumes.push(0.5); // 组 1 音量 0.5

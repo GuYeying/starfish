@@ -39,6 +39,7 @@ const FEATURE_ANDROID_SUPPORT: &[(&str, Support)] = &[
     ("video", Support::Ok),
     ("dialog", Support::Ok),
     ("net", Support::Ok),
+    ("io", Support::Ok),
     ("gamepad", Support::Stub),
 ];
 

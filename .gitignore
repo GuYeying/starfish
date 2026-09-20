@@ -7,6 +7,9 @@ recording.wav
 
 # ── 工具产物 ──
 .VSCodeCounter/
+.claude/
+.cargo/
+.vscode/
 
 # ── 未引用的大型素材（精简上传决策 2026-09-06：本地保留，不入库；需要时移除对应行） ──
 /resources/objects/

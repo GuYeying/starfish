@@ -81,6 +81,28 @@ mod imp {
     pub(super) async fn exists(path: &str) -> Result<bool, IoError> {
         Ok(resolve(path).exists())
     }
+
+    /// 测试专用：清除基准目录（恢复 CWD 相对）
+    #[cfg(test)]
+    pub fn clear_base_dir() {
+        *BASE_DIR.lock().unwrap() = None;
+    }
+
+    pub fn base_dir() -> Option<PathBuf> {
+        BASE_DIR.lock().unwrap().clone()
+    }
+}
+
+/// 当前基准目录（只读视图；与 [`set_base_dir`] 对偶）
+///
+/// - Android：`run` 自动注入的应用私有目录——资产落盘等需要**绝对路径**
+///   的场景由此取根（`base_dir()` + 相对名自行拼接，或直接走相对 io API）
+/// - 桌面：用户手动设置则返回之；未设置 = `None`（CWD 相对）
+/// - Web：不存在——Web 的"基准"是 URL 前缀（由浏览器相对语义消化），
+///   无读取方故不设 getter
+#[cfg(not(target_arch = "wasm32"))]
+pub fn base_dir() -> Option<std::path::PathBuf> {
+    imp::base_dir()
 }
 
 // ── Web：fetch 直实现（GET 读 / POST 保存）─────────────────────────
@@ -88,6 +110,8 @@ mod imp {
 #[cfg(target_arch = "wasm32")]
 mod imp {
     use super::IoError;
+    use std::path::Path;
+    use std::sync::Mutex;
     use wasm_bindgen::JsCast;
 
     async fn fetch_bytes(
@@ -128,19 +152,47 @@ mod imp {
         Ok(js_sys::Uint8Array::new(&buf_val).to_vec())
     }
 
+    /// 相对 URL 的基准前缀：与原生 BASE_DIR 对偶（如 `"assets/v3"` 把
+    /// `read("a.bin")` 指到 `页面origin/assets/v3/a.bin`；也可给跨源 CDN
+    /// 完整 URL）。未设置 = 浏览器相对语义（相对页面地址）。
+    static BASE_URL: Mutex<Option<String>> = Mutex::new(None);
+
+    pub fn set_base_dir(dir: &Path) {
+        *BASE_URL.lock().unwrap() = Some(dir.to_string_lossy().into_owned());
+    }
+
+    /// 相对 URL → 基准前缀拼接；绝对 URL / origin 绝对路径原样
+    /// （对齐原生"绝对路径不受影响"：`/` 开头 = origin 绝对，视为绝对）
+    fn resolve_url(path: &str) -> String {
+        if path.starts_with('/')
+            || path.starts_with("http://")
+            || path.starts_with("https://")
+            || path.starts_with("//")
+        {
+            return path.to_string();
+        }
+        match BASE_URL.lock().unwrap().as_deref() {
+            Some(base) => format!("{}/{}", base.trim_end_matches('/'), path),
+            None => path.to_string(),
+        }
+    }
+
     pub(super) async fn read(path: &str) -> Result<Vec<u8>, IoError> {
-        fetch_bytes(path, "GET", None).await
+        fetch_bytes(&resolve_url(path), "GET", None).await
     }
 
     pub(super) async fn write(path: &str, data: Vec<u8>) -> Result<(), IoError> {
-        fetch_bytes(path, "POST", Some(data)).await.map(|_| ())
+        fetch_bytes(&resolve_url(path), "POST", Some(data))
+            .await
+            .map(|_| ())
     }
 
     pub(super) async fn exists(path: &str) -> Result<bool, IoError> {
+        let url = resolve_url(path);
         let window = web_sys::window().ok_or(IoError::Backend("无 window".into()))?;
         let mut init = web_sys::RequestInit::new();
         init.method("HEAD");
-        let req = web_sys::Request::new_with_str_and_init(path, &init)
+        let req = web_sys::Request::new_with_str_and_init(&url, &init)
             .map_err(|e| IoError::Backend(format!("Request 构造失败: {e:?}")))?;
         let resp_val = wasm_bindgen_futures::JsFuture::from(window.fetch_with_request(&req))
             .await
@@ -154,12 +206,15 @@ mod imp {
 
 // ── 公开 API（统一异步；原生阻塞实现 + Web 真异步）──────────────────
 
-/// 设置相对路径的基准目录（仅原生平台）
+/// 设置相对路径的基准（全平台；覆盖写，可重复调用）
 ///
-/// Android/iOS 沙箱场景：在 `android_main` 注入 `internal_data_path()`，
-/// 此后 `read`/`write` 的相对路径自动落到应用私有目录内——调用方无需
-/// 关心沙箱绝对路径。绝对路径不受影响；未设置时 = CWD 相对。
-#[cfg(not(target_arch = "wasm32"))]
+/// - 原生：`dir` 为目录，相对路径 → `dir.join(path)`。Android 由引擎 `run`
+///   自动注入应用私有目录（internal_data_path）；桌面默认 CWD 相对，可手动
+///   指定（如把存档目录与启动位置解耦）。绝对路径不受影响。
+/// - Web：`dir` 为 **URL 前缀**，相对路径 → `{dir}/{path}`（如 `"assets/v3"`
+///   把 `read("a.bin")` 指到 `页面origin/assets/v3/a.bin`；也可给跨源 CDN
+///   完整 URL）。未设置 = 浏览器相对语义（相对页面地址）；`/` 开头视为
+///   origin 绝对路径，不受前缀影响——对齐原生"绝对路径不受影响"。
 pub fn set_base_dir(dir: impl AsRef<std::path::Path>) {
     imp::set_base_dir(dir.as_ref())
 }
@@ -228,5 +283,31 @@ mod tests {
         let s = pollster::block_on(read_text(&path)).unwrap();
         assert_eq!(s, "hello starfish");
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn base_dir_redirects_relative_paths() {
+        let base = std::env::temp_dir().join("starfish_io_test_base");
+        std::fs::create_dir_all(&base).unwrap();
+        set_base_dir(&base);
+
+        // 相对路径被重定向进基准目录
+        pollster::block_on(write("rel_redirect.bin", vec![9u8, 8, 7])).unwrap();
+        let redirected = base.join("rel_redirect.bin");
+        assert!(redirected.is_file(), "相对路径应落在基准目录内");
+        assert_eq!(
+            pollster::block_on(read("rel_redirect.bin")).unwrap(),
+            vec![9u8, 8, 7]
+        );
+
+        // 绝对路径不受基准影响
+        let abs = temp_path("abs_untouched");
+        pollster::block_on(write(&abs, vec![1u8])).unwrap();
+        assert!(std::path::Path::new(&abs).is_file());
+
+        imp::clear_base_dir();
+        std::fs::remove_file(&redirected).ok();
+        std::fs::remove_file(&abs).ok();
+        std::fs::remove_dir(&base).ok();
     }
 }

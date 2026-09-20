@@ -72,6 +72,11 @@ impl AudioRecorder {
 
     /// 打开默认录音设备，指定环形缓冲容量（帧，向上取 2 的幂）
     pub fn new_with_capacity(capacity_frames: usize) -> Result<Self, AudioError> {
+        // 隐式权限申请（Android 阻塞至授权 ≤15s，须在窗口就绪后构造；
+        // 桌面/Web 无权限模型立即通过——Web 的麦克风授权由浏览器在下方
+        // open_input_stream 时弹出）。应用侧零感知零 cfg。
+        crate::base::permission::ensure(crate::base::permission::Permission::Microphone);
+
         let ring = Arc::new(SharedRing::with_capacity(capacity_frames));
         let dropped = Arc::new(AtomicU64::new(0));
 

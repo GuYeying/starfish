@@ -20,7 +20,7 @@ pub mod dialog;
 pub mod net;
 #[cfg(feature = "io")]
 pub mod io;
-pub mod web;
+pub mod debug;
+pub mod permission;
 pub mod window;
-mod rt;
 pub mod error;

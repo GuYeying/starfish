@@ -430,6 +430,9 @@ mod imp {
         title: Option<&str>,
         filters: &[Filter],
     ) -> Result<PickJob, DialogError> {
+        // 类加载器自愈是 Android 容器专属（原生线程 FindClass 查不到应用类）；
+        // iOS 无 Java 世界，直接跳过（iOS 支持编译验证所需，实机待验）
+        #[cfg(target_os = "android")]
         ensure_classloader().map_err(DialogError::Backend)?;
         let slot = Arc::new(Mutex::new(None));
         let slot_cb = slot.clone();
@@ -468,6 +471,7 @@ mod imp {
         file_name: &str,
         data: Vec<u8>,
     ) -> Result<SaveJob, DialogError> {
+        #[cfg(target_os = "android")]
         ensure_classloader().map_err(DialogError::Backend)?;
         let slot = Arc::new(Mutex::new(None));
         let slot_cb = slot.clone();
@@ -563,58 +567,8 @@ mod imp {
         }
     }
 
-    /// Android：运行时申请权限（同步阻塞至用户操作或 ~15s 超时）
-    ///
-    /// NativeActivity 无 Java 回调可收结果 → 申请后轮询授权状态。
-    /// 返回 true = 已授权。需在窗口/事件循环就绪后调用（系统对话框需叠加显示）。
-    #[cfg(target_os = "android")]
-    pub fn ensure_permission(permission: &str) -> bool {
-        use jni::objects::{JObject, JString, JValue};
-
-        // 已授权检测（PERMISSION_GRANTED = 0）
-        fn granted(
-            env: &mut robius_android_env::JNIEnv,
-            activity: &JObject,
-            perm: &JString,
-        ) -> bool {
-            env.call_method(
-                activity,
-                "checkSelfPermission",
-                "(Ljava/lang/String;)I",
-                &[JValue::Object(perm)],
-            )
-            .and_then(|v| v.i())
-            .map(|i| i == 0)
-            .unwrap_or(false)
-        }
-
-        let r = robius_android_env::with_activity(|env, activity| -> bool {
-            let Ok(perm) = env.new_string(permission) else {
-                return false;
-            };
-            if granted(env, activity, &perm) {
-                return true;
-            }
-            // 申请（系统弹授权对话框；NativeActivity 基类无结果回调 → 轮询状态）
-            if let Ok(arr) = env.new_object_array(1, "java/lang/String", &perm) {
-                let _ = env.call_method(
-                    activity,
-                    "requestPermissions",
-                    "([Ljava/lang/String;I)V",
-                    &[JValue::Object(&arr), JValue::Int(7001)],
-                );
-            }
-            for _ in 0..150 {
-                std::thread::sleep(std::time::Duration::from_millis(100));
-                if granted(env, activity, &perm) {
-                    return true;
-                }
-            }
-            false
-        });
-        r.unwrap_or(false)
-    }
-
+    /// Android：运行时申请权限 → 已迁往 [`crate::base::permission`]（2026-09-19：
+    /// 权限是 OS 能力而非对话框关切；录音等音频场景因此不再依赖 dialog 特性）
     pub(super) async fn pick_file_impl(
         title: Option<&str>,
         filters: &[Filter],
@@ -698,15 +652,6 @@ pub async fn pick_file(
 /// - 用户取消 → `Ok(None)`
 pub async fn save_bytes(file_name: &str, data: impl AsRef<[u8]>) -> Result<Option<PathBuf>, DialogError> {
     imp::save_bytes_impl(file_name, data.as_ref()).await
-}
-
-/// Android：运行时申请权限（同步阻塞至用户操作或 ~15s 超时；返回 true = 已授权）
-///
-/// 经 JNI 调 Activity 的 requestPermissions 并轮询授权状态——NativeActivity
-/// 无 Java 回调可收结果。仅 android 目标存在。
-#[cfg(target_os = "android")]
-pub fn ensure_permission(permission: &str) -> bool {
-    imp::ensure_permission(permission)
 }
 
 // ── 轮询式 API（非 wasm 平台；Android 强烈推荐）──────────────────────

@@ -19,12 +19,12 @@ cargo test <名称子串>              # 单个测试
 cargo check --examples            # 检查所有示例编译（未启用特性的示例自动跳过）
 cargo run --example 02_triangles  # 运行示例（01~11 按学习路线编号；02 是新循环模型的规范示例）
 cargo run --features video --example 13_video_decode  # 特性化示例需显式开启对应特性
-cargo check --no-default-features # 最小核心（渲染/窗口/循环/时间/资源/audio/web入口）
+cargo check --no-default-features # 最小核心（渲染/窗口/循环/时间/资源/audio/诊断）
 ```
 
-示例按类分目录（`examples/basics|render|draw|audio|platform|media/`），名称经
-`Cargo.toml` 显式 `[[example]]` 段映射保持不变（`--example 02_triangles` 照旧）；
-未启用特性的示例（06/07/13/14）自动跳过编译。
+示例集中在 `examples/probe/`（按模块探针家族，共享
+kit.rs，`starfish::app_entry!` 一行入口覆盖全平台、应用代码零 cfg，见
+「探针与统一入口」节）。
 
 示例资源在 `resources/`（部分示例运行时读取，如 `resources/textures/wall.jpg`）。
 
@@ -48,7 +48,10 @@ cargo check --no-default-features # 最小核心（渲染/窗口/循环/时间/�
 **文件 IO 模块（`base/io.rs`，feature `io`，2026-09-18 重启旧 iofi 场景）**：
 统一异步 API `read / read_text / write / write_text / exists`——原生 std::fs
 直实现（阻塞包 async 壳），Web fetch 直实现（GET 读 / POST 保存，path 即
-URL）。与批次 14 撤销的 iofi 的区别：Web 有 fetch 真实现，模块价值回归。
+URL）。`set_base_dir` **全平台**：原生 = 目录拼接（Android 由引擎 `run`
+自动注入私有目录，桌面默认 CWD 可手动改），Web = URL 前缀拼接（未设置 =
+浏览器相对语义；`/` 开头视为 origin 绝对不受影响）。与批次 14 撤销的
+iofi 的区别：Web 有 fetch 真实现，模块价值回归。
 其余文件管理操作（list_dir/create_dir/删除等）v1 不设：原生用 std::fs，
 Web fetch 无对应语义。
 
@@ -81,6 +84,34 @@ impl Application for App {
 - 键鼠状态表由引擎维护（`ctx.keyboard().is_pressed(..)` 轮询 + 事件双轨，对齐 pygame）。
 - 窗口关闭（CloseRequested）v1 语义：自动退出，不可否决。
 - 选型记录：放弃"Python 持 while 的 poll 泵"双门设计，统一单门回调；未来 PyO3 层用生成器门面（每帧一个 `yield`）包装回 pygame 风格。
+
+### 探针与统一入口（examples/probe/，跨平台验收基建）
+
+```bash
+cargo run --example probe_net                       # 桌面跑探针（其余同名）
+python examples/server/server.py --web-dir ./web    # probe_io/net 的对端 + 静态部署
+cargo xtask android probe_io --build                # 安卓出包（同源双注册 probe_<名>_android）
+```
+
+- **probe 家族 = 模块独立测试案例**（window/font/gfx/audio/record/video/
+  gamepad/dialog/net/io 各一），核心使命：验证**一套源码、零 `#[cfg]` 跑
+  全平台**。应用代码无条件编译；平台差异只允许收敛在 `app_entry!` 宏、
+  库入口函数族与 `examples/probe/kit.rs`（共享 harness，内部允许 cfg）。
+- **入口统一**：`run` **三平台同名**（Android 上从 `base::app` 的全局捕获槽
+  取 OS 递入的 AndroidApp，自动把私有目录注入 **io base_dir**——运行环境
+  状态的唯一事实源在 io）+ **`app_entry!`** 统一宏（`starfish::app_entry!(
+  App::new(), WindowConfig::new(..))` 一行覆盖全平台；生成的 `android_main`
+  只做"捕获句柄 → 调 main"，参数必须是纯构造表达式）。
+- **kit 要点**：`StatusPanel`（状态面板/判定/每帧投影）；三态判定
+  **PASS / SKIP / FAIL**（能力缺失如 Web 无 UDP = SKIP，非 FAIL）；
+  `asset_path(逻辑路径, include_bytes!)` 零 cfg 资产解析（Android 落盘
+  私有目录，web 走 server.py 的 resources 挂载——三平台同一字符串）。
+- **无头判读锚点**：所有判定走 `console_log`，格式 `[probe] TAG PASS|SKIP|FAIL
+  detail`。时间类探针（video/audio/record）用存活模式（坑位 7）；audio 加
+  `--autoplay-policy=no-user-gesture-required`，record 加 fake-device flags。
+- **Web 真实浏览器注意**：文件选择器（dialog）必须在用户手势内打开——
+  probe_dialog 自动尝试会被拒，点击屏幕即重试；audio 有点击重试播放
+  （自动播放策略）。
 
 ### 渲染（base/render/）
 
@@ -146,14 +177,19 @@ cargo xtask android 15_empty_window --no-default-features --features dialog,gfx 
 - 工具本体 = `xtask/` crate（xtask 模式，Rust 原生跨平台；特性→Android 支持登记在
   `FEATURE_ANDROID_SUPPORT` 表，**新增模块加一行**）。旧 bash 脚本 `scripts/android_run_example.sh`
   兼容保留。
-- winit 走 `android-native-activity`：APK 用系统 `NativeActivity` 模板（`android/AndroidManifest.xml`），`android_main` → `run_android` 与桌面回调一致。
+- winit 走 `android-native-activity`：APK 用系统 `NativeActivity` 模板（`android/AndroidManifest.xml`），`android_main` → 捕获 `AndroidApp` → `main` → `run`，与桌面回调一致。
 - **API 26 是硬性下限**（cpal 的 AAudio；cargo-ndk 默认 21 会报找不到 `libaaudio`），且 platform flag 是大写 `-P`/`--platform`。
-- Android 示例采用**同源双注册**：同一文件注册两条 `[[example]]`（桌面 bin + `*_android` cdylib；bin 与 cdylib 不能混用），文件内 `#[unsafe(no_mangle)] fn android_main`（cfg 分家）。资源 cfg 分家：桌面读 `resources/`，Android 内嵌/私有目录落盘。
+- Android 示例采用**同源双注册**：同一文件注册两条 `[[example]]`（桌面 bin + `*_android` cdylib；bin 与 cdylib 不能混用），入口统一 `app_entry!`（无手写 android_main）。资源差异由 `permission`/`io`/kit 内部吸收：桌面读 `resources/`，Android 内嵌落盘私有目录。
 - dialog 需要 APK 内 **classes.dex**（robius 的 FilePickerFragment）+ `hasCode="true"`——xtask 自动并入。
 - Rust 日志/panic 进 logcat tag `RustStdoutStderr`：`adb logcat -s RustStdoutStderr`。
 
 ## 文档惯例
 
+- **模块架构说明**：`architecture/<模块>.md`——每模块一份"现状架构"（八节
+  固定模板：关键文件/架构与数据流/API 速览/平台差异收敛点/设计纪律/测试
+  锚点/深入入口），供开发者与 agent 改动前快速建立心智模型。**架构级批次
+  落地时同步更新对应文档**（与写 changelog 同为批次收尾动作）；分层边界与
+  模板见 `architecture/README.md`。
 - **每日更新日志**：`doc/log/starfish_changelog_YYYY-MM-DD.md`，按批次记录架构决策（设计背景 / 设计方案 / 关键保证 结构），含当天测试状态。
 - 根目录 `未记录到日志的` 是待整理进日志的会话记录暂存文件。
 - `reference/` 存放设计讨论与技术选型笔记（SDL 退役决策、跨平台方案、着色器、AssetManager 等）。

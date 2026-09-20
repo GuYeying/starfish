@@ -62,7 +62,7 @@ impl RenderEntry{
         surface_settings: Option<SurfaceSettings>,
         gpu_settings:Option<GpuSettings>,
     ) -> Result<(RenderContext,RenderResourceAccess,RenderSurface), RenderContextError>{
-        crate::base::rt::debug_assert_main_thread("RenderEntry::new");
+        crate::base::debug::assert_main_thread("RenderEntry::new");
         block_on(
             RenderEntry::async_new(
                 window,
@@ -205,7 +205,7 @@ impl RenderEntry{
         window: &Window,
         surface_settings: SurfaceSettings,
     ) -> Result<(RenderContext, RenderSurface), RenderContextError> {
-        crate::base::rt::debug_assert_main_thread("RenderEntry::surface_from_context");
+        crate::base::debug::assert_main_thread("RenderEntry::surface_from_context");
         block_on(Self::async_surface_from_context(context, window, surface_settings))
     }
 

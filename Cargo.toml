@@ -1,13 +1,10 @@
 [package]
 name = "starfish"
-version = "0.7.0"
+version = "0.9.2"
 edition = "2024"
-
-
 
 [lib]
 crate-type = ["cdylib", "rlib"]
-
 
 # ── 特性（场景化裁剪：默认全包含；可选剔除 gfx / font / video）──
 # - 渲染/窗口/循环/时间/资源/Web入口 为核心，恒参与编译
@@ -19,7 +16,7 @@ default = ["gfx", "font", "video", "gamepad", "dialog", "net", "io"]
 gfx = []
 font = ["dep:ttf-parser"]
 gamepad = ["dep:gilrs"]
-dialog = ["dep:rfd", "dep:js-sys", "dep:robius-file-picker", "dep:robius-android-env", "dep:jni"]
+dialog = ["dep:rfd", "dep:js-sys", "dep:robius-file-picker"]
 net = ["dep:js-sys"]
 io = []
 video = [
@@ -34,7 +31,6 @@ video = [
     "dep:objc2-core-video",
     "dep:objc2-video-toolbox",
     "dep:objc2-core-foundation",
-    "dep:jni",
     "dep:mp4",
     "dep:js-sys",
 ]
@@ -74,9 +70,10 @@ raw-window-handle = "0.6.2"
 
 # ── 音频 ──
 # cpal：跨平台音频设备层（WASAPI/CoreAudio/ALSA/WebAudio；RustAudio 机构维护）。
-# symphonia：通用音频解码（OGG/MP3/FLAC/WAV），纯 Rust。二者皆为 2026-09-08 替代 SDL3。
+# symphonia：通用音频解码（OGG/MP3/FLAC/WAV/AAC），纯 Rust。二者皆为 2026-09-08 替代 SDL3。
+# aac（2026-09-20）：mp4 音轨硬链路——视频音轨推流式声部（base/video/audio_track.rs）
 cpal = "0.18"
-symphonia = { version = "0.5", default-features = false, features = ["ogg", "mp3", "flac", "wav", "pcm"] }
+symphonia = { version = "0.5", default-features = false, features = ["ogg", "mp3", "flac", "wav", "pcm", "aac"] }
 
 # ── 数学 / 几何 ──
 glam = { version = "0.33.2", features = ["bytemuck"] }
@@ -209,201 +206,127 @@ objc2-core-foundation = { version = "0.3", optional = true }
 gilrs = { version = "0.11", optional = true }
 rfd = { version = "0.15", optional = true }
 
-# ── Android 视频硬解（MediaCodec via JNI + mp4 解复用，见 base/video/android.rs）──
+# ── Android 依赖（MediaCodec via JNI、robius 环境桥、ndk-context）────
+# 均为 Android 非可选：核心路径使用（app.rs 的 run 引导 / base::os 的
+# 权限申请 / video 的 MediaCodec），对齐批次 17 的 ndk-context 先例
 [target.'cfg(target_os = "android")'.dependencies]
-jni = { version = "0.21", optional = true }
-# app.rs：run_android 把 ndk-context 的 Application 换成真实 Activity（录音权限/dialog 依赖）
+jni = { version = "0.21" }
 ndk-context = "0.1"
-# dialog 诊断探针 / 录音权限申请用（robius 环境桥）
-robius-android-env = { version = "0.2", optional = true }
+robius-android-env = { version = "0.2" }
 
 # ── 移动端对话框文件选择（robius-file-picker，见 base/dialog.rs）──
 [target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
 robius-file-picker = { version = "0.3", optional = true }
 
-# ── 示例（按目录分类：basics/render/draw/audio/platform/media；名称保持稳定，
-#     经显式段映射路径；按特性声明依赖，未启用时不参与编译）──
+# ── 探针家族（examples/probe/，共享 kit.rs；app_entry! 一行入口覆盖
+#    全平台，应用代码零 cfg。判读锚点 = console `[probe] TAG PASS`，
+#    无头存活模式收割，见 CLAUDE.md「探针与统一入口」）──
 [[example]]
-name = "01_hello_world"
-path = "examples/basics/01_hello_world.rs"
-
-[[example]]
-name = "02_triangles"
-path = "examples/basics/02_triangles.rs"
-
-# Android 实机验证示例（仅 android 目标有实体；桌面跑 dummy main）
-# crate-type cdylib：NativeActivity 需 dlopen 的共享库（cargo 1.61+ 支持）
-[[example]]
-name = "02_triangles_android"
-path = "examples/basics/02_triangles_android.rs"
-crate-type = ["cdylib"]
-
-[[example]]
-name = "03_texture"
-path = "examples/render/03_texture.rs"
-
-[[example]]
-name = "04_coord_system"
-path = "examples/render/04_coord_system.rs"
-
-[[example]]
-name = "05_storage_cube"
-path = "examples/render/05_storage_cube.rs"
-
-[[example]]
-name = "06_draw_gfx"
-path = "examples/draw/06_draw_gfx.rs"
-required-features = ["gfx"]
-
-[[example]]
-name = "07_draw_text"
-path = "examples/draw/07_draw_text.rs"
+name = "probe_window"
+path = "examples/probe/probe_window.rs"
 required-features = ["font"]
 
 [[example]]
-name = "08_play_sound"
-path = "examples/audio/08_play_sound.rs"
-
-[[example]]
-name = "09_play_music_stream"
-path = "examples/audio/09_play_music_stream.rs"
-
-[[example]]
-name = "10_record_mic"
-path = "examples/audio/10_record_mic.rs"
-
-[[example]]
-name = "11_web_triangles"
-path = "examples/platform/11_web_triangles.rs"
-
-[[example]]
-name = "13_video_decode"
-path = "examples/media/13_video_decode.rs"
-required-features = ["video"]
-
-[[example]]
-name = "14_gamepad"
-path = "examples/media/14_gamepad.rs"
-required-features = ["gamepad"]
-
-# 跨平台空窗口模板：同一源文件双注册（bin+cdylib 不能混用，见下）
-# - 桌面：cargo run --example 15_empty_window
-# - Android：./scripts/android_run_example.sh 15_empty_window_android
-[[example]]
-name = "15_empty_window"
-path = "examples/basics/15_empty_window.rs"
-
-[[example]]
-name = "15_empty_window_android"
-path = "examples/basics/15_empty_window.rs"
-crate-type = ["cdylib"]
-
-# 对话框模块跨平台验证（桌面 rfd / Android robius）
-[[example]]
-name = "16_dialog"
-path = "examples/platform/16_dialog.rs"
-
-[[example]]
-name = "16_dialog_android"
-path = "examples/platform/16_dialog.rs"
-crate-type = ["cdylib"]
-
-# Android 运行时权限全流程探针（hello 窗口 + 权限 + 屏显诊断）
-[[example]]
-name = "17_permission_probe"
-path = "examples/platform/17_permission_probe.rs"
-
-[[example]]
-name = "17_permission_probe_android"
-path = "examples/platform/17_permission_probe.rs"
-crate-type = ["cdylib"]
-
-# 退出/重进链路探针（无渲染，模拟器可复现）
-[[example]]
-name = "18_exit_probe"
-path = "examples/platform/18_exit_probe.rs"
-
-[[example]]
-name = "18_exit_probe_android"
-path = "examples/platform/18_exit_probe.rs"
-crate-type = ["cdylib"]
-
-# 跨平台 IO 探针（io 模块全流程：写/存在/读回/文本往返）
-[[example]]
-name = "19_io_probe"
-path = "examples/platform/19_io_probe.rs"
-
-[[example]]
-name = "19_io_probe_android"
-path = "examples/platform/19_io_probe.rs"
-crate-type = ["cdylib"]
-
-# 网络探针（UDP 广播发现 → TCP echo → UDP echo）
-[[example]]
-name = "20_net_probe"
-path = "examples/platform/20_net_probe.rs"
-
-[[example]]
-name = "20_net_probe_android"
-path = "examples/platform/20_net_probe.rs"
-crate-type = ["cdylib"]
-
-# Web 平台能力总探针（输入/音频/录音/视频/手柄/对话框/网络；桌面同样可跑）
-[[example]]
-name = "21_web_probe"
-path = "examples/platform/21_web_probe.rs"
-
-# Web 视频解码独立探针
-[[example]]
-name = "22_video_web"
-path = "examples/platform/22_video_web.rs"
-
-# 渲染族同源双注册（桌面 bin + Android cdylib，资源 cfg 分家）
-[[example]]
-name = "03_texture_android"
-path = "examples/render/03_texture.rs"
-crate-type = ["cdylib"]
-
-[[example]]
-name = "04_coord_system_android"
-path = "examples/render/04_coord_system.rs"
-crate-type = ["cdylib"]
-
-[[example]]
-name = "05_storage_cube_android"
-path = "examples/render/05_storage_cube.rs"
-crate-type = ["cdylib"]
-
-# 几何/文本/音频/视频族同源双注册
-[[example]]
-name = "06_draw_gfx_android"
-path = "examples/draw/06_draw_gfx.rs"
-crate-type = ["cdylib"]
-required-features = ["gfx"]
-
-[[example]]
-name = "07_draw_text_android"
-path = "examples/draw/07_draw_text.rs"
+name = "probe_window_android"
+path = "examples/probe/probe_window.rs"
 crate-type = ["cdylib"]
 required-features = ["font"]
 
 [[example]]
-name = "08_play_sound_android"
-path = "examples/audio/08_play_sound.rs"
-crate-type = ["cdylib"]
+name = "probe_font"
+path = "examples/probe/probe_font.rs"
+required-features = ["font"]
 
 [[example]]
-name = "09_play_music_stream_android"
-path = "examples/audio/09_play_music_stream.rs"
+name = "probe_font_android"
+path = "examples/probe/probe_font.rs"
 crate-type = ["cdylib"]
+required-features = ["font"]
 
 [[example]]
-name = "10_record_mic_android"
-path = "examples/audio/10_record_mic.rs"
-crate-type = ["cdylib"]
+name = "probe_io"
+path = "examples/probe/probe_io.rs"
+required-features = ["io", "font"]
 
 [[example]]
-name = "13_video_decode_android"
-path = "examples/media/13_video_decode.rs"
+name = "probe_io_android"
+path = "examples/probe/probe_io.rs"
 crate-type = ["cdylib"]
-required-features = ["video"]
+required-features = ["io", "font"]
+
+[[example]]
+name = "probe_audio"
+path = "examples/probe/probe_audio.rs"
+required-features = ["font"]
+
+[[example]]
+name = "probe_audio_android"
+path = "examples/probe/probe_audio.rs"
+crate-type = ["cdylib"]
+required-features = ["font"]
+
+[[example]]
+name = "probe_record"
+path = "examples/probe/probe_record.rs"
+required-features = ["font"]
+
+[[example]]
+name = "probe_record_android"
+path = "examples/probe/probe_record.rs"
+crate-type = ["cdylib"]
+required-features = ["font"]
+
+[[example]]
+name = "probe_dialog"
+path = "examples/probe/probe_dialog.rs"
+required-features = ["dialog", "font"]
+
+[[example]]
+name = "probe_dialog_android"
+path = "examples/probe/probe_dialog.rs"
+crate-type = ["cdylib"]
+required-features = ["dialog", "font"]
+
+[[example]]
+name = "probe_gamepad"
+path = "examples/probe/probe_gamepad.rs"
+required-features = ["gamepad", "font"]
+
+[[example]]
+name = "probe_gamepad_android"
+path = "examples/probe/probe_gamepad.rs"
+crate-type = ["cdylib"]
+required-features = ["gamepad", "font"]
+
+[[example]]
+name = "probe_gfx"
+path = "examples/probe/probe_gfx.rs"
+required-features = ["gfx", "font"]
+
+[[example]]
+name = "probe_gfx_android"
+path = "examples/probe/probe_gfx.rs"
+crate-type = ["cdylib"]
+required-features = ["gfx", "font"]
+
+[[example]]
+name = "probe_net"
+path = "examples/probe/probe_net.rs"
+required-features = ["net", "font"]
+
+[[example]]
+name = "probe_net_android"
+path = "examples/probe/probe_net.rs"
+crate-type = ["cdylib"]
+required-features = ["net", "font"]
+
+[[example]]
+name = "probe_video"
+path = "examples/probe/probe_video.rs"
+required-features = ["video", "font"]
+
+[[example]]
+name = "probe_video_android"
+path = "examples/probe/probe_video.rs"
+crate-type = ["cdylib"]
+required-features = ["video", "font"]

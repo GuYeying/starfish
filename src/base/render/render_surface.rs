@@ -170,7 +170,7 @@ impl RenderSurface{
 
 
     pub fn begin_frame(&mut self, clear_color: wgpu::Color,clear_depth:f32) {
-        crate::base::rt::debug_assert_main_thread("RenderSurface::begin_frame");
+        crate::base::debug::assert_main_thread("RenderSurface::begin_frame");
         // 获取当前交换链纹理（自愈式）：
         // Outdated/Lost → 重建交换链配置与深度/MSAA 纹理后重试（拖动窗口/最小化的常见情况）
         // Timeout/Occluded → 直接重试
@@ -255,7 +255,7 @@ impl RenderSurface{
     }
 
     pub fn present(&mut self) {
-        crate::base::rt::debug_assert_main_thread("RenderSurface::present");
+        crate::base::debug::assert_main_thread("RenderSurface::present");
         // 取出当前帧交换链纹理
         let frame = self.color_frame.take().expect("present() failed: No valid frames");
         // 1. 收集所有待提交命令
@@ -297,7 +297,7 @@ impl RenderSurface{
 
 
     pub fn resize(&mut self, width: u32, height: u32) {
-        crate::base::rt::debug_assert_main_thread("RenderSurface::resize");
+        crate::base::debug::assert_main_thread("RenderSurface::resize");
         // 0. 防 0 尺寸
         let width = width.max(1);
         let height = height.max(1);

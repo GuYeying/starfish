@@ -53,8 +53,31 @@ use winit::keyboard::PhysicalKey;
 use winit::window::{Window as WinitWindow, WindowId};
 #[cfg(target_os = "android")]
 use winit::platform::android::EventLoopBuilderExtAndroid;
+/// AndroidApp 再导出：`app_entry!` 宏的 android 分支经
+/// `$crate::base::app::AndroidApp` 取类型——用户 crate 无需依赖 winit
+/// （宏展开路径在用户 crate 解析，库内再导出是对外的唯一稳定锚点）。
 #[cfg(target_os = "android")]
-use winit::platform::android::activity::AndroidApp;
+pub use winit::platform::android::activity::AndroidApp;
+
+// ── Android OS 句柄捕获槽（app_entry! ↔ run 的桥）──────────────────
+// `android_main` 把系统递入的 AndroidApp 存进来，随后 `run` 从这里取——
+// 应用侧因此只有一个 `run`，与桌面/Web 完全对称（AndroidApp: Send + Sync，
+// 上游 android-activity 明确保证）。
+#[cfg(target_os = "android")]
+static ANDROID_APP: std::sync::OnceLock<AndroidApp> = std::sync::OnceLock::new();
+
+/// 捕获 OS 递入的 AndroidApp（幂等：二次存入被忽略）。
+/// 仅 `app_entry!` 生成的 android_main 调用。
+#[cfg(target_os = "android")]
+pub fn set_android_app(app: AndroidApp) {
+    let _ = ANDROID_APP.set(app);
+}
+
+/// 取出捕获的 AndroidApp（未捕获 = run 被绕过 android_main 直接调用，可诊断）
+#[cfg(target_os = "android")]
+fn take_android_app() -> Option<AndroidApp> {
+    ANDROID_APP.get().cloned()
+}
 
 /// 窗口/循环配置（[`run`] 入参）
 #[derive(Debug, Clone)]
@@ -187,6 +210,7 @@ pub trait Application {
     fn frame(&mut self, ctx: &mut Ctx);
 }
 
+
 /// 跨平台异步资源槽位：把"Web 异步初始化 / 桌面同步初始化"的平台差异
 /// 封进 [`init`](Self::init)，应用代码**零 cfg**。
 ///
@@ -276,24 +300,37 @@ impl<T: 'static> InitSlot<T> {
 #[cfg(target_arch = "wasm32")]
 pub fn run(app: impl Application + 'static, config: WindowConfig) {
     wasm_bindgen_futures::spawn_local(async move {
-        inner_run(app, config);
+        let event_loop =
+            EventLoop::new().expect("winit EventLoop 创建失败（run 必须在主线程调用）");
+        inner_run(event_loop, app, config);
     });
 }
 
 /// 运行应用直至 [`Ctx::exit`] 或窗口关闭。**必须在主线程调用。**
 #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
 pub fn run(app: impl Application, config: WindowConfig) -> ! {
-    inner_run(app, config)
+    let event_loop = EventLoop::new().expect("winit EventLoop 创建失败（run 必须在主线程调用）");
+    inner_run(event_loop, app, config)
 }
 
-/// Android 入口：由 `android_main` 调用（应用在 cdylib 中导出 `android_main`，
-/// 拿到 `AndroidApp` 后传给本函数）。`app` = 应用游戏逻辑（impl Application）。
-///
-/// Android 上 winit 经 `android-activity` 驱动事件循环，生命周期（onShow/onHide）
-/// 由 Android AMS 管理，starfish 不做 process::exit（由系统管控进程）。
+/// Android 上的 [`run`]：从模块内捕获槽取 OS 句柄（`app_entry!` 生成的
+/// `android_main` 已捕获），完成 Android 专属引导后进入与桌面/Web 完全
+/// 相同的 [`inner_run`]——**三个平台的 run 从此同名**。
 #[cfg(target_os = "android")]
-pub fn run_android(android_app: AndroidApp, app: impl Application, config: WindowConfig) {
-    crate::base::rt::mark_main_thread();
+pub fn run(app: impl Application, config: WindowConfig) -> ! {
+    let android_app = take_android_app().expect(
+        "run() 未捕获 AndroidApp——Android 上必须经 android_main 进入（app_entry! 已自动处理）",
+    );
+    // 统一收编各示例 android_main 的样板：backtrace 打开 + 应用私有目录注入
+    // （唯一事实源 = io 的 base_dir；需要绝对路径的场景经 `io::base_dir()` 读）。
+    // 注入在 EventLoop 创建之前 ⇒ start()/frame() 必然晚于注入，资产落盘与
+    // io 相对路径从此无需应用侧任何 cfg（旧式 android_main 手工
+    // `io::set_base_dir` 的写法被此处吸收，同值重复注入幂等无害）。
+    unsafe { std::env::set_var("RUST_BACKTRACE", "1") };
+    if let Some(dir) = android_app.internal_data_path() {
+        #[cfg(feature = "io")]
+        crate::base::io::set_base_dir(&dir);
+    }
     // 把 ndk-context 里的 Application 换成**真正的 NativeActivity**：
     // android-activity 初始化时存的是 Application（init.rs get_application），
     // 而 requestPermissions / getFragmentManager 等 Activity 独有方法在
@@ -324,36 +361,25 @@ pub fn run_android(android_app: AndroidApp, app: impl Application, config: Windo
             std::process::exit(0);
         }
     };
-    event_loop.set_control_flow(ControlFlow::Poll);
-    let mut adapter = Adapter {
-        app,
-        config,
-        ctx: None,
-        clock: Clock::new(),
-        event_buf: Vec::with_capacity(16),
-        started: false,
-        start_wait: 0,
-    };
-    let _result = event_loop.run_app(&mut adapter);
-    drop(adapter);
-    // 事件循环结束 = 应用语义上的"退出"。Android 系统此时只 finish Activity、
-    // 保留缓存进程，而 winit 每进程仅允许创建一次 EventLoop——用户从桌面图标
-    // 再进时，系统在同一缓存进程里起第二个 activity 实例，二次 android_main
-    // 必然 RecreationAttempt panic（实测：返回退出后再点图标闪退，后台划掉才
-    // 正常）。因此这里显式收掉整个进程，对齐桌面"run 返回即进程结束"语义
-    //（游戏退出即杀进程在 Android 生态是常规做法；drop 已先行清理音频流等）。
-    std::process::exit(0);
+    inner_run(event_loop, app, config)
 }
 
-fn inner_run<A: Application>(app: A, config: WindowConfig) -> ! {
+/// 三平台共用的循环驱动尾：节流策略 → Adapter 装配 → 驱动至退出 → 收进程。
+/// 平台专属只剩两处 cfg：节流（Web=Wait / 其余=Poll）与退出语义。
+///
+/// EventLoop 由各入口构建好传入（Android 经 android-activity 引导、桌面/Web
+/// 经 `EventLoop::new`），本函数不再关心"循环怎么来"。
+fn inner_run<A: Application>(
+    event_loop: winit::event_loop::EventLoop<()>,
+    app: A,
+    config: WindowConfig,
+) -> ! {
     // 钉主线程锚点：此后所有主线程 API 的调试断言以此为基准
-    crate::base::rt::mark_main_thread();
-    let event_loop =
-        EventLoop::new().expect("winit EventLoop 创建失败（run 必须在主线程调用）");
+    crate::base::debug::mark_main_thread();
     // Web：必须用 Wait——Poll 的调度策略是 Scheduler.yield/setTimeout
     //（"as fast as possible"，非 vsync），会让帧循环以 CPU 全速空转卡死页面；
     // Wait 下帧节奏由 request_redraw → canvas rAF 驱动（每 vsync 一帧）。
-    // 桌面：Poll（事件到达即处理 + about_to_wait 连续帧，桌面无此调度问题）。
+    // 桌面/安卓：Poll（事件到达即处理 + about_to_wait 连续帧，无此调度问题）。
     #[cfg(target_arch = "wasm32")]
     event_loop.set_control_flow(ControlFlow::Wait);
     #[cfg(not(target_arch = "wasm32"))]
@@ -370,10 +396,22 @@ fn inner_run<A: Application>(app: A, config: WindowConfig) -> ! {
     let result = event_loop.run_app(&mut adapter);
     // 先跑完应用与窗口（含音频流等）的析构，再收进程——process::exit 跳过 Drop
     drop(adapter);
-    // Web：winit web 的 run_app 永不返回（以控制流异常退回浏览器），以下
-    // exit 分支实际仅桌面可达；Web 上 process::exit 会 trap 整个页面实例，
-    // 显式 cfg 排除以防未来 winit 行为变化。
-    #[cfg(not(target_arch = "wasm32"))]
+    // 退出语义三平台收敛于此：
+    // - Web：winit web 的 run_app 永不返回（以控制流异常退回浏览器），
+    //   process::exit 会 trap 整个页面实例，故不参与
+    // - 桌面：Err 记日志收 1，正常收 0
+    // - Android：循环结束 = Activity 结束。系统此时只 finish Activity、
+    //   保留缓存进程，而 winit 每进程仅允许创建一次 EventLoop——用户从
+    //   桌面图标再进时，同缓存进程的二次 android_main 必然 RecreationAttempt
+    //   panic（实测：返回退出后再点图标闪退，后台划掉才正常）。因此显式
+    //   收掉整个进程，对齐桌面"run 返回即进程结束"语义（游戏退出即杀进程
+    //   在 Android 生态是常规做法；drop 已先行清理音频流等）。
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = result;
+        unreachable!("winit web 事件循环不应返回（以控制流异常退回浏览器）");
+    }
+    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
     {
         if let Err(e) = result {
             eprintln!("[starfish] 事件循环异常退出: {e}");
@@ -381,10 +419,10 @@ fn inner_run<A: Application>(app: A, config: WindowConfig) -> ! {
         }
         std::process::exit(0);
     }
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(target_os = "android")]
     {
         let _ = result;
-        unreachable!("winit web 事件循环不应返回（以控制流异常退回浏览器）");
+        std::process::exit(0);
     }
 }
 
@@ -501,8 +539,13 @@ impl<A: Application> ApplicationHandler for Adapter<A> {
     }
 }
 
+
+
+
 /// WindowConfig → winit 窗口属性（主窗）
 fn build_attrs(cfg: &WindowConfig) -> winit::window::WindowAttributes {
+    // mut 仅 wasm 分支（canvas 接管）用到，桌面为免告警豁免
+    #[cfg_attr(not(target_arch = "wasm32"), allow(unused_mut))]
     let mut attrs = WinitWindow::default_attributes()
         .with_title(cfg.title.clone())
         .with_inner_size(LogicalSize::new(cfg.width, cfg.height))

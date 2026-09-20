@@ -111,6 +111,10 @@ enum FromNet {
 impl TcpConn {
     /// 发起连接（立即返回；地址 `host:port` 或 `ws://host:port`）
     pub fn connect(addr: &str) -> Result<Self, NetError> {
+        // 隐式权限声明（Android INTERNET = normal 权限：清单声明即安装时
+        // 授予，此处瞬时通过无弹框；其他平台恒 true——纯语义声明，见
+        // base::permission 的两类区分）
+        crate::base::permission::ensure(crate::base::permission::Permission::Internet);
         #[cfg(not(target_arch = "wasm32"))]
         {
             Ok(Self {
@@ -593,6 +597,8 @@ mod tests {
 impl UdpSock {
     /// 绑定本地地址（如 "0.0.0.0:7777"；Web 返回 UnsupportedPlatform）
     pub fn bind(local: &str) -> Result<Self, NetError> {
+        // 隐式权限声明（同 TcpConn::connect——Android normal 权限瞬时通过）
+        crate::base::permission::ensure(crate::base::permission::Permission::Internet);
         #[cfg(target_arch = "wasm32")]
         {
             let _ = local;
