@@ -1,0 +1,149 @@
+日志：
+
+0.分别在winit 和 sdl 均完成了基本三角形测试
+
+----尝试在winit进行封装，发现侵入式循环无法优雅的完成内核封装，于是转到sdl进行封装。
+
+1.简单规划了一个框架类型构造
+
+2.基于相似功能的wgpu类型的字段进行了整合封装成统一类型
+
+3.通过config进一步简化构造难度
+
+4.完成了as_wgpu_ref和as_wgpu_arc接口提供多线程和原生wgpu对象获取。
+
+5.重新规划了命名规范并对wgpu依赖的对象进行重导出
+
+6.对context完成了对类型构造的工厂函数
+
+7.对app下的默认初始化进行了一定固定化封装，将video，audio，event子系统进行默认初始化。(还差一个joystick)
+
+8.将app的帧处理函数begin_frame，get_current_texture_view，present挪到rendercontext下
+
+9.(1)对subsystem完成部分封装。
+  (2)将resuorce底层资源类型移除，仅保留debug IO 接口。
+
+
+10.将audio作为一个更大的模块。
+
+11.
+  1. PlaybackCallback SDL胶水层，1024帧栈缓冲分片，限制单次运算、防栈溢出/CPU尖峰
+  2. AudioUserCallback 统一上层接口，支持闭包/长音频播放器/混音器三种实现
+  3. open_playback_stream 校验双声道+F32LE/F32BE跨平台格式，绑定默认播放设备
+  4. 双预分配缓冲复用，音频回调无运行时堆分配，低延迟稳定
+
+  -------------------------------------------------commit------------------------------------------------
+
+12.完成了mipmap的生成，不过对于更高级的mipmap生成暂时不支持，所以仅仅作为ext拓展，后续功能健全将会作为以opengl形式放入标准接口里
+   补全了SamplerConfig没有new的问题
+
+13.经renderpipelineconfig和samplerconfig从各自的resource下抽离并放入独立文件里，这样保证了cpu资源类型和gpu资源类型的明确划分。
+
+14.删除了rendercontext下的请求layout接口，cpu资源可以在renderer之前提前进行准备，我认为这个不是必须依附于rendercontext的。
+
+15.补全并进行一次example优化，完成了learnopengl的基本案例。
+
+16.
+  1.将代码进行了局部优化：event的register的event多个接口中，已经完成了sdl3绑定的接口调用，并将自己封装的event类型优雅绑定。
+  2.对settings: Option<RendererSettings>参数进行了补充
+  3.进一步对examples进行了补充来验证完备性。
+
+17.将目前所排查到的所有的unwrap进行了替换为except或者具体到某个Error类型上并输出报错,避免直接unwrap引发程序程序退出无法即使排查问题。
+
+  -------------------------------------------------starfish new------------------------------------------------
+18.以starfish作为pygame-rs的别名，分为了base,ext,pygame,resources,utils这几个大类，
+   base以gfx，core，font，graphics，image，maths，render，shapes，time，color的基础分类
+
+19.
+   1.对rendercontext下的RenderSetting进行了修改：去除了default改用new代替，在Rendercontext初始化时RenderSetting传入为None则进行自动实例化一个
+   2.基于2完成了对RenderContext的format字段去除合并到RenderSetting中
+   3.对App类型完全移除并对所有examples进行的同步修复，对于App的高度集成一定程度上出现了弊大于利的情况，且不符合pygame设计的系统独立与sdl的系统独立。
+   4.starfish里重新进行了项目架构：
+      将graphics进行废除并把其顶点生成交给mesh，
+      把shapes模块移动到maths作为数学一部分
+      把render移动到父级，添加了pipeline，material，texture，mesh等模块
+   
+20. 1.将项目进行了目录结构重新整理并修复了引发的依赖问题。
+    2.将starfish移除该项目让其作为一个独立的crate。
+    
+21.将SharderModule移除，使用原生Wgpu对象作为ShaderModule。
+
+
+22.添加了ViewKey，并对Texturedesc进行了枚举类型重构，将Texture部分接口重写。连带对mipmap进行了微调
+   初步完成了mesh，pipeline的自动推到流程
+
+23.
+  1.将src\render\resource\bind_group_layout.rs
+      src\render\resource\bind_group.rs
+      src\render\resource\pipeline_layout.rs
+      src\render\resource\render_pipeline.rs
+      src\render\resource\sampler.rs
+      src\render\resource\shader_module.rs
+    一并删除,并将其他的未删除的内部的Arc适当剔除,因为和后面的Arc进行嵌套，设计反而不够优雅
+  2.将material模块完成，并通过渲染图片对mesh,pipeline,material三大自动推到layout进行测验并完美运行。
+
+
+
+24.starfish:
+    1.完成了对Unfiorm数据的打包，并提供了其可见性的layout的定制化new和默认化default操作
+    2.对material类型提供了修改uniform数据的偏移量offset的单次修改和多次修改，通过dirty保证了当前数据只有在上传的时候才会全部同步上传
+    3.添加了uniformBlock作为数据块，并提供了相应的接口：获取alignment，size，stride等等重要参数。
+    4.补充完整了buiider的build接口里对于UniformValue：：Uniform数值的处理，让material实现初步的完整性。
+
+
+25.lingyu 与 starfish 进行合并:
+    1.将rendercontext，texture，sampler，buffer给自以模块形式放入render目录下。
+    2.将UniformBinding的wgpu的Buffer替换成封装的Buffer类型。
+    3.进一步将对外可见性和不可见性类型进一步做了优化，如Mesh里的vertext是可以共享的，但是indice不进行共享行为等。
+    4.对render_pass的desc部分完成了抽象，剩下的字段自动填入和renderpass封装暂时未完成，下一步将对renderpass进行一次封装让更多参数进行自动填入.
+
+
+26.
+  1.在为了让renderpass更加友好和移用以及更好的不暴露wgpu复杂类型，将attachment进行了封装和半自动推导并让rendercontext添加了对其检测合法性和获取直接用于renderpass的attchment接口
+  2.进一步封装了commandencoder和renderpass，并让renderpass实现了接受mesh，material，pipeline类型实现自动化配置。
+  3.对material进行大幅度改动，将更深层包裹直接拆开，不再使用同意entry+vec包裹类型，直接在material放置uniform，sampler，texture这三种类型数据，然后特意让uniform仅能创建一个，保证了一定的可维护性。
+
+
+27.
+  1.对rendercontext的device，adapter，instance不可变配置资源进行了封装（并将是否开启深度纹理放入）让开发者可以以控制更底层的行为，进行目标平台的调度和渲染优化
+  2.对surface配置进行了封装，让其配置更加间接。
+  3.对new接口进行了改动，让开发者依旧保证一个懒人话设置。
+
+
+28.
+   1.对material命名改为bind_group:这样好处是可以让引擎内置的bindgroup0也直接通过bind_group直接作为默认暴露的预封装类型提供给开发者，不必纠结于是否为材质material，同时也可以让计算着色器使用这个类型
+   2.对计算着色器进行了支持并将这两种着色器进行了细致拆分。
+   3.对uniformlayout进行了细致补充，额外添加了computedefault接口，保留默认None时为渲染可见性layout
+   4.对renderpass完善了更多接口，如draw_indirect，draw_indexed_indirect，set_viewport，set_scissor_rect，set_stencil_reference，set_blend_constant,draw_mesh_instanced等等。
+   5.借此机会对Mesh也添加了index count字段，并补充了更多便捷化的接口。
+
+
+29.
+    1.对renderpipeline 的build参数中bindgroup仅支持一个的问题进行的修复。
+    2.将sampler的desc里的重复的枚举值删除。
+    3.将bindgroup上传到gpu数据接口和数据编码接口完成
+    4.RenderContext:去除了大部分不必要的接口
+    5.对MeshBuilder进行了细节优化：经indices分成了两种数据类型，让开发者可以更细致的来压缩indices存储空间
+
+    6.重新对bindgroup进行大改动，添加回一些资源类型，然后支持StorageBUffer废弃dynamic offset
+
+30.1.砍掉Sampler封装Buffer封装，让bindgroup和mesh直接使用原生buffer和sampler，buffer和sampler对象可以暴露
+   2.将geometrybuffer模块删除，由于使用原生buffer，所以geometrybuffer不需要了。
+   2.完成了storage和uniformbuffer的数据写入，并通过context上传数据。
+   3.将bindgroup很多类型名字进行了修改，将UniformValue更名为FieldValue，并额外生成一个FieldType用来提供信息描述，也就是通过value可以获取type，根据type可以获取gpu的align和size
+   4.对所有builder进行了基于context创建的修改，并让builder的new接口改为pub(crate),也就是仅能通过context创建，隐藏掉device对象
+   5.基于uniformlayout启发，将mesh的semantic和attribute一并砍去，使用和uniform相同的风格。
+   6.基于该引擎完成了storagebuffer，uniformbuffer的写入功能进行了测试，并完美实现了渲染运行。
+
+
+
+31.
+   1.修改了storage和uniformbuffer的构造方式，现在基于context创建这两种buffer。
+   2.进一步去掉了默认深度缓冲区的option，提高了一点点的性能。
+   3.beginframe额外提供了depth_clear数值让开发者可以设置深度清空数值
+   4.优化了commandbuffer submit问题，在rendercontext内部创建了中间缓冲区，收集完成后调用present进行全部上传。
+   5.对renderpipelinebuilder增加了更多定制化的接口，让开发者可以基于2d和3d默认构造方法来高度定制自己的管线。
+   
+
+32.rendercontext直接拆分为两个功能：render_surface 和 render_resource_access分别用于资源创建和主缓冲区处理。
+    

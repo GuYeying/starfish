@@ -1,0 +1,446 @@
+use std::sync::Arc;
+use wgpu::{Device, Queue, Surface, SurfaceCapabilities, SurfaceTexture, TextureFormat};
+use crate::base::render::render_pass::attachments::{ColorAttachment, DepthAttachment};
+use crate::base::render::settings::SurfaceSettings;
+use wgpu::{CommandBuffer};
+use wgpu::{TextureView};
+
+
+//管理每帧的数据的
+pub struct RenderSurface{
+    surface: Arc<wgpu::Surface<'static>>,          // 渲染表面（对应窗口）
+    device: Arc<wgpu::Device>,                // GPU逻辑设备（核心）
+    queue: Arc<wgpu::Queue>,                  // GPU命令队列
+
+    config: wgpu::SurfaceConfiguration,
+
+    // 帧
+    color_format:TextureFormat,
+    color_frame: Option<SurfaceTexture>,//当前帧
+    color_view:  Option<Arc<TextureView>>,   //当前活动渲染目标视图（MSAA 开启时为多重采样视图）
+    color_attachment : Option<ColorAttachment>,
+    // 交换链视图（每帧换新；MSAA 关闭时与 color_view 相同）
+    swapchain_view: Option<Arc<TextureView>>,
+
+    // 深度缓冲
+    depth_format:  TextureFormat,
+    depth_texture: wgpu::Texture,
+    depth_view:    Arc<TextureView>,
+    depth_attachment : DepthAttachment,
+
+    // MSAA
+    sample_count: u32,
+    msaa_texture: Option<wgpu::Texture>,
+    msaa_view: Option<Arc<TextureView>>,
+
+    // 遮挡查询（Web/emscripten 上为 None：GL 仿真栈不支持，见 new() 内注释）
+    occlusion_query_set: Option<Arc<wgpu::QuerySet>>,
+
+    pending_cmds: Vec<CommandBuffer>,
+
+
+}
+
+impl RenderSurface{
+
+    pub(crate) fn new(
+        surface: &Arc<Surface<'static>>,
+        device:&Arc<Device>,
+        queue:&Arc<Queue>,
+        size:&(u32, u32),
+        surface_settings: SurfaceSettings,
+        caps: &SurfaceCapabilities,
+        downlevel_caps: &wgpu::DownlevelCapabilities,
+
+    )->Self{
+
+        let depth_format = surface_settings.depth_format.unwrap_or_else( || wgpu::TextureFormat::Depth24Plus);
+        // 先读出 MSAA 采样数（to_wgpu 按值消费 settings）
+        let sample_count = surface_settings.sample_count.max(1);
+        let config = surface_settings.to_wgpu(caps, size, downlevel_caps);
+
+
+        // ==============================================
+        // 创建遮挡查询（native 默认开启；Web 不创建）
+        // ==============================================
+        // ⚠️ Web（wasm32-unknown-unknown，WebGL2 后端）上保守不创建：
+        // 浏览器实现对查询的支持面不一致（原 emscripten GL 仿真只映射 EXT 系
+        // 查询函数，创建 QuerySet 直接 TypeError）。遮挡查询属于
+        // features.rs 的"原生 only 位"，不创建（descriptor 允许 None）。
+        #[cfg(not(target_arch = "wasm32"))]
+        let occlusion_query_set = Some(Arc::new(device.create_query_set(
+            &wgpu::QuerySetDescriptor {
+                label: Some("occlusion_query"),
+                ty: wgpu::QueryType::Occlusion,
+                count: 1,
+            },
+        )));
+        #[cfg(target_arch = "wasm32")]
+        let occlusion_query_set = None;
+
+
+        // ==============================================
+        // 创建深度纹理（默认开启；采样数与颜色附件一致）
+        // ==============================================
+        let color_format = config.format;
+        let depth_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("depth_texture"),
+            size: wgpu::Extent3d {
+                width: config.width,
+                height: config.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count,
+            dimension: wgpu::TextureDimension::D2,
+            format: depth_format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let depth_view = Arc::new(depth_texture.create_view(&Default::default()));
+        let depth_attachment = DepthAttachment{
+            view: depth_view.clone(),
+            load: wgpu::LoadOp::Load,
+            store: wgpu::StoreOp::Store,
+            stencil_ops: None,
+            depth_slice: None,
+
+        };
+
+        // ==============================================
+        // 创建 MSAA 颜色纹理（sample_count > 1 时；present 时自动 resolve 到交换链）
+        // ==============================================
+        let (msaa_texture, msaa_view) = if sample_count > 1 {
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("msaa_color"),
+                size: wgpu::Extent3d {
+                    width: config.width,
+                    height: config.height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count,
+                dimension: wgpu::TextureDimension::D2,
+                format: color_format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            let view = Arc::new(texture.create_view(&Default::default()));
+            (Some(texture), Some(view))
+        } else {
+            (None, None)
+        };
+
+
+
+        surface.configure(&device, &config);
+
+
+
+        Self{
+            surface:surface.clone(),
+            device: device.clone(),
+            queue: queue.clone(),
+
+            config: config,
+
+            color_format: color_format,
+            color_frame: None,
+            color_view: None,
+            color_attachment: None,
+            swapchain_view: None,
+
+            depth_format:depth_format,
+            depth_texture:depth_texture,
+            depth_view:depth_view,
+            depth_attachment:depth_attachment,
+
+            sample_count,
+            msaa_texture,
+            msaa_view,
+
+            occlusion_query_set:occlusion_query_set,
+
+            pending_cmds: Vec::new(),
+
+
+        }
+    }
+
+
+
+    /// 获取交换链纹理并录清屏 pass。**未就绪返回 false 跳帧**（不 panic）：
+    /// Android 启动期 ANativeWindow 抖动会使 surface 反复"未配置"（wgpu
+    /// 内部 panic,实测）,3 次重试内自愈不了的帧直接跳过,下一帧再试——
+    /// 对齐引擎"未就绪即跳过"哲学（调用方按 false 跳过本帧渲染与 present）
+    pub fn begin_frame(&mut self, clear_color: wgpu::Color,clear_depth:f32) -> bool {
+        crate::base::debug::assert_main_thread("RenderSurface::begin_frame");
+        // 获取当前交换链纹理（自愈式）：
+        // Outdated/Lost/未配置(panic 经 catch_unwind) → 重建交换链配置与
+        //   深度/MSAA 纹理后重试（拖动窗口/最小化/Android 启动期抖动）
+        // Timeout/Occluded → 直接重试
+        // Validation → 真实错误，跳帧
+        if self.color_view.is_none() {
+            let mut frame = None;
+            for _ in 0..3 {
+                // catch_unwind:Surface 未配置/失效时 wgpu 内部直接 panic
+                // (wgpu_core "Surface is not configured for presentation",
+                //  Android 启动期 ANativeWindow 抖动实测)——按 Outdated 同样
+                // 处理:重新 configure 后重试。捕获期挂静默 hook(默认 hook
+                // 每次重试都会往 logcat 刷 panic 栈,60fps 下即刷屏)
+                let prev_hook = std::panic::take_hook();
+                std::panic::set_hook(Box::new(|_| {}));
+                let acquired = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    self.surface.get_current_texture()
+                }));
+                std::panic::set_hook(prev_hook);
+                match acquired {
+                    Ok(wgpu::CurrentSurfaceTexture::Success(f))
+                    | Ok(wgpu::CurrentSurfaceTexture::Suboptimal(f)) => {
+                        frame = Some(f);
+                        break;
+                    }
+                    Ok(wgpu::CurrentSurfaceTexture::Outdated
+                    | wgpu::CurrentSurfaceTexture::Lost)
+                    | Err(_) => {
+                        self.resize(self.config.width, self.config.height);
+                    }
+                    Ok(wgpu::CurrentSurfaceTexture::Timeout
+                    | wgpu::CurrentSurfaceTexture::Occluded) => {}
+                    Ok(wgpu::CurrentSurfaceTexture::Validation) => panic!("渲染验证错误"),
+                }
+            }
+            let Some(frame) = frame else {
+                eprintln!("[starfish] 渲染表面未就绪,本帧跳过(下一帧重试)");
+                return false;
+            };
+
+            let swapchain_view = Arc::new(frame.texture.create_view(&Default::default()));
+            // 活动渲染目标：MSAA 开启时是多重采样纹理，否则直接交换链视图
+            let target = self.msaa_view.clone().unwrap_or(swapchain_view.clone());
+            self.swapchain_view = Some(swapchain_view);
+            self.color_attachment = Some(ColorAttachment{
+                view: target.clone(),
+                resolve_target: None,
+                load: wgpu::LoadOp::Load,
+                store: wgpu::StoreOp::Store,
+                depth_slice: None
+            });
+            self.color_frame = Some(frame);
+            self.color_view = Some(target);
+        }
+
+
+        let cur_view = self.color_view.as_ref().expect("bbegin_frame: color_view is empty, swap chain texture not acquired");
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+
+        // 清屏 + 清深度
+        let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("clear_screen"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: cur_view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(clear_color),
+                    store: wgpu::StoreOp::Store,
+                },
+                depth_slice: None,
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &self.depth_view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(clear_depth),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            occlusion_query_set: self.occlusion_query_set.as_deref(),
+            timestamp_writes: None,
+            multiview_mask: None,
+        });
+
+        drop(_pass);
+        let cmd = encoder.finish();
+        self.pending_cmds.push(cmd);
+        true
+    }
+
+    /// 仅缓存命令，延后到present统一提交
+    pub fn submit<I: IntoIterator<Item = CommandBuffer>>(&mut self, command_buffers: I) {
+        self.pending_cmds.extend(command_buffers.into_iter());
+    }
+    pub fn submit_single(
+        &mut self,
+        cmd: CommandBuffer
+    ){
+        self.pending_cmds.push(cmd);
+    }
+
+    pub fn present(&mut self) {
+        crate::base::debug::assert_main_thread("RenderSurface::present");
+        // 取出当前帧交换链纹理。begin_frame 未就绪(false)时无帧可提交——
+        // 跳过本帧 present(不 panic,对齐"未就绪即跳过")
+        let Some(frame) = self.color_frame.take() else {
+            eprintln!("[starfish] present 无帧可提交(begin 未就绪),跳过");
+            return;
+        };
+        // 1. 收集所有待提交命令
+        let mut all_commands = std::mem::take(&mut self.pending_cmds);
+
+        // 2. MSAA：空 resolve 通道把多重采样结果解析到交换链。
+        //    **必须并入本帧提交**(present 前完成 resolve)——若推迟到下一帧,
+        //    resolve 写的是已 present 的旧交换链图像,本帧上屏 = 未渲染黑帧
+        //    (Android 严格合成器下即永久黑屏;实测批次 34)
+        if let (Some(msaa), Some(swapchain)) = (self.msaa_view.clone(), self.swapchain_view.take()) {
+            let mut encoder = self.device.create_command_encoder(&Default::default());
+            let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("msaa_resolve"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &msaa,
+                    resolve_target: Some(&swapchain),
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Discard,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None,
+                timestamp_writes: None,
+                multiview_mask: None,
+            });
+            drop(_pass);
+            all_commands.push(encoder.finish());
+        }
+        self.swapchain_view = None;
+
+        // 3. 仅当存在命令时才提交（空帧避免无意义submit）
+        if !all_commands.is_empty() {
+            let _submission_idx = self.queue.submit(all_commands);
+        }
+        // 4. 上屏
+        self.queue.present(frame);
+        // 重置帧状态
+        self.color_view = None;
+    }
+
+
+    pub fn resize(&mut self, width: u32, height: u32) {
+        crate::base::debug::assert_main_thread("RenderSurface::resize");
+        // 0. 防 0 尺寸
+        let width = width.max(1);
+        let height = height.max(1);
+
+        // 2. 直接修改你原来存的 config
+        self.config.width = width;
+        self.config.height = height;
+
+        // 3. 用修改后的 config 重新配置 surface
+        self.surface.configure(&self.device, &self.config);
+
+        // 4. 重新创建匹配新尺寸的深度纹理
+        self.depth_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("depth_texture"),
+            size: wgpu::Extent3d {
+                width: self.config.width,
+                height: self.config.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: self.sample_count,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.depth_format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        self.depth_view = Arc::new(self.depth_texture.create_view(&Default::default()));
+        self.depth_attachment = DepthAttachment{
+            view: self.depth_view.clone(),
+            load: wgpu::LoadOp::Load,
+            store: wgpu::StoreOp::Store,
+            stencil_ops: None,
+            depth_slice: None,
+        };
+
+        // 5. 重建 MSAA 颜色纹理
+        if self.sample_count > 1 {
+            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("msaa_color"),
+                size: wgpu::Extent3d {
+                    width: self.config.width,
+                    height: self.config.height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: self.sample_count,
+                dimension: wgpu::TextureDimension::D2,
+                format: self.color_format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            self.msaa_view = Some(Arc::new(texture.create_view(&Default::default())));
+            self.msaa_texture = Some(texture);
+        }
+    }
+
+
+
+    pub fn get_current_color_texture_view(&self) -> Option<Arc<TextureView>>{
+        self.color_view.clone()
+    }
+    pub fn get_current_depth_texture_view(&self)-> Option<Arc<TextureView>>{
+        Some(self.depth_view.clone())
+    }
+    pub fn get_current_color_attachment(&self)->Option<ColorAttachment>{
+        self.color_attachment.clone()
+    }
+    pub fn get_current_depth_attachment(&self)->Option<DepthAttachment>{
+        Some(self.depth_attachment.clone())
+    }
+
+    /// 表面多重采样数（1 = MSAA 关闭）
+    pub fn sample_count(&self) -> u32 {
+        self.sample_count
+    }
+
+    /// 当前表面配置尺寸（最近一次 configure/resize 的值）
+    ///
+    /// Web 上窗口真实尺寸经 ResizeObserver 异步到达，可能晚于资源就绪——
+    /// 帧循环对比此值与 `ctx.size()`，不一致即调 [`resize`](Self::resize) 自愈
+    ///（覆盖"Resized 事件先于异步资源初始化到达"的竞态）。
+    pub fn size(&self) -> (u32, u32) {
+        (self.config.width, self.config.height)
+    }
+
+    pub fn color_format(&self)->TextureFormat{
+        self.color_format.clone()
+    }
+    pub fn depth_format(&self)->TextureFormat{
+        self.depth_format.clone()
+    }
+
+    /// 判断传入纹理视图是否等于当前帧颜色视图
+    pub fn is_same_color_view(&self, other: &Arc<TextureView>) -> bool {
+        let Some(cur) = &self.color_view else {
+            return false;
+        };
+        Arc::as_ptr(cur) == Arc::as_ptr(other)
+    }
+
+    /// 校验传入的 ColorAttachment 是否是当前帧有效附件
+    pub fn is_valid_color_attachment(&self, attach: &ColorAttachment) -> bool {
+        self.is_same_color_view(&attach.view)
+    }
+
+    /// 判断传入纹理视图是否等于当前深度视图
+    pub fn is_same_depth_view(&self, other: &Arc<TextureView>) -> bool {
+        Arc::as_ptr(&self.depth_view) == Arc::as_ptr(other)
+    }
+
+    /// 校验传入的 DepthAttachment 是否是当前有效深度附件
+    pub fn is_valid_depth_attachment(&self, attach: &DepthAttachment) -> bool {
+        self.is_same_depth_view(&attach.view)
+    }
+
+
+}

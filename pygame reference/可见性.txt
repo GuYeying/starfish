@@ -1,0 +1,31 @@
+二、通用游戏引擎行业统一标准（绝大多数商业引擎 / 自研渲染器通用约定）
+1. Global 全局 UBO（相机、时间、窗口尺寸）
+用途：顶点做坐标变换，片元做特效 / 雾 / 屏幕空间计算
+标准可见性：VERTEX_FRAGMENT
+你现在的全局 Uniform 完全符合这个规范。
+2. Material 材质数据（基础色、粗糙度、金属、自发光等 uniform）
+片元阶段 100% 要用；极少数情况顶点会读取材质色做顶点着色
+标准可见性：VERTEX_FRAGMENT
+3. 纹理贴图（Albedo、Normal、Roughness、AO）
+所有贴图只在片元采样
+标准可见性：FRAGMENT
+重点优化点：纹理不要给 VERTEX，顶点着色器几乎不用贴图，缩小可见范围驱动优化更好。
+4. 实例化数据 UBO（物体矩阵、实例颜色）
+仅顶点着色器做空间变换，片元不会读取实例矩阵
+标准可见性：VERTEX
+5. 骨骼动画骨骼矩阵 UBO
+只在顶点着色器做顶点蒙皮
+标准可见性：VERTEX
+6. 光照 / 场景光源 UBO / 光源贴图
+正向渲染：片元计算光照 → FRAGMENT
+延迟渲染 G-Buffer 写入：片元；光照 Pass 读取 Gbuffer：片元
+统一：FRAGMENT
+7. 计算管线专用资源（粒子、物理、后处理 Compute）
+存储贴图、动态缓冲、计算 UBO：COMPUTE
+8. 后处理全屏 Pass（Blur、Tonemap、抗锯齿）
+全屏 Pass 只有片元着色器，资源可见性统一 FRAGMENT
+三、行业铁律：能缩小可见范围就不要开大 ALL/VERTEX_FRAGMENT
+纹理只写 FRAGMENT，不要带上 VERTEX；
+实例、骨骼矩阵只写 VERTEX，不要带上 FRAGMENT；
+只有全局、材质这种两边都要用的才开 VERTEX_FRAGMENT；
+绝对不要无脑全部填 ShaderStages::ALL，会有微小驱动开销，大型场景累积明显。

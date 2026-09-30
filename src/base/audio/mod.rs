@@ -1,0 +1,938 @@
+//! 音频引擎主入口
+//!
+//! 设备层见 [`device`]（cpal 胶水，平台差异唯一收敛点）；
+//! 混音器/流式/录音等其余部分全部是平台中立纯逻辑。
+
+use std::sync::{
+    atomic::{AtomicU32, Ordering},
+    Arc, Mutex,
+};
+
+use self::common::{AudioError, AudioUserCallback};
+
+/// 音频输出后端抽象——平台实现直调各自原生音频 API，混音逻辑不变。
+///
+/// 桌面（cpal）内置实现；其他平台（wx WebAudio / 嵌入式）按此接口实现
+/// 即可接入 `AudioMixer`，混音管线零改动。
+pub(crate) trait AudioOutputBackend: Send {
+    /// 设备端实际生效的流规格（采样率 / 声道数）
+    fn spec(&self) -> device::StreamSpec;
+    /// 暂停流（设备保持打开，回调停发）
+    fn pause(&self) -> Result<(), AudioError>;
+    /// 恢复流
+    fn resume(&self) -> Result<(), AudioError>;
+    // Drop = 停止并释放设备
+}
+
+
+#[inline]
+fn atomic_f32_store(v: f32) -> u32 {
+    v.to_bits()
+}
+#[inline]
+fn atomic_f32_load(v: u32) -> f32 {
+    f32::from_bits(v)
+}
+
+pub mod common;
+pub mod device;
+/// wasm 输入采集后端（cpal WebAudio 无输入实现；见 device_web.rs 头注释）
+#[cfg(target_arch = "wasm32")]
+mod device_web;
+pub mod record;
+/// 流式线性插值重采样（视频音轨泵等推式声源按混音域推帧前的采样率适配）
+pub mod resample;
+pub mod sfx;
+pub mod voice;
+mod music;
+mod sound_data;
+mod ring;
+pub mod decoder;
+pub mod stream;
+
+#[cfg(test)]
+mod test_support;
+
+pub use sfx::{AudioEffect, ChannelState, FadeState, FadeType, SfxChannel};
+pub use music::MusicPlayer;
+pub use record::AudioRecorder;
+pub use stream::MusicStream;
+pub use voice::StreamVoice;
+pub use common::StereoFrame;
+pub use sound_data::{AudioChannels, SoundData};
+
+use self::music::MusicSource;
+
+/// 不透明分组句柄，通过 `AudioMixer::create_group()` 创建
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GroupHandle(pub(crate) u32);
+
+struct Inner {
+    sfx_channels: Vec<SfxChannel>,
+    music: MusicPlayer,
+    scratch: Vec<StereoFrame>,
+    reserved: usize,
+    /// 组总线音量（稠密索引 = group_id - 1），混音时在锁内查表
+    group_volumes: Vec<f32>,
+    /// 流式声部（推式 PCM：视频音轨 / 程序化合成 / 网络音频流）
+    stream_voices: Vec<Arc<voice::StreamVoiceSlot>>,
+}
+
+impl Inner {
+    fn new(num_channels: u32) -> Self {
+        Self {
+            sfx_channels: (0..num_channels).map(|_| SfxChannel::new()).collect(),
+            music: MusicPlayer::new(),
+            scratch: Vec::with_capacity(2048),
+            reserved: 0,
+            group_volumes: Vec::new(),
+            stream_voices: Vec::new(),
+        }
+    }
+
+    /// 组总线增益（未知组 / 未分组返回 1.0）
+    ///
+    /// 独立函数形式：mix 循环中 scratch 处于借用状态，避免 &self 冲突
+    fn group_gain(group_volumes: &[f32], group: Option<GroupHandle>) -> f32 {
+        match group {
+            Some(g) => group_volumes.get(g.0 as usize - 1).copied().unwrap_or(1.0),
+            None => 1.0,
+        }
+    }
+
+    fn mix(&mut self, output: &mut [StereoFrame], master_vol: f32, sfx_vol: f32, music_vol: f32) {
+        output.fill(StereoFrame::SILENT);
+        if self.scratch.len() < output.len() {
+            self.scratch
+                .extend(std::iter::repeat(StereoFrame::SILENT).take(output.len() - self.scratch.len()));
+        }
+        let group_volumes = &self.group_volumes;
+        let scratch = &mut self.scratch[..output.len()];
+
+        for ch in &mut self.sfx_channels {
+            if ch.state != ChannelState::Playing || ch.muted.load(Ordering::Relaxed) {
+                continue;
+            }
+            scratch.fill(StereoFrame::SILENT);
+            let written = ch.read_frames(scratch);
+            if written == 0 {
+                continue;
+            }
+            let g = master_vol * sfx_vol
+                * Self::group_gain(group_volumes, ch.group)
+                * ch.volume
+                * ch.fade_gain();
+            if g <= 0.0 {
+                continue;
+            }
+            for i in 0..written {
+                if ch.pan >= 0.0 {
+                    output[i].left += scratch[i].left * g * (1.0 - ch.pan);
+                    output[i].right += scratch[i].right * g;
+                } else {
+                    output[i].left += scratch[i].left * g;
+                    output[i].right += scratch[i].right * g * (1.0 + ch.pan);
+                }
+            }
+        }
+
+        if self.music.state == ChannelState::Playing {
+            scratch.fill(StereoFrame::SILENT);
+            let written = self.music.read_frames(scratch);
+            if written > 0 {
+                let g = master_vol * music_vol * self.music.fade_gain();
+                if g > 0.0 {
+                    for i in 0..written {
+                        output[i].left += scratch[i].left * g;
+                        output[i].right += scratch[i].right * g;
+                    }
+                }
+            }
+        }
+
+        // 流式声部（推式 PCM：推方 = 应用/解码泵，读者 = 本回调）
+        self.stream_voices
+            .retain(|v| !v.closed.load(Ordering::Relaxed));
+        for v in &self.stream_voices {
+            if v.muted.load(Ordering::Relaxed) || v.paused.load(Ordering::Relaxed) {
+                continue;
+            }
+            scratch.fill(StereoFrame::SILENT);
+            let written = v.ring.read(&mut scratch[..output.len()]);
+            if written == 0 {
+                continue;
+            }
+            let mut g = master_vol * *v.volume.lock().unwrap();
+            let pan = *v.pan.lock().unwrap();
+            let mut fade = v.fade.lock().unwrap();
+            if let Some(f) = fade.as_mut() {
+                g *= f.gain();
+                if f.advance(written) {
+                    if matches!(f.fade_type, crate::base::audio::common::FadeType::Out) {
+                        v.closed.store(true, Ordering::Relaxed);
+                    }
+                    *fade = None;
+                }
+            }
+            drop(fade);
+            if g <= 0.0 {
+                continue;
+            }
+            // 声像公式与 SFX 通道一致(pan ≥ 0 压左,pan < 0 压右)
+            for i in 0..written {
+                if pan >= 0.0 {
+                    output[i].left += scratch[i].left * g * (1.0 - pan);
+                    output[i].right += scratch[i].right * g;
+                } else {
+                    output[i].left += scratch[i].left * g;
+                    output[i].right += scratch[i].right * g * (1.0 + pan);
+                }
+            }
+        }
+
+        for out in output.iter_mut() {
+            out.left = out.left / (1.0 + out.left.abs());
+            out.right = out.right / (1.0 + out.right.abs());
+        }
+    }
+}
+
+struct AudioMixerCallback {
+    inner: Arc<Mutex<Inner>>,
+    master_volume: Arc<AtomicU32>,
+    sfx_volume: Arc<AtomicU32>,
+    music_volume: Arc<AtomicU32>,
+}
+
+impl AudioUserCallback for AudioMixerCallback {
+    fn on_frames(&mut self, frames: &mut [StereoFrame]) {
+        let Ok(mut inner) = self.inner.lock() else {
+            return;
+        };
+        let master = atomic_f32_load(self.master_volume.load(Ordering::Relaxed));
+        let sfx = atomic_f32_load(self.sfx_volume.load(Ordering::Relaxed));
+        let music = atomic_f32_load(self.music_volume.load(Ordering::Relaxed));
+        inner.mix(frames, master, sfx, music);
+    }
+}
+
+/// Web：恢复被浏览器自动播放策略暂停的 AudioContext（幂等——running
+/// 状态 no-op）。**须在用户手势后调用才生效**（引擎 pygame/event 翻译层
+/// 已在首个手势事件挂钩——所有 starfish 应用自动受益，2026-09-30 批次 H）。
+/// 非 Web 平台 no-op（无手势限制）。
+#[cfg(target_arch = "wasm32")]
+pub fn web_resume_audio() {
+    if let Some(ctx) = device::web_audio_ctx() {
+        let _ = ctx.resume(); // Promise fire-and-forget（手势后 fulfills）
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn web_resume_audio() {}
+
+pub struct AudioMixer {
+    inner: Arc<Mutex<Inner>>,
+    master_volume: Arc<AtomicU32>,
+    sfx_volume: Arc<AtomicU32>,
+    music_volume: Arc<AtomicU32>,
+    /// 音频输出后端（Drop 即停止并释放设备）
+    _output: Box<dyn AudioOutputBackend>,
+    /// 混音域采样率(设备真实采样率;经 [`Self::output_sample_rate()`] 查询)
+    output_sample_rate: u32,
+    group_id_counter: u32,
+}
+
+/// 采样率域适配：源采样率 ≠ 混音域（设备真实采样率）时一次性线性插值重采样
+///
+/// cpal 无 SDL 式设备边界转换，混音域由设备决定；采样率适配职责移到数据侧，
+/// 播放期零转换（与流式路径同款算法，见 [`SoundData::resample`]）。
+fn resample_to_domain(sound: Arc<SoundData>, domain_rate: u32) -> Arc<SoundData> {
+    if sound.sample_rate == domain_rate {
+        sound
+    } else {
+        Arc::new((*sound).resample(domain_rate))
+    }
+}
+
+impl AudioMixer {
+    /// 创建混音器并打开默认播放设备（f32 立体声，构造即播放）
+    ///
+    /// 混音域 = 设备真实采样率，可用 [`output_sample_rate`](Self::output_sample_rate) 查询。
+    /// 采样率不一致的音源由 [`load_sound`](Self::load_sound) / `play_*` 侧
+    /// 一次性重采样；流式音乐（`music_load_file`）本来就按混音域重采样。
+    pub fn new(num_channels: u32) -> Result<Self, AudioError> {
+        let inner = Arc::new(Mutex::new(Inner::new(num_channels.max(1))));
+        let master_volume = Arc::new(AtomicU32::new(atomic_f32_store(1.0)));
+        let sfx_volume = Arc::new(AtomicU32::new(atomic_f32_store(1.0)));
+        let music_volume = Arc::new(AtomicU32::new(atomic_f32_store(1.0)));
+
+        let cb = AudioMixerCallback {
+            inner: inner.clone(),
+            master_volume: master_volume.clone(),
+            sfx_volume: sfx_volume.clone(),
+            music_volume: music_volume.clone(),
+        };
+
+        let stream = device::open_output_stream(cb)?;
+        let output_sample_rate = stream.spec.sample_rate;
+
+        Ok(Self {
+            inner,
+            master_volume,
+            sfx_volume,
+            music_volume,
+            _output: Box::new(stream),
+            output_sample_rate,
+            group_id_counter: 1,
+        })
+    }
+
+    // ── SFX API ──
+
+    pub fn play(&mut self, sound: Arc<SoundData>) -> Result<Option<usize>, AudioError> {
+        self.play_with(sound, 0)
+    }
+
+    pub fn play_on(&mut self, sound: Arc<SoundData>, channel: usize) -> Result<(), AudioError> {
+        let sound = resample_to_domain(sound, self.output_sample_rate());
+        let mut inner = self.inner.lock().unwrap();
+        let ch = inner
+            .sfx_channels
+            .get_mut(channel)
+            .ok_or(AudioError::custom("channel out of range"))?;
+        *ch = SfxChannel::with_sound(sound, 0);
+        Ok(())
+    }
+
+    /// 混音域采样率（设备真实采样率）
+    ///
+    /// 推帧/加载侧以此为准做采样率适配（字段已方法化，统一出口）。
+    pub fn output_sample_rate(&self) -> u32 {
+        self.output_sample_rate
+    }
+
+    pub fn play_with(&mut self, sound: Arc<SoundData>, loops: i32) -> Result<Option<usize>, AudioError> {
+        self.play_in_group(sound, None, loops)
+    }
+
+    pub fn play_in_group(
+        &mut self,
+        sound: Arc<SoundData>,
+        group: Option<GroupHandle>,
+        loops: i32,
+    ) -> Result<Option<usize>, AudioError> {
+        let sound = resample_to_domain(sound, self.output_sample_rate());
+        let mut inner = self.inner.lock().unwrap();
+        let reserved = inner.reserved;
+        let idx = if let Some(g) = group {
+            inner
+                .sfx_channels
+                .iter()
+                .position(|ch| ch.group == Some(g) && ch.state == ChannelState::Stopped)
+        } else {
+            inner
+                .sfx_channels
+                .iter()
+                .enumerate()
+                .skip(reserved)
+                .find(|(_, ch)| ch.state == ChannelState::Stopped)
+                .map(|(i, _)| i)
+        };
+        match idx {
+            Some(i) => {
+                inner.sfx_channels[i] = SfxChannel::with_sound(sound, loops);
+                Ok(Some(i))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// 打开一路流式声部（推式 PCM；每路独立管道，互不干扰）
+    ///
+    /// 三段式生命周期：`push_interleaved` 推帧（环形缓冲满 = 背压少收）
+    /// → `set_volume` / `set_muted` / `fade_in` / `fade_out_and_close`
+    /// → `close` 释放。典型客户：视频音轨、程序化合成、网络音频流。
+    /// 声部按设备采样率推帧（[`Self::output_sample_rate`]）。
+    pub fn open_stream_voice(&mut self) -> StreamVoice {
+        let slot = Arc::new(voice::StreamVoiceSlot::new(self.output_sample_rate()));
+        self.inner.lock().unwrap().stream_voices.push(Arc::clone(&slot));
+        StreamVoice { slot }
+    }
+
+    pub fn create_group(&mut self) -> GroupHandle {
+        let id = self.group_id_counter;
+        self.group_id_counter += 1;
+        // 注册组总线音量槽位（默认 1.0）
+        self.inner.lock().unwrap().group_volumes.push(1.0);
+        GroupHandle(id)
+    }
+
+    /// 设置组总线音量（0.0 ~ 1.0）
+    pub fn set_group_volume(&mut self, group: GroupHandle, volume: f32) {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(v) = inner.group_volumes.get_mut(group.0 as usize - 1) {
+            *v = volume.clamp(0.0, 1.0);
+        }
+    }
+
+    /// 读取组总线音量（组不存在返回 None）
+    pub fn group_volume(&self, group: GroupHandle) -> Option<f32> {
+        self.inner
+            .lock()
+            .ok()?
+            .group_volumes
+            .get(group.0 as usize - 1)
+            .copied()
+    }
+
+    pub fn remove_channel_group(&mut self, channel: usize) -> Result<(), AudioError> {
+        let mut inner = self.inner.lock().unwrap();
+        inner
+            .sfx_channels
+            .get_mut(channel)
+            .ok_or(AudioError::custom("channel out of range"))?;
+        inner.sfx_channels[channel].group = None;
+        Ok(())
+    }
+
+    /// 停止指定 SFX 通道(数据丢弃,通道回池可复用)
+    ///
+    /// 与流式声部 [`StreamVoice::close`](crate::base::audio::StreamVoice::close)
+    /// 的语义对照:stop 是"回池复用"、close 是"销毁"——名字不同是语义使然。
+    /// ⚠ 通道索引仅在声音活跃期有效:stop 后索引回池,可能被下一个
+    /// play 抢占——长期持有索引再操作会误伤新声音。
+    pub fn stop(&mut self, channel: usize) {
+        if let Some(ch) = self.inner.lock().unwrap().sfx_channels.get_mut(channel) {
+            ch.stop();
+        }
+    }
+
+    pub fn stop_all(&mut self) {
+        for ch in &mut self.inner.lock().unwrap().sfx_channels {
+            ch.stop();
+        }
+    }
+
+    pub fn stop_group(&mut self, group: GroupHandle) {
+        for ch in &mut self.inner.lock().unwrap().sfx_channels {
+            if ch.group == Some(group) {
+                ch.stop();
+            }
+        }
+    }
+
+    pub fn pause(&mut self, channel: usize) {
+        if let Some(ch) = self.inner.lock().unwrap().sfx_channels.get_mut(channel) {
+            ch.state = ChannelState::Paused;
+        }
+    }
+
+    pub fn resume(&mut self, channel: usize) {
+        if let Some(ch) = self.inner.lock().unwrap().sfx_channels.get_mut(channel) {
+            if ch.state == ChannelState::Paused {
+                ch.state = ChannelState::Playing;
+            }
+        }
+    }
+
+    /// Web：解锁音频（首次用户手势时调用——浏览器自动播放策略下
+    /// AudioContext 处于 suspended，此调用恢复之；桌面/Android 无手势
+    /// 限制，调用亦无害 no-op）。幂等。
+    pub fn web_unlock(&mut self) {
+        let _ = self._output.resume();
+    }
+
+    pub fn pause_all(&mut self) {
+        for ch in &mut self.inner.lock().unwrap().sfx_channels {
+            if ch.state == ChannelState::Playing {
+                ch.state = ChannelState::Paused;
+            }
+        }
+    }
+
+    pub fn resume_all(&mut self) {
+        for ch in &mut self.inner.lock().unwrap().sfx_channels {
+            if ch.state == ChannelState::Paused {
+                ch.state = ChannelState::Playing;
+            }
+        }
+    }
+
+    pub fn set_channel_volume(&mut self, channel: usize, volume: f32) {
+        if let Some(ch) = self.inner.lock().unwrap().sfx_channels.get_mut(channel) {
+            ch.volume = volume.clamp(0.0, 1.0);
+        }
+    }
+
+    /// 静音开关(与音量独立;混音时直接跳过该通道)
+    pub fn set_channel_muted(&mut self, channel: usize, muted: bool) {
+        if let Some(ch) = self.inner.lock().unwrap().sfx_channels.get_mut(channel) {
+            ch.muted.store(muted, Ordering::Relaxed);
+        }
+    }
+
+    /// 声像(-1.0 左 ~ 0.0 中 ~ 1.0 右)
+    pub fn set_channel_pan(&mut self, channel: usize, pan: f32) {
+        if let Some(ch) = self.inner.lock().unwrap().sfx_channels.get_mut(channel) {
+            ch.pan = pan.clamp(-1.0, 1.0);
+        }
+    }
+
+    pub fn set_channel_group(
+        &mut self,
+        channel: usize,
+        group: GroupHandle,
+    ) -> Result<(), AudioError> {
+        let mut inner = self.inner.lock().unwrap();
+        inner
+            .sfx_channels
+            .get_mut(channel)
+            .ok_or(AudioError::custom("channel out of range"))?;
+        inner.sfx_channels[channel].group = Some(group);
+        Ok(())
+    }
+
+    pub fn set_channel_group_range(
+        &mut self,
+        from: usize,
+        to: usize,
+        group: Option<GroupHandle>,
+    ) -> Result<(), AudioError> {
+        let mut inner = self.inner.lock().unwrap();
+        for i in from..=to {
+            inner
+                .sfx_channels
+                .get_mut(i)
+                .ok_or(AudioError::custom("channel out of range"))?;
+        }
+        for ch in inner.sfx_channels[from..=to].iter_mut() {
+            ch.group = group;
+        }
+        Ok(())
+    }
+
+    pub fn fade_in(&mut self, channel: usize, ms: u32) {
+        if let Some(ch) = self.inner.lock().unwrap().sfx_channels.get_mut(channel) {
+            ch.fade = Some(FadeState::new_fade_in(
+                ms,
+                ch.data.as_ref().map(|d| d.sample_rate).unwrap_or(44100),
+            ));
+        }
+    }
+
+    pub fn fade_out(&mut self, channel: usize, ms: u32) {
+        if let Some(ch) = self.inner.lock().unwrap().sfx_channels.get_mut(channel) {
+            ch.fade = Some(FadeState::new_fade_out(
+                ms,
+                ch.data.as_ref().map(|d| d.sample_rate).unwrap_or(44100),
+            ));
+        }
+    }
+
+    pub fn fade_out_group(&mut self, group: GroupHandle, ms: u32) {
+        let mut inner = self.inner.lock().unwrap();
+        for ch in &mut inner.sfx_channels {
+            if ch.group == Some(group) {
+                let sr = ch.data.as_ref().map(|d| d.sample_rate).unwrap_or(44100);
+                ch.fade = Some(FadeState::new_fade_out(ms, sr));
+            }
+        }
+    }
+
+    pub fn group_count(&self, group: GroupHandle) -> usize {
+        self.inner
+            .lock()
+            .map(|inner| {
+                inner
+                    .sfx_channels
+                    .iter()
+                    .filter(|ch| ch.group == Some(group))
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    pub fn group_busy(&self, group: GroupHandle) -> bool {
+        self.inner
+            .lock()
+            .map(|inner| {
+                inner
+                    .sfx_channels
+                    .iter()
+                    .any(|ch| ch.group == Some(group) && ch.state == ChannelState::Playing)
+            })
+            .unwrap_or(false)
+    }
+
+    pub fn group_available(&self, group: GroupHandle) -> Option<usize> {
+        self.inner.lock().ok().and_then(|inner| {
+            inner
+                .sfx_channels
+                .iter()
+                .position(|ch| ch.group == Some(group) && ch.state == ChannelState::Stopped)
+        })
+    }
+
+    pub fn is_channel_busy(&self, channel: usize) -> bool {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|inner| {
+                inner
+                    .sfx_channels
+                    .get(channel)
+                    .map(|ch| ch.state == ChannelState::Playing)
+            })
+            .unwrap_or(false)
+    }
+
+    pub fn get_busy(&self) -> bool {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .sfx_channels
+            .iter()
+            .any(|ch| ch.state == ChannelState::Playing)
+            || inner.music.state == ChannelState::Playing
+    }
+
+    pub fn set_reserved(&mut self, n: usize) {
+        self.inner.lock().unwrap().reserved = n;
+    }
+
+    pub fn find_free_channel(&self) -> Option<usize> {
+        let inner = self.inner.lock().ok()?;
+        inner
+            .sfx_channels
+            .iter()
+            .position(|ch| ch.state == ChannelState::Stopped)
+    }
+
+    pub fn get_channel_sound(&self, channel: usize) -> Option<Arc<SoundData>> {
+        self.inner
+            .lock()
+            .ok()?
+            .sfx_channels
+            .get(channel)?
+            .get_sound()
+    }
+
+    pub fn num_channels(&self) -> usize {
+        self.inner
+            .lock()
+            .map(|inner| inner.sfx_channels.len())
+            .unwrap_or(0)
+    }
+
+    pub fn sfx_add_effect(
+        &mut self,
+        channel: usize,
+        effect: Box<dyn AudioEffect>,
+    ) -> Result<(), AudioError> {
+        let mut inner = self.inner.lock().unwrap();
+        inner
+            .sfx_channels
+            .get_mut(channel)
+            .ok_or(AudioError::custom("channel out of range"))?
+            .effects
+            .push(effect);
+        Ok(())
+    }
+
+    // ── Music API ──
+    //
+    // 长音频走流式（MusicStream，边解码边播），整段内存数据（SoundData）保留兼容。
+    // 所有会替换当前源的操作都在锁外 join 退役的解码线程。
+
+    /// 加载流式音乐文件（边解码边播，适合 BGM / 环境音 / 语音）
+    pub fn music_load_file(&mut self, path: &str) -> Result<(), AudioError> {
+        let stream = MusicStream::from_file(path, self.output_sample_rate())?;
+        self.inner
+            .lock()
+            .unwrap()
+            .music
+            .load(MusicSource::Stream(stream));
+        self.join_retired();
+        Ok(())
+    }
+
+    /// 从内存字节流式加载音乐（Web / 内嵌字节场景零 IO——与
+    /// [`Self::music_load_file`](Self::music_load_file) 对称，
+    /// 2026-09-29 批次 E 为 Python 绑定补充）
+    pub fn music_load_bytes(&mut self, data: Vec<u8>) -> Result<(), AudioError> {
+        let stream = MusicStream::from_bytes(data, self.output_sample_rate())?;
+        self.inner
+            .lock()
+            .unwrap()
+            .music
+            .load(MusicSource::Stream(stream));
+        self.join_retired();
+        Ok(())
+    }
+
+    /// 加载整段音频数据（兼容旧接口；短音频可整段解码后交给 music）
+    pub fn music_load(&mut self, data: Arc<SoundData>) {
+        self.inner
+            .lock()
+            .unwrap()
+            .music
+            .load(MusicSource::Buffer { data, cursor: 0 });
+        self.join_retired();
+    }
+
+    /// 排队下一个流式音乐文件（立即预起解码线程，灌满缓冲即 park）
+    pub fn music_queue_file(&mut self, path: &str) -> Result<(), AudioError> {
+        let stream = MusicStream::from_file(path, self.output_sample_rate())?;
+        self.inner
+            .lock()
+            .unwrap()
+            .music
+            .queue(MusicSource::Stream(stream));
+        Ok(())
+    }
+
+    /// 排队下一首（整段内存数据）
+    pub fn music_queue(&mut self, data: Arc<SoundData>) {
+        self.inner
+            .lock()
+            .unwrap()
+            .music
+            .queue(MusicSource::Buffer { data, cursor: 0 });
+    }
+
+    /// 无线程环境（Web）：每帧推进流式解码（预算：帧数）
+    ///
+    /// 桌面（有线程）无需调用——解码线程自动维持缓冲。
+    pub fn pump_streams(&mut self, budget_frames: usize) {
+        self.inner.lock().unwrap().music.pump(budget_frames);
+    }
+
+    /// 加载短音效文件为可复用的 SoundData（对位 pygame.mixer.Sound）
+    ///
+    /// 解码后一次性重采样到混音域（设备真实采样率），播放期零转换。
+    pub fn load_sound(&self, path: &str) -> Result<Arc<SoundData>, AudioError> {
+        let data = SoundData::from_file(path)?;
+        Ok(resample_to_domain(Arc::new(data), self.output_sample_rate()))
+    }
+
+    /// 控制线程锁外 join 已退役的解码线程
+    ///
+    /// JoinHandle 绝不放在与音频回调共享的锁内 join——这是流式线程安全的底线。
+    fn join_retired(&mut self) {
+        let handles = self
+            .inner
+            .lock()
+            .map(|mut inner| inner.music.drain_retired())
+            .unwrap_or_default();
+        for h in handles {
+            let _ = h.join();
+        }
+    }
+
+    pub fn music_play(&mut self, loops: i32) {
+        self.inner.lock().unwrap().music.play(loops);
+    }
+    pub fn music_stop(&mut self) {
+        self.inner.lock().unwrap().music.stop();
+    }
+    pub fn music_pause(&mut self) {
+        self.inner.lock().unwrap().music.pause();
+    }
+    pub fn music_resume(&mut self) {
+        self.inner.lock().unwrap().music.resume();
+    }
+    pub fn music_fade_out(&mut self, ms: u32) {
+        self.inner.lock().unwrap().music.fade_out(ms);
+    }
+    pub fn music_fade_in(&mut self, ms: u32) {
+        self.inner.lock().unwrap().music.fade_in(ms);
+    }
+    pub fn music_add_effect(&mut self, effect: Box<dyn AudioEffect>) {
+        self.inner.lock().unwrap().music.add_effect(effect);
+    }
+
+    pub fn music_set_volume(&self, volume: f32) {
+        self.music_volume
+            .store(atomic_f32_store(volume.clamp(0.0, 1.0)), Ordering::Relaxed);
+    }
+    pub fn music_get_volume(&self) -> f32 {
+        atomic_f32_load(self.music_volume.load(Ordering::Relaxed))
+    }
+    pub fn music_seek(&mut self, seconds: f32) {
+        self.inner.lock().unwrap().music.seek(seconds);
+    }
+    pub fn music_position(&self) -> f32 {
+        self.inner
+            .lock()
+            .map(|inner| inner.music.position())
+            .unwrap_or(0.0)
+    }
+    pub fn music_duration(&self) -> f32 {
+        self.inner
+            .lock()
+            .map(|inner| inner.music.duration())
+            .unwrap_or(0.0)
+    }
+    pub fn music_is_playing(&self) -> bool {
+        self.inner
+            .lock()
+            .map(|inner| inner.music.state == ChannelState::Playing)
+            .unwrap_or(false)
+    }
+    pub fn music_rewind(&mut self) {
+        self.inner.lock().unwrap().music.rewind();
+    }
+
+    // ── 全局音量 ──
+
+    pub fn set_master_volume(&self, volume: f32) {
+        self.master_volume
+            .store(atomic_f32_store(volume.clamp(0.0, 1.0)), Ordering::Relaxed);
+    }
+    pub fn master_volume(&self) -> f32 {
+        atomic_f32_load(self.master_volume.load(Ordering::Relaxed))
+    }
+    pub fn set_sfx_volume(&self, volume: f32) {
+        self.sfx_volume
+            .store(atomic_f32_store(volume.clamp(0.0, 1.0)), Ordering::Relaxed);
+    }
+    pub fn sfx_volume(&self) -> f32 {
+        atomic_f32_load(self.sfx_volume.load(Ordering::Relaxed))
+    }
+}
+
+impl Drop for AudioMixer {
+    fn drop(&mut self) {
+        // 收口解码线程：停掉当前源与队列中的所有流式 worker，
+        // 在控制线程（此刻无锁竞争）join 完毕后，cpal 流随字段析构停止。
+        let handles = self
+            .inner
+            .lock()
+            .map(|mut inner| {
+                inner.music.shutdown();
+                inner.music.drain_retired()
+            })
+            .unwrap_or_default();
+        for h in handles {
+            let _ = h.join();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::common::StereoFrame as TestFrame;
+
+    #[test]
+    fn group_volume_attenuates_mix() {
+        let mut inner = Inner::new(4);
+        let samples = vec![0.1f32; 200];
+        let data = Arc::new(SoundData::from_interleaved_f32(&samples, 44100));
+        let mut ch = SfxChannel::with_sound(data, 0);
+        ch.group = Some(GroupHandle(1));
+        inner.sfx_channels[0] = ch;
+        inner.group_volumes.push(0.5); // 组 1 音量 0.5
+
+        let mut out = vec![TestFrame::SILENT; 32];
+        inner.mix(&mut out, 1.0, 1.0, 1.0);
+
+        // 0.1（源）× 1（master）× 1（sfx）× 0.5（组）× 1（声道）× 1（淡变）= 0.05
+        // 经软限幅 x/(1+|x|) → 0.05/1.05
+        let expected = 0.05 / 1.05;
+        assert!((out[0].left - expected).abs() < 1e-6);
+        assert!((out[0].right - expected).abs() < 1e-6);
+    }
+
+    #[test]
+    fn unknown_group_gain_is_one() {
+        assert_eq!(Inner::group_gain(&[], Some(GroupHandle(3))), 1.0);
+        assert_eq!(Inner::group_gain(&[], None), 1.0);
+        let vols = vec![0.25f32];
+        assert_eq!(Inner::group_gain(&vols, Some(GroupHandle(1))), 0.25);
+    }
+
+    // ── TODO.md 批次:流式声部增强 + SFX muted + API 整理(2026-09-23)──
+
+    use crate::base::audio::voice::StreamVoiceSlot;
+    /// 构造一个带 n 帧数据的流式槽位
+    fn voice_with(frames: usize, v: f32) -> Arc<voice::StreamVoiceSlot> {
+        let slot = Arc::new(voice::StreamVoiceSlot::new(48000));
+        let buf: Vec<StereoFrame> = (0..frames)
+            .map(|_| StereoFrame { left: v, right: v })
+            .collect();
+        slot.ring.write(&buf);
+        slot
+    }
+
+    /// 流式声部 pause:混音跳过(全静音),resume 后恢复
+    #[test]
+    fn stream_voice_pause_resume() {
+        let mut inner = Inner::new(2);
+        let slot = voice_with(64, 0.5);
+        inner.stream_voices.push(slot.clone());
+
+        let mut out = vec![TestFrame::SILENT; 16];
+        inner.mix(&mut out, 1.0, 1.0, 1.0);
+        assert!(out[0].left > 0.0, "未暂停应有声");
+
+        slot.paused.store(true, Ordering::Relaxed);
+        let mut out = vec![TestFrame::SILENT; 16];
+        inner.mix(&mut out, 1.0, 1.0, 1.0);
+        assert!(out.iter().all(|f| f.left == 0.0 && f.right == 0.0), "暂停应静音");
+
+        slot.paused.store(false, Ordering::Relaxed);
+        let mut out = vec![TestFrame::SILENT; 16];
+        inner.mix(&mut out, 1.0, 1.0, 1.0);
+        assert!(out[0].left > 0.0, "恢复应有声");
+    }
+
+    /// 流式声部 pan:1.0 → 仅右声道
+    #[test]
+    fn stream_voice_pan() {
+        let mut inner = Inner::new(2);
+        let slot = voice_with(64, 0.5);
+        inner.stream_voices.push(slot.clone());
+        *slot.pan.lock().unwrap() = 1.0;
+
+        let mut out = vec![TestFrame::SILENT; 16];
+        inner.mix(&mut out, 1.0, 1.0, 1.0);
+        assert!(out.iter().all(|f| f.left == 0.0), "pan=1.0 左应静音");
+        assert!(out.iter().any(|f| f.right > 0.0), "右应有声");
+    }
+
+    /// 流式声部 buffered_frames 水位
+    #[test]
+    fn stream_voice_buffered_frames() {
+        let slot = voice_with(10, 0.5);
+        assert_eq!(slot.ring.available(), 10);
+        let mut out = vec![TestFrame::SILENT; 4];
+        let n = slot.ring.read(&mut out);
+        assert_eq!(slot.ring.available(), 10 - n);
+    }
+
+    /// close 后 push_interleaved 返回 0(诚实性:已关闭不再接受)
+    #[test]
+    fn closed_voice_push_returns_zero() {
+        let slot = Arc::new(voice::StreamVoiceSlot::new(48000));
+        slot.closed.store(true, Ordering::Relaxed);
+        let voice = StreamVoice { slot: slot.clone() };
+        let mut v = voice;
+        let samples = [0.1f32, 0.1, 0.1, 0.1];
+        assert_eq!(v.push_interleaved(&samples), 0, "已关闭声部必须返回 0");
+    }
+
+    /// SFX muted:混音跳过
+    #[test]
+    fn sfx_muted_skips_mix() {
+        let mut inner = Inner::new(2);
+        let samples = vec![0.5f32; 200];
+        let data = Arc::new(SoundData::from_interleaved_f32(&samples, 44100));
+        let mut ch = SfxChannel::with_sound(data, 0);
+        ch.muted.store(true, Ordering::Relaxed);
+        inner.sfx_channels[0] = ch;
+
+        let mut out = vec![TestFrame::SILENT; 16];
+        inner.mix(&mut out, 1.0, 1.0, 1.0);
+        assert!(out.iter().all(|f| f.left == 0.0 && f.right == 0.0), "muted 应静音");
+    }
+}

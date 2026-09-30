@@ -1,0 +1,66 @@
+解析来我们设计一下pygame类型架构和设计思路：
+Most useful stuff: Color | display | draw | event | font | image | key | locals | mixer | mouse | Rect | Surface | time | music | pygame
+Advanced stuff: cursors | joystick | mask | sprite | transform | BufferProxy | freetype | gfxdraw | midi | PixelArray | pixelcopy | sndarray | surfarray | math
+Other: camera | controller | examples | fastevent | scrap | tests | touch | version
+
+
+
+
+这是他官方给出的模块，根据模块进行设计：
+Color：目前已经实现
+display：基本需要更新接口，因为有的接口不再适用，比如有个是获取gl的属性，我们使用的是wgpu，所以需要更新他们这种旧的设计接口。
+对于draw：我认为我们的采样是否抗锯齿已经不是他能直接接触的了，这个属于wgpu的采样设置，所以我们不需要考虑是否抗锯齿了吧。
+event：这个没太多异议。
+font：与display同样
+image：这个依赖rust的image，因为base/resources下有图像类型，基本上就是在这个基础上封装即可。
+
+对于locals：可以保留，但可以更好的进行一次思考，因为目前来看pygame常量非常多，我们不妨可以直接将这些常量直接放到locals模块下不同子模块里，这样locals也能展示常量，也方便维护常量。
+
+
+rect：基本类，已经实现了。
+time；已经实现了
+pygame：这个模块没多少东西，重现即可。
+cursors：我不知道这个如何实现，你看难度如何，如果难度大且适配性不好可以舍弃。
+mask：作为遮罩，这个可以这样处理：本质就是一个渲染管线，然后进行纹理处理输出到目标纹理上就是了。
+spite：这个可以慢慢实现，甚至做更现代化。
+freetype：理论上应该不需要了，我们没有使用freetype。
+gfxdraw：理论上这是draw的底层，因为我看pygame也是这么设计的。
+midi可以剔除了，这个我们不需要。
+sndarray和surarray：他俩都属于cpu资源类型，我认为可以实现，而且对于audio应该是有这个储存音频的数据类型，对于surfarray我们需要特殊处理，因为涉及到gpu资源Texture。
+math：直接基于glam封装即可，甚至支持quat，mat。
+
+key：如果可以则进行实现。
+mouse：这个类似key模块，这俩可以同时分析一下实现难度，是否会额外引入额外维护属性对象。
+touch：我记得winit支持android，理论上这个没啥大问题，可以实现。
+
+camera，不支持，不实现。
+scrap：这个是重点，我们当前底层没有对粘贴板跨平台支持，我们需要额外实现一个粘贴板跨平台的，并基于这个完成这个。
+BufferProxy：看起来符合gpubuffer架构，应该可以实现。
+version：可以实现。
+tests：可以实现，基本上就是接口测试。
+
+我统计一下：draw基于gfx draw，mixer，music基于audio，fastevent基于event，joystick基于controller。freetype剔除了。目前我只看到了这些，我准备做激进处理：gfxdraw只要他，mixer和music都不要了，只需要audio即可，也只要event不要fastevent了。对于手柄我认为他俩可以都不要了，因为设计架构可能和pygame不一样，这个我们走我们自己的，但api风格对齐pygame即可。
+
+新增模块：
+    dialog
+    gamepad（也就是替代joystick和controller的），他名字应该是用gampad就够了，以后文档可以标注是对齐controller的，我看gilrs设计能对齐controller。
+    io
+    net
+    
+
+然后rust再补齐一个跨平台的设计架构对齐rust当前设计架构的scrap粘贴板：
+    scrap
+
+
+
+对于至关重要的surface：
+    因为pygame是及时，wgpu是命令式渲染，所以这个是无法统一的，所以我认为需要收拢一次：也就是SuRface还是Texutre，但是支持作为rendertarget：
+    当渲染目标纹理时：
+        with xxxSurface:
+            进行渲染
+        #结束自己执行魔术方法进行闭包扔给pygame状态机渲染队列，完成这样的渲染架构收拢。
+        #当前问题时如果是同时渲染多个目标缓冲区呢，好像是有这种情况，你可以进一步思考如何基于这个架构解决这个问题，当前还是针对一个surface。
+
+
+我们尽可能让pygame接口1：1实现，对于哪些get版本参数或者底层信息的，这种的，可以留个默认空实现，保证不报错，然后我们再额外写咱们自己的接口比如获取wgpu后端信息这种去代替他们的，
+然后最重要的是我们可以先这样开始：先做基本类型，然后再进一步去做少依赖或者无依赖独立实现的模块，然后再做更高层的模块，这样可以更丝滑有效的完成。
