@@ -5,6 +5,9 @@
 
 # ── 示例运行输出 ──
 recording.wav
+__io_test__.*
+__pygame_test_*.*
+__pygame_io_*.*
 
 # ── 工具产物 ──
 .VSCodeCounter/

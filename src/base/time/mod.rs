@@ -145,20 +145,34 @@ impl Clock {
 
     /// 便利组合：推进一帧 + 节流到目标帧率，返回本帧真实间隔（秒）
     ///
-    /// `target_fps` 传 0 表示不限帧。需要缩放时间请改用
-    /// `frame()` + [`delta()`](Self::delta)。
+    /// `target_fps` 传 0 表示不限帧（跟随 vsync/浏览器 rAF）。需要缩放
+    /// 时间请改用 `frame()` + [`delta()`](Self::delta)。
     ///
-    /// # 节流叠加警告
+    /// # 语义：上限节流（cap，非强制）
     ///
-    /// wgpu 的 Fifo 呈现模式自带渲染回压（`get_current_texture` 阻塞在刷新率上）。
-    /// **不要把两者的目标叠在同一档**：60Hz 屏 + Fifo 下再 `tick(60)`，
-    /// 睡眠与回压各等一个 vsync，实际 ~30fps 且平白加延迟。
-    /// 组合建议：Fifo 下跟随刷新率用 `tick(0)`；只在「低于刷新率」或
-    /// `Immediate`/`Mailbox`（回压不生效）时才用非零目标节流。
+    /// 只在**实际帧距快于目标**时才睡眠补齐；若呈现回压（Fifo vsync）
+    /// 已把帧距拉到 ≥ 目标周期，则**不再睡**——直接放行。因此：
+    /// - `tick(60)` 在 60Hz 屏 = 纯 vsync 稳 60（不会"睡 + 等 vsync"
+    ///   双重节流跌到半速）；在 144Hz 屏 = 睡眠钳到 60；
+    /// - `tick(30)` 在任意 ≥30Hz 屏 = 稳定 30；
+    /// - `tick(0)` = 永不睡眠，帧率 = 刷新率（跟帧正典）。
+    ///
+    /// 上一版无条件睡到 `last + 1/fps`，在"目标 ≈ 刷新率"时会撞上
+    /// 错过 vsync 再等一整帧的节拍竞态（实测 60Hz 屏跌到 ~30-54fps）。
     pub fn tick(&mut self, target_fps: u32) -> f32 {
         if target_fps > 0 {
             let min_frame = Duration::from_secs_f32(1.0 / target_fps as f32);
-            sleep_until(self.last + min_frame);
+            let now_ts = now();
+            let deadline = self.last + min_frame;
+            if now_ts < deadline {
+                let remaining = deadline - now_ts;
+                // 剩余不足目标周期 1/4：已处在 vsync 量化带内，补睡只会
+                // 增加"跨过 vblank 边界 → 帧距翻倍"的风险——放行交给
+                // flip 回压量化（实测把 60Hz 屏的 28.8ms 尖峰消掉）
+                if remaining * 4 > min_frame {
+                    sleep_until(deadline);
+                }
+            }
         }
         self.frame();
         self.raw_delta()
@@ -306,6 +320,19 @@ mod tests {
         let dt = clock.tick(30); // 33ms > OS 定时器粒度，结果稳定
         assert!((now() - start).as_secs_f32() >= 0.03 * 0.8);
         assert!(dt >= 0.03 * 0.8, "dt = {dt}");
+    }
+
+    #[test]
+    fn tick_is_cap_not_force() {
+        // 帧距已被外部（vsync 回压）拉到 ≥ 目标周期 → tick 不得再补睡
+        let mut clock = Clock::new();
+        clock.tick(0);
+        thread_sleep(20); // 模拟 60Hz vsync 已吃掉 20ms > 1/60
+        let start = now();
+        clock.tick(60);
+        let spent = (now() - start).as_secs_f32();
+        assert!(spent < 0.005, "vsync 已达标不得再睡，实际又睡了 {spent:.3}s");
+        assert!(clock.raw_delta() >= 0.02, "帧距 = 外部节流的真实值");
     }
 
     #[test]

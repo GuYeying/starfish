@@ -197,7 +197,14 @@ pub fn get_init() -> bool {
 /// 必经恢复路径——由 `event::translate` 在 Resized 事件处自动调用。
 pub(crate) fn handle_resized(width: u32, height: u32) {
     if get_init() {
-        get_screen().resize(width, height);
+        // 批次二十四诊断：Android 走 devlog（文件+TCP 真机可取证）
+        #[cfg(target_os = "android")]
+        crate::base::debug::devlog(&format!(
+            "[display] resize 自愈 → {width}×{height}"
+        ));
+        // request_resize（非 resize）：帧进行中的缩放延迟到帧边界落地——
+        // 帧中重配置 = 深度新/颜色旧附件不匹配（批次二十三实测命令缓冲无效）
+        get_screen().request_resize(width, height);
     }
 }
 

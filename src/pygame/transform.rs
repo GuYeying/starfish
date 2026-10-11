@@ -11,7 +11,7 @@
 //!
 //! ⚠️ 产物 = 新 Surface（源不变）；须在 display 初始化后调用。
 
-use crate::pygame::render::{DrawTarget, Surface, Texture};
+use crate::pygame::render::{DrawTarget, Surface};
 
 /// 水平镜像（uv 翻转，零重采样）
 pub fn flip_x(s: &Surface) -> Surface {

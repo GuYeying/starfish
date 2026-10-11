@@ -33,10 +33,13 @@ edition 2024。项目文档、代码注释、更新日志全部使用**中文**�
 ├── src/base/            # 引擎（render/gfx/font/audio/video/window/time/...）
 ├── src/pygame/          # pygame 兼容层（契约 P1~P5 全落地；architecture/pygame层设计.md）
 ├── src/data/            # 引擎数据（colors.json 颜色表，供 pygame::color::init_colors 装载）
-├── starfish-window/     # ★ 自研窗口/事件 crate（已 vendor 进仓库，src/base/window 的本体）
+├── starfish-window/     # ★ 自研窗口/事件 crate（上游更名 starfish-we——以
+│                        #   Cargo.toml `package =` 别名映射，代码路径
+│                        #   starfish_window:: 不变；vendor 副本暂缺）
 ├── pygame-rs/           # ★ Python 绑定 crate（RP 嵌入三端全通；scripts/build_apk.py = 统一 APK 打包）
 ├── android/             # NativeActivity APK 清单模板（根示例用；pygame-rs/android/ 为其自持副本）
-├── examples/            # hello + pygame 三件套（probe/hello/image_demo，均双 target 注册）
+├── examples/            # hello + pygame 三件套 + examples/pygame/ 模块测试套件
+│                        #（25 案例全模块自检，索引与判读见 examples/pygame/README.md）
 ├── web/                 # wasm 产物 + 各示例 html + resize_probe.html（回归探针）
 ├── architecture/        # 设计契约（pygame层设计.md）；legacy/ 为旧架构基线文档
 ├── doc/log/             # 每日更新日志（按批次记录，含历史）

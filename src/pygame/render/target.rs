@@ -109,6 +109,9 @@ pub struct Screen {
     surface: RefCell<RenderSurface>,
     /// 本帧是否已 begin（交换链纹理已 acquire）
     begun: Cell<bool>,
+    /// 帧进行中收到的 resize 请求（帧边界延迟应用——帧中重配置会因
+    /// "深度新/颜色旧"附件尺寸不匹配导致命令缓冲无效，批次二十三实测）
+    pending_resize: Cell<Option<(u32, u32)>>,
     batch: RefCell<Batch>,
     camera: RefCell<CameraRig>,
     /// 裁剪区（`set_clip`；None = 不裁剪）
@@ -143,6 +146,7 @@ impl Screen {
             gpu,
             surface: RefCell::new(surface),
             begun: Cell::new(false),
+            pending_resize: Cell::new(None),
             batch: RefCell::new(Batch::new()),
             camera: RefCell::new(camera),
             clip: Cell::new(None),
@@ -164,17 +168,51 @@ impl Screen {
         self.camera.borrow_mut().set_ortho((width, height));
     }
 
+    /// 帧边界安全的 resize 请求（批次二十三）：帧进行中（begun）时挂起，
+    /// present 后统一应用（一帧多次缩放取最后一次——last-wins）。
+    /// 帧中直接重配置 = 深度新/颜色旧附件尺寸不匹配 → 命令缓冲无效。
+    pub fn request_resize(&self, width: u32, height: u32) {
+        // 批次二十四诊断
+        crate::base::debug::devlog(&format!(
+            "[screen] request_resize {width}×{height} begun={}",
+            self.begun.get()
+        ));
+        if self.begun.get() {
+            self.pending_resize.set(Some((width, height)));
+        } else {
+            self.resize(width, height);
+            crate::base::debug::devlog("[screen] resize 已落地");
+        }
+    }
+
     /// 帧提交（对应 pygame `display.flip`）：打包残余 batch → 与 base
     /// 清屏命令合并提交 → 交换链 present；未 begin（帧未就绪）则空转
     pub fn present(&self) {
-        if !self.begun.get() {
+        // 批次二十四诊断： begun 状态 + batch 顶点数（呈现链路排障）
+        let begun = self.begun.get();
+        let batch_len = {
+            let b = self.batch.borrow();
+            b.len()
+        };
+        if begun && batch_len == 0 {
+            crate::base::debug::devlog(&format!(
+                "[screen] present 批次为空（begun={begun}）——本帧无绘制？"
+            ));
+        }
+        if !begun {
+            crate::base::debug::devlog("[screen] present 跳过（未 begin）");
             return;
         }
         self.begun.set(false);
         self.pack(false);
+        crate::base::debug::devlog("[screen] present 打包+提交 ✓");
         // present 对"begin 未就绪无帧"自身免疫（跳过路径）
         self.surface.borrow_mut().present();
         self.batch.borrow_mut().clear();
+        // 帧边界应用挂起的 resize（帧中收到的缩放在此安全落地）
+        if let Some((w, h)) = self.pending_resize.take() {
+            self.resize(w, h);
+        }
     }
 
     /// 渲染通道会话（**Rust 版 with 语法**，ADR-5 v1.2）：创建即开始指令

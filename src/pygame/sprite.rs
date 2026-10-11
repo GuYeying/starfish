@@ -11,7 +11,6 @@
 //! （分层：sprite 管组织，Rect/Mask 管判定）。
 
 use crate::pygame::render::{Texture, DrawTarget, Surface};
-use crate::pygame::Rect;
 
 /// 精灵句柄（世代 id——remove 后旧句柄自动失效）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

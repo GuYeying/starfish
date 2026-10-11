@@ -10,18 +10,22 @@
 //!   **受控阻塞轮询**至用户操作或 ~15s 超时（NativeActivity 无 Java 结果
 //!   回调可收）。须在窗口/事件循环就绪后调用（系统对话框需叠加显示）。
 //! - 桌面：无运行时权限模型，恒返回 true。
-//! - Web：无前置权限 API——授权发生在紧随其后的设备 API 首次使用
-//!   （如 `getUserMedia`），本函数恒返回 true（**委派语义**：主动预申请
-//!   意味着白白开一次设备流，浏览器的"首次使用时授权"即其权限模型）。
+//! - Web：同步 [`ensure`] 为**委派语义**（恒 true，授权发生在设备 API
+//!   首次使用时）；[`ensure_async`]（批次二十三）对 Microphone 为
+//!   **授权即取流**——发起 `getUserMedia` 真实授权，成功的 MediaStream
+//!   缓存待消费（[`take_cached_stream`]，录音优先复用，不开两次设备）。
 //!
 //! Android 权限的两类区分（决定 `ensure` 的行为）：
 //! - **dangerous**（如 `Microphone`）：清单声明 + 运行时申请双管齐下——
 //!   未授权时 `ensure` 阻塞弹框等待
 //! - **normal**（如 `Internet`）：清单声明即安装时自动授予——`ensure`
-//!   首次检查即通过，无弹框无等待（清单由 xtask 的 APK 模板统一声明）
+//!   首次检查即通过，无弹框无等待（清单由打包脚本统一声明）
 //!
 //! JNI 依赖（jni / robius-android-env）为 Android 非可选依赖（对齐
 //! ndk-context 的批次 17 先例：核心路径使用 → 非可选）。
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+use std::cell::RefCell;
 
 /// 可申请的权限集合（跨平台）
 ///
@@ -60,6 +64,74 @@ pub fn ensure(permission: Permission) -> bool {
         let _ = permission;
         true
     }
+}
+
+// ── Web：授权即取流（getUserMedia 本身就是浏览器的授权机制）────────
+//
+// ensure_async(Microphone) 发起 getUserMedia：浏览器弹授权框，允许后把
+// MediaStream **缓存待消费**（录音 open_input 优先复用）——授权流不被
+// 浪费，化解"预申请白白开一次设备流"的顾虑。
+// 注意：浏览器策略要求用户手势上下文（首次交互后调用最稳）。
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+thread_local! {
+    static CACHED_STREAM: RefCell<Option<web_sys::MediaStream>> = const { RefCell::new(None) };
+}
+
+/// 异步统一授权入口（三平台同签名）。
+///
+/// - Android：桥接同步 `ensure`（阻塞弹框等待，≤15s）
+/// - Web：Microphone 发起 `getUserMedia` 真实授权 + 缓存授权流
+/// - 桌面：直通 true
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+pub async fn ensure_async(permission: Permission) -> bool {
+    match permission {
+        Permission::Microphone => {
+            let window = web_sys::window().expect("web: 无全局 window");
+            let md = window
+                .navigator()
+                .media_devices()
+                .expect("web: mediaDevices 不可用");
+            let mut constraints = web_sys::MediaStreamConstraints::new();
+            constraints.audio(&wasm_bindgen::JsValue::from_bool(true));
+            let promise = md
+                .get_user_media_with_constraints(&constraints)
+                .expect("web: getUserMedia 调用失败");
+            match wasm_bindgen_futures::JsFuture::from(promise).await {
+                Ok(v) => {
+                    let stream: web_sys::MediaStream = v.into();
+                    CACHED_STREAM.with(|c| *c.borrow_mut() = Some(stream));
+                    crate::base::debug::console_log("[permission] 麦克风已授权（流已缓存）");
+                    true
+                }
+                Err(e) => {
+                    crate::base::debug::console_log(&format!(
+                        "[permission] 麦克风授权被拒/失败: {e:?}"
+                    ));
+                    false
+                }
+            }
+        }
+        _ => true,
+    }
+}
+
+/// 消费缓存的授权流（Microphone 授权成功后非空；取走即所有权转移）。
+/// 录音（device_web::open_input）优先取用——复用已授权流，不开两次设备。
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+pub fn take_cached_stream(permission: Permission) -> Option<web_sys::MediaStream> {
+    match permission {
+        Permission::Microphone => {
+            CACHED_STREAM.with(|c| c.borrow_mut().take())
+        }
+        _ => None,
+    }
+}
+
+/// 异步统一授权入口（非 Web 平台：Android 桥接同步阻塞版；桌面直通）。
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+pub async fn ensure_async(permission: Permission) -> bool {
+    ensure(permission)
 }
 
 #[cfg(target_os = "android")]

@@ -14,6 +14,7 @@
 //!
 //! v1 范围：客户端（主动连接）。监听/服务端待需求落地。
 
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 use std::collections::VecDeque;
 
 

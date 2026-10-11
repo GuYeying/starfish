@@ -33,6 +33,24 @@ pub fn console_log(msg: &str) {
     native::log(msg);
 }
 
+/// 诊断落盘通道（批次二十四临时，随诊断批撤除）：println + Android 追加
+/// `/sdcard/Download/bp_log.txt`。渲染链路排障共用（begin_frame/present/
+/// resize 各环节打点）——非 wasm 无文件系统时仅 println。
+pub fn devlog(msg: &str) {
+    println!("{msg}");
+    #[cfg(target_os = "android")]
+    {
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/sdcard/Download/bp_log.txt")
+        {
+            use std::io::Write;
+            let _ = writeln!(f, "{msg}");
+        }
+    }
+}
+
 /// 安装 panic 转发：wasm 上把 panic 信息（含位置）落到浏览器控制台；
 /// 桌面 panic 天然走 stderr，无此需求——**平台门控，不强行归一**。
 ///

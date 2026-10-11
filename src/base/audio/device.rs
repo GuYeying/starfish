@@ -15,6 +15,7 @@
 //! - v1 格式约束：只协商 **f32 交错立体声**（优先设备默认配置，
 //!   否则在支持列表里取最高采样率）；不满足则报 [`AudioError::UnsupportedFormat`]。
 
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 use std::sync::Arc;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};

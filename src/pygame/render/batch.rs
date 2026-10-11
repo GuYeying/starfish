@@ -220,6 +220,11 @@ impl Batch {
     }
 
     /// base 图元几何入批（`shape2d` 家族产出；z 透传、颜色烘焙为调用色）
+    ///
+    /// **GLES 兼容（批次二十四）**：三角形以“退化四边形”入队——每三角形
+    /// (a,b,c) 展开为 quad_corners [a,b,c,c]（第二三角 acc 退化零面积），
+    /// 与 quad 同一条被实证的顶点路径；直接三角段在部分 GLES 驱动上
+    /// 静默不显示（Android 真机实测，quad 路径正常）。
     pub fn push_geometry(
         &mut self,
         kind: GeometryKind,
@@ -233,20 +238,51 @@ impl Batch {
             uv: [0.5, 0.5],
             color,
         };
-        let stream = match kind {
-            GeometryKind::Filled => &mut self.tris,
-            GeometryKind::Line => &mut self.lines,
-        };
-        if geometry.indices.is_empty() {
-            stream.push(None, geometry.vertices.iter().map(|sv| v(sv)));
-        } else {
-            stream.push(
-                None,
-                geometry
-                    .indices
-                    .iter()
-                    .map(|&i| v(&geometry.vertices[i as usize])),
-            );
+        match kind {
+            GeometryKind::Filled => {
+                // 三角形 → 退化四边形序列（同段合并由 Stream::push 处理）
+                let mut tris: Vec<[SpriteVertex; 3]> = Vec::new();
+                if geometry.indices.is_empty() {
+                    for t in geometry.vertices.chunks(3) {
+                        if t.len() == 3 {
+                            tris.push([v(&t[0]), v(&t[1]), v(&t[2])]);
+                        }
+                    }
+                } else {
+                    for idx in geometry.indices.chunks(3) {
+                        if idx.len() == 3 {
+                            tris.push([
+                                v(&geometry.vertices[idx[0] as usize]),
+                                v(&geometry.vertices[idx[1] as usize]),
+                                v(&geometry.vertices[idx[2] as usize]),
+                            ]);
+                        }
+                    }
+                }
+                for tri in &tris {
+                    self.tris.push(
+                        None,
+                        [
+                            tri[0], tri[1], tri[2], // (a,b,c)
+                            tri[0], tri[2], tri[2], // (a,c,c)=退化
+                        ],
+                    );
+                }
+            }
+            GeometryKind::Line => {
+                let stream = &mut self.lines;
+                if geometry.indices.is_empty() {
+                    stream.push(None, geometry.vertices.iter().map(|sv| v(sv)));
+                } else {
+                    stream.push(
+                        None,
+                        geometry
+                            .indices
+                            .iter()
+                            .map(|&i| v(&geometry.vertices[i as usize])),
+                    );
+                }
+            }
         }
     }
 

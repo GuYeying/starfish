@@ -92,22 +92,37 @@ pub(crate) fn open_input(
 
     let mut constraints = web_sys::MediaStreamConstraints::new();
     constraints.audio(&wasm_bindgen::JsValue::from_bool(true));
-    let promise = md
-        .get_user_media_with_constraints(&constraints)
-        .map_err(|e| AudioError::custom(format!("getUserMedia 失败: {e:?}")))?;
+    // 批次二十三：优先复用 permission 模块缓存的已授权流（ensure_async
+    // Microphone 的产物）——避免同一麦克风开两次设备流。无缓存才自行请求。
+    let cached = crate::base::permission::take_cached_stream(
+        crate::base::permission::Permission::Microphone,
+    );
+    let promise = if cached.is_none() {
+        Some(
+            md.get_user_media_with_constraints(&constraints)
+                .map_err(|e| AudioError::custom(format!("getUserMedia 失败: {e:?}")))?,
+        )
+    } else {
+        None
+    };
 
     let state2 = state.clone();
     let ctx2 = ctx.0.clone();
     let nodes2 = nodes.clone();
     wasm_bindgen_futures::spawn_local(async move {
-        let js = match wasm_bindgen_futures::JsFuture::from(promise).await {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!("[starfish-audio] 麦克风授权失败/被拒: {e:?}");
-                return;
-            }
+        let stream: web_sys::MediaStream = if let Some(s) = cached {
+            s // permission 模块授权时缓存的流直接复用
+        } else {
+            let promise = promise.expect("无缓存时必须存在 getUserMedia promise");
+            let js = match wasm_bindgen_futures::JsFuture::from(promise).await {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("[starfish-audio] 麦克风授权失败/被拒: {e:?}");
+                    return;
+                }
+            };
+            js.into()
         };
-        let stream: web_sys::MediaStream = js.into();
         let source = match ctx2.create_media_stream_source(&stream) {
             Ok(n) => n,
             Err(e) => {

@@ -1,6 +1,6 @@
 [package]
 name = "starfish"
-version = "0.9.9"
+version = "0.9.10"
 edition = "2024"
 
 [lib]
@@ -65,9 +65,9 @@ wgpu = { version = "30.0.0", default-features = false, features = [
 # starfish-window：自研 SDL 风格 poll 模型（调用方持循环），替代 winit。
 # wgpu feature = raw-window-handle trait 直通（wgpu 建表面零 unsafe）。
 # raw-window-handle：wgpu 建表面的句柄桥（base::window 直通实现）。
-# 2026-09-27 已 vendor 进本仓库（starfish-window/，源副本在
-# D:/Projects/Rust/starfish-window），项目独立可迁移。
-starfish-window = { path = "../starfish-window", features = ["wgpu"] }
+# 2026-10-11 上游 crate 更名 starfish-window → starfish-we（v0.2.0）：
+# 以 package = 别名保持本仓库代码路径 starfish_window:: 不变，零改动过渡。
+starfish-window = { path = "../starfish-window", package = "starfish-we", features = ["wgpu"] }
 raw-window-handle = "0.6.2"
 
 # ── 音频 ──
@@ -260,3 +260,233 @@ name = "pygame_image_demo"
 name = "pygame_image_demo_android"
 path = "examples/pygame_image_demo.rs"
 crate-type = ["cdylib"]
+
+# ── pygame 模块运行测试案例（examples/pygame/，批次二十五；每模块一案例）──
+[[example]]
+name = "pygame_test_rect"
+path = "examples/pygame/rect.rs"
+
+[[example]]
+name = "pygame_test_color"
+path = "examples/pygame/color.rs"
+
+[[example]]
+name = "pygame_test_time"
+path = "examples/pygame/time.rs"
+
+[[example]]
+name = "pygame_test_draw"
+path = "examples/pygame/draw.rs"
+
+[[example]]
+name = "pygame_test_surface"
+path = "examples/pygame/surface.rs"
+
+[[example]]
+name = "pygame_test_mask"
+path = "examples/pygame/mask.rs"
+
+[[example]]
+name = "pygame_test_display"
+path = "examples/pygame/display.rs"
+
+[[example]]
+name = "pygame_test_event"
+path = "examples/pygame/event.rs"
+
+[[example]]
+name = "pygame_test_io"
+path = "examples/pygame/io.rs"
+
+# ── 上表九案例的 Android 双注册（真机"实际运行能力"验证；统一脚本出包）──
+[[example]]
+name = "pygame_test_rect_android"
+path = "examples/pygame/rect.rs"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "pygame_test_color_android"
+path = "examples/pygame/color.rs"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "pygame_test_time_android"
+path = "examples/pygame/time.rs"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "pygame_test_draw_android"
+path = "examples/pygame/draw.rs"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "pygame_test_surface_android"
+path = "examples/pygame/surface.rs"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "pygame_test_mask_android"
+path = "examples/pygame/mask.rs"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "pygame_test_display_android"
+path = "examples/pygame/display.rs"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "pygame_test_event_android"
+path = "examples/pygame/event.rs"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "pygame_test_io_android"
+path = "examples/pygame/io.rs"
+crate-type = ["cdylib"]
+
+# ── 扩展模块案例（批次二十六：纯逻辑族 + 硬件族降级自检；pygame 层全模块覆盖）──
+[[example]]
+name = "pygame_test_version"
+path = "examples/pygame/version.rs"
+
+[[example]]
+name = "pygame_test_locals"
+path = "examples/pygame/locals.rs"
+
+[[example]]
+name = "pygame_test_math"
+path = "examples/pygame/math.rs"
+
+[[example]]
+name = "pygame_test_key"
+path = "examples/pygame/key.rs"
+
+[[example]]
+name = "pygame_test_mouse"
+path = "examples/pygame/mouse.rs"
+
+[[example]]
+name = "pygame_test_transform"
+path = "examples/pygame/transform.rs"
+
+[[example]]
+name = "pygame_test_sprite"
+path = "examples/pygame/sprite.rs"
+
+[[example]]
+name = "pygame_test_font"
+path = "examples/pygame/font.rs"
+
+[[example]]
+name = "pygame_test_image"
+path = "examples/pygame/image.rs"
+
+[[example]]
+name = "pygame_test_sndarray"
+path = "examples/pygame/sndarray.rs"
+
+[[example]]
+name = "pygame_test_video"
+path = "examples/pygame/video.rs"
+
+[[example]]
+name = "pygame_test_net"
+path = "examples/pygame/net.rs"
+
+[[example]]
+name = "pygame_test_gamepad"
+path = "examples/pygame/gamepad.rs"
+
+[[example]]
+name = "pygame_test_touch"
+path = "examples/pygame/touch.rs"
+
+[[example]]
+name = "pygame_test_dialog"
+path = "examples/pygame/dialog.rs"
+
+[[example]]
+name = "pygame_test_permission"
+path = "examples/pygame/permission.rs"
+
+# ── 上表十六案例的 Android 双注册（统一脚本出包）──
+[[example]]
+name = "pygame_test_version_android"
+path = "examples/pygame/version.rs"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "pygame_test_locals_android"
+path = "examples/pygame/locals.rs"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "pygame_test_math_android"
+path = "examples/pygame/math.rs"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "pygame_test_key_android"
+path = "examples/pygame/key.rs"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "pygame_test_mouse_android"
+path = "examples/pygame/mouse.rs"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "pygame_test_transform_android"
+path = "examples/pygame/transform.rs"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "pygame_test_sprite_android"
+path = "examples/pygame/sprite.rs"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "pygame_test_font_android"
+path = "examples/pygame/font.rs"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "pygame_test_image_android"
+path = "examples/pygame/image.rs"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "pygame_test_sndarray_android"
+path = "examples/pygame/sndarray.rs"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "pygame_test_video_android"
+path = "examples/pygame/video.rs"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "pygame_test_net_android"
+path = "examples/pygame/net.rs"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "pygame_test_gamepad_android"
+path = "examples/pygame/gamepad.rs"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "pygame_test_touch_android"
+path = "examples/pygame/touch.rs"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "pygame_test_dialog_android"
+path = "examples/pygame/dialog.rs"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "pygame_test_permission_android"
+path = "examples/pygame/permission.rs"
+crate-type = ["cdylib"]
+

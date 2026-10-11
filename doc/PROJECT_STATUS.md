@@ -1,11 +1,30 @@
 # PROJECT STATUS — 进度快照与下一步计划
 
-> 更新：2026-09-30。接手工作**先读本文档**，再读 `CLAUDE.md` 与
-> `architecture/pygame层设计.md`（契约定稿 v1.0）。
+> 更新：2026-10-11（v0.9.10）。接手工作**先读本文档**，再读
+> `CLAUDE.md` 与 `architecture/pygame层设计.md`（契约定稿 v1.0）。
 
 ---
 
 ## 一、当前阶段
+
+**版本 v0.9.10（2026-10-11，批次二十五~二十六）：pygame 层测试套件
+全模块覆盖 + 三端一致性两连修**——
+
+- **模块运行测试套件**（`examples/pygame/`，25 案例 / 129 项自检）：
+  每模块一案例（核心 9 + 扩展 16），桌面 129/129 全绿；Web 产物
+  （wasm+js+html+索引页）与 Android 真机包（统一脚本出包）随批重出；
+  索引与判读见 `examples/pygame/README.md`；
+- **色彩三端字节级统一**（两连修，像素取证定案）：①案例侧 u8 风格
+  f32 误入 push_quad 归一化约定（钳白）→ 全量归一化；②Windows 交换
+  链默认选中 sRGB 格式（写入多一次编码）→ `settings.rs` 默认跳过
+  sRGB 变体，回到契约 ④ Rgba8Unorm 直通语义——**三端创作值=显示值**；
+- **time.tick 帧率控制正确化**（引擎 `base::time`）：语义改为上限
+  节流（cap）——vsync 已达标不再补睡 + 量化带放行，消除"睡+等
+  vsync"双重节流（60Hz 屏 53.8→59.6fps）；套件 `paced_frame` 改
+  follow-vsync，Android 串联减半修复；三端帧率 = 各自刷新率；
+- **上游窗口 crate 更名** starfish-window → starfish-we（v0.2.0）：
+  Cargo `package =` 别名过渡，代码路径 `starfish_window::` 零改动；
+- **pygame-rs 交由他人接管**（2026-10-11 定）——本仓库后续不涉其代码。
 
 **里程碑（2026-09-30，批次二十二~二十四）：Web 音频闭环 + pygame-rs
 绑定扩容四连**——AudioContext 捕获修复（cpal 0.18 平台包装层 as_inner
@@ -59,19 +78,30 @@ touch → sprite → RenderPass 统一 → **RP 嵌入 M0**（批次一~十六�
 | 13 | **sprite Godot 式重设计**（池化 Group+世代 id+(z,y) 排序会话绘制；❌场景树/信号/ECS） | `src/pygame/sprite.rs` + 细案 `reference/` |
 | 14 | 用户实测反馈修复：RenderPass 统一（批次十五）/ MRT fill 覆盖 / web 501 / Android 退出语义 | 批次九~十五 |
 
+**批次二十五~二十六（2026-10-11）**：pygame 模块运行测试套件**全模块
+覆盖**落地——`examples/pygame/` 25 案例（核心 9 + 扩展 16），桌面冒烟
+**129/129 全绿**；案例索引与判读见 `examples/pygame/README.md`，
+Android 真机包按统一脚本出包。上游窗口 crate 更名 starfish-we，
+Cargo `package =` 别名过渡（代码路径不变）。
+
 ## 三、下一步
 
-**① M1 完整绑定面**（现主线）：display/event/draw 等模块化注册进 RP
-（当前仅 sf 扁平四函数）、Python 行为回归集、pygame.run 门形态设计。
+**① Surface depth：Rust 层已完备（2026-10-11 核查，无需新代码）**——
+`Surface::with_depth/has_depth/render_depth`（带校验断言）+ Screen 深度
+缓冲默认创建（Depth24Plus 无条件）+ resize 深度重建，全部就位且
+pygame_probe（with_depth + render_depth 会话演示）600 帧×2 回归零错。
+**剩余 = 绑定层透传**（`depth_buffer=True` → `with_depth`、
+`render_depth` 入口、`has_depth` 校验消息）——归 pygame 绑定 agent；
+绑定面本体（bridge/native_pygame/pygame_impls）已由用户侧实现
+（pygame_shim 时代结束），M1 剩余 = 行为回归集。
 
-**② rp_main_loop 真机挂起排查**：旧 APK（lib_name 正确）挂于 genesis
-附近；当前源码 set_mode 调用缺失（疑批次十七后编辑丢失）需找回。同套
-genesis 在 window_test 三平台顺利通过 → 非 genesis 本身问题。
+**② rp_main_loop 挂起 → 已作废（2026-10-11）**：该示例已在 pygame-rs
+重构中移除（binding_probe 为存活的等价案例且三端验证通过）——旧挂起
+观察（批次十七旧包）随之失效。若未来重做 while-True 归 rpy 形态的
+Android 案例，按批次二十四工具箱直接新建即可。
 
-**③ xtask 已退役（批次二十一，2026-09-29）**：统一打包脚本
-`pygame-rs/scripts/build_apk.py`（pygame-rs 自持、根示例共用、独立化
-友好）——`python pygame-rs/scripts/build_apk.py <示例名> [--dir <crate目录>]`。
-手动兜底链仍见 reference 手册 §二。
+**③ 打包脚本已落地（批次二十一）**：`pygame-rs/scripts/build_apk.py`
+（xtask 退役）——pygame-rs 自持、根示例共用、独立化友好。
 
 **④ Android 真机回归**：三个 demo APK（probe/hello/image_demo）装机
 过一遍（批次十六起挂账）。

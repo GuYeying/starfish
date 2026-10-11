@@ -14,6 +14,7 @@
 //! 会话/深度/MRT 见 [`render`]（ADR-5 v1.2）。
 
 pub mod color;
+pub mod dialog;
 pub mod display;
 pub mod draw;
 #[cfg(feature = "font")]
@@ -21,26 +22,30 @@ pub mod font;
 pub mod event;
 pub mod gamepad;
 pub mod image;
+pub mod io;
 pub mod key;
 pub mod locals;
 pub mod mask;
 pub mod math;
 pub mod mouse;
+#[cfg(feature = "net")]
+pub mod net;
+pub mod permission;
 pub mod rect;
 pub mod render;
 pub mod sndarray;
 /// pygame.sprite 对应物（Godot 式重设计——池化 Group + 世代 id +
 /// (z,y) 排序会话绘制；细案见 reference/）
 pub mod sprite;
+/// pygame.surface 对应物（ADR-1 离屏绘制面；绑定定约见模块文档）
+pub mod surface;
 pub mod touch;
-/// pygame.surface 对应物（Surface 宿主 = [`render::Surface`]——会话与
-/// DrawTarget 语义所在地；此模块为 pygame 名发现性再导出）
-pub mod surface {
-    pub use crate::pygame::render::Surface;
-}
 pub mod time;
 pub mod transform;
 pub mod version;
+/// pygame.video 对应物（starfish 扩展域：六平台硬解视频播放）
+#[cfg(feature = "video")]
+pub mod video;
 
 pub use color::Color;
 pub use event::Event;

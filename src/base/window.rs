@@ -22,28 +22,6 @@ pub use starfish_window::android_init;
 
 /// 等待下一帧（桌面 no-op async / Web rAF yield）。
 /// 三平台统一：应用体里无条件调用，不需要 cfg。
-#[cfg(not(target_arch = "wasm32"))]
-pub async fn next_frame() {}
-
-/// 等待下一帧（Web 帧拍原语；requestAnimationFrame 的 Promise 桥）。
-/// 桌面无需此原语——循环体后 `Clock::tick` / vsync present 自然节流。
-#[cfg(target_arch = "wasm32")]
-pub async fn next_frame() {
-    use std::sync::atomic::{AtomicU32, Ordering};
-    static NF: AtomicU32 = AtomicU32::new(0);
-    let n = NF.fetch_add(1, Ordering::Relaxed);
-    if n % 60 == 0 {
-        crate::base::debug::console_log(&format!("[window] next_frame 进入 {n}"));
-    }
-    let promise = js_sys::Promise::new(&mut |resolve: js_sys::Function,
-                                             _reject: js_sys::Function| {
-        web_sys::window()
-            .expect("web: 无浏览器窗口")
-            .request_animation_frame(&resolve)
-            .expect("requestAnimationFrame 失败");
-    });
-    let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
-    if n % 60 == 0 {
-        crate::base::debug::console_log(&format!("[window] next_frame 完成 {n}"));
-    }
-}
+/// 本体在 starfish-window 0.2.0 起（§poll 模型的逐帧让出原语）——
+/// 这里仅再导出，保持引擎稳定路径。
+pub use starfish_window::next_frame;

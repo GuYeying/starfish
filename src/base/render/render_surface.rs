@@ -175,6 +175,15 @@ impl RenderSurface{
     /// 对齐引擎"未就绪即跳过"哲学（调用方按 false 跳过本帧渲染与 present）
     pub fn begin_frame(&mut self, clear_color: wgpu::Color,clear_depth:f32) -> bool {
         crate::base::debug::assert_main_thread("RenderSurface::begin_frame");
+        // 批次二十四诊断：启动期逐帧记录（前 12 帧全打 + 之后每 60 帧一次；
+        // 走 permission::devlog 的文件+TCP 通道——真机排障用，随批撤除）
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let diag = n < 12 || n % 60 == 0;
+        if diag {
+            crate::base::debug::devlog(&format!("[rs] begin_frame #{n} enter"));
+        }
         // 获取当前交换链纹理（自愈式）：
         // Outdated/Lost/未配置(panic 经 catch_unwind) → 重建交换链配置与
         //   深度/MSAA 纹理后重试（拖动窗口/最小化/Android 启动期抖动）
@@ -198,10 +207,21 @@ impl RenderSurface{
                     Ok(wgpu::CurrentSurfaceTexture::Success(f))
                     | Ok(wgpu::CurrentSurfaceTexture::Suboptimal(f)) => {
                         frame = Some(f);
+                        if diag {
+                            crate::base::debug::devlog(&format!(
+                                "[rs] begin_frame #{n} acquire ok"
+                            ));
+                        }
                         break;
                     }
                     Ok(wgpu::CurrentSurfaceTexture::Outdated
-                    | wgpu::CurrentSurfaceTexture::Lost)
+                    | wgpu::CurrentSurfaceTexture::Lost) => {
+                        if diag {
+                            crate::base::debug::devlog(&format!(
+                                "[rs] begin_frame #{n} acquire Outdated/Lost → 重建重试"
+                            ));
+                        }
+                    }
                     | Err(_) => {
                         self.resize(self.config.width, self.config.height);
                     }
@@ -211,6 +231,9 @@ impl RenderSurface{
                 }
             }
             let Some(frame) = frame else {
+                crate::base::debug::devlog(&format!(
+                    "[rs] begin_frame #{n} FAIL（3 次重试耗尽）"
+                ));
                 eprintln!("[starfish] 渲染表面未就绪,本帧跳过(下一帧重试)");
                 return false;
             };
@@ -281,7 +304,7 @@ impl RenderSurface{
         // 取出当前帧交换链纹理。begin_frame 未就绪(false)时无帧可提交——
         // 跳过本帧 present(不 panic,对齐"未就绪即跳过")
         let Some(frame) = self.color_frame.take() else {
-            eprintln!("[starfish] present 无帧可提交(begin 未就绪),跳过");
+            crate::base::debug::devlog("[rs] present 无帧跳过（begin 未就绪）");
             return;
         };
         // 1. 收集所有待提交命令

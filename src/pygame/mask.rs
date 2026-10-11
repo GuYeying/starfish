@@ -11,7 +11,6 @@
 //! [`overlap`]/[`Mask::overlap_area`] 等纯 CPU 检测（pygame 全套语义）。
 
 use crate::pygame::render::{DrawTarget, Surface};
-use crate::pygame::Rect;
 
 /// 像素位掩码（1 bit/像素；碰撞与命中检测用）
 #[derive(Debug, Clone, PartialEq, Eq)]

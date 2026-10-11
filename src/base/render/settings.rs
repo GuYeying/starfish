@@ -97,8 +97,19 @@ impl SurfaceSettings {
         size: &(u32, u32),
         downlevel_caps: &wgpu::DownlevelCapabilities,
     ) -> SurfaceConfiguration {
-        // format/alpha_mode 依赖 caps 运行时数据，只能保留 Option
-        let format = self.color_format.unwrap_or(caps.formats[0]);
+        // format/alpha_mode 依赖 caps 运行时数据，只能保留 Option。
+        // 默认格式选**线性**（契约 ④ Rgba8Unorm 语义）：sRGB 表面会对
+        // 写入值再做 linear→sRGB 编码，把"创作值即显示值"的 2D 直通
+        // 管线整体提亮（2026-10-11 像素取证：Windows caps 首选 sRGB →
+        // 桌面比 web/创作值亮；web canvas 受浏览器限制只有 linear）。
+        // 跳过 sRGB 变体 → 三端字节级一致（SDL/pygame 同路数）
+        let format = self.color_format.unwrap_or_else(|| {
+            caps.formats
+                .iter()
+                .copied()
+                .find(|f| !f.is_srgb())
+                .unwrap_or(caps.formats[0])
+        });
         // alpha_mode 走"许愿 → 掩码"同款回退：透明窗口请求 PreMultiplied
         // 但平台表面只支持 Opaque 时（如窗口创建未启用透明合成——
         // starfish-window TRANSPARENT 位待实现），降级 Opaque 并标注，
