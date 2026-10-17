@@ -1,6 +1,6 @@
 [package]
 name = "starfish"
-version = "0.9.10"
+version = "0.9.20"
 edition = "2024"
 
 [lib]
@@ -346,14 +346,6 @@ crate-type = ["cdylib"]
 
 # ── 扩展模块案例（批次二十六：纯逻辑族 + 硬件族降级自检；pygame 层全模块覆盖）──
 [[example]]
-name = "pygame_test_version"
-path = "examples/pygame/version.rs"
-
-[[example]]
-name = "pygame_test_locals"
-path = "examples/pygame/locals.rs"
-
-[[example]]
 name = "pygame_test_math"
 path = "examples/pygame/math.rs"
 
@@ -410,16 +402,6 @@ name = "pygame_test_permission"
 path = "examples/pygame/permission.rs"
 
 # ── 上表十六案例的 Android 双注册（统一脚本出包）──
-[[example]]
-name = "pygame_test_version_android"
-path = "examples/pygame/version.rs"
-crate-type = ["cdylib"]
-
-[[example]]
-name = "pygame_test_locals_android"
-path = "examples/pygame/locals.rs"
-crate-type = ["cdylib"]
-
 [[example]]
 name = "pygame_test_math_android"
 path = "examples/pygame/math.rs"

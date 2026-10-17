@@ -27,7 +27,7 @@ python pygame-rs/scripts/build_apk.py pygame_test_rect --dir .
   Web F12 console（`common::log` 三端可见，每案例退出前打印汇总
   `[模块] N 帧完成，自检 x/y`）。
 
-## 案例索引（25 案例）
+## 案例索引（23 案例）
 
 ### 核心套件（批次二十五定约的 9 案例）
 
@@ -38,7 +38,7 @@ python pygame-rs/scripts/build_apk.py pygame_test_rect --dir .
 | `pygame_test_time` | Clock::new / delay(0) / tick 毫秒 / get_fps / raw_delta（后三项第 30 帧晚登记） |
 | `pygame_test_draw` | rect 填充 / rect 描边 / circle / line / lines / ellipse / polygon / arc |
 | `pygame_test_surface` | new 尺寸 / new 无深度 / with_depth / render_depth 会话 / blit 回环 |
-| `pygame_test_mask` | set_at/get_at / count / invert / scale / overlap / overlap_area / overlap_mask / to_surface / from_surface |
+| `pygame_test_mask` | set_at/get_at / count / invert / scale / overlap / overlap_area / overlap_mask / to_surface / 影子构建(同步) / 回读一致性 |
 | `pygame_test_display` | get_init / 尺寸一致 / caption+opacity / flip 稳定 120 帧（晚登记） |
 | `pygame_test_event` | 泵可用 / 240 帧泵稳定（晚登记）；交互计数进 console |
 | `pygame_test_io` | 错误路径×2 + 文本回环 + 二进制回环（原生；Web 仅错误路径） |
@@ -47,8 +47,6 @@ python pygame-rs/scripts/build_apk.py pygame_test_rect --dir .
 
 | 案例 | 自检项 |
 |---|---|
-| `pygame_test_version` | VERSION 非空 / vernum 一致 / get_sdl_version 兼容值 |
-| `pygame_test_locals` | K_a / K_ESCAPE / K_UP / K_RETURN 映射 / KMOD 位独立 / BUTTON_LEFT / KNOWN_MASK |
 | `pygame_test_math` | lerp / clamp / inv_lerp / remap / smoothstep 单调 / smootherstep 端点 |
 | `pygame_test_key` | get_pressed 面 / name 映射 / get_mods / get_repeat 垫底 / get_focused |
 | `pygame_test_mouse` | get_pos / get_pressed / set_pos 回环（原生）/ set_visible 回环 / get_focused |

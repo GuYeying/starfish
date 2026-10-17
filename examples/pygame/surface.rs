@@ -10,7 +10,7 @@ mod common;
 use common::{draw_status, Checks};
 use starfish::pygame::render::DrawTarget;
 use starfish::pygame::display;
-use starfish::pygame::surface;
+use starfish::pygame::render;
 
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
     display::set_mode((800, 600)).await?;
@@ -18,10 +18,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut checks = Checks::new("pygame.surface");
     common::log("[surface] set_mode 完成，进入自检");
 
-    let plain = surface::new((64, 64));
+    let plain = render::Surface::new((64, 64));
     checks.require("new 尺寸", plain.size() == (64, 64));
     checks.require("new 无深度", !plain.has_depth());
-    let deep = surface::with_depth((64, 64));
+    let deep = render::Surface::with_depth((64, 64));
     checks.require("with_depth 有深度", deep.has_depth());
 
     // 深度会话可开可收（无 panic = 深度路径健康）
@@ -41,7 +41,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         let s = (100.0 + 30.0 * (t.sin() + 1.0)) as u32;
 
         // 每帧重建呼吸离屏面（尺寸随呼吸；with_depth 重建走深度整合路径）
-        let tile = surface::with_depth((s.max(8), s.max(8)));
+        let tile = render::Surface::with_depth((s.max(8), s.max(8)));
         tile.fill([0, 180, 220, 255]);
         if frames == 1 {
             checks.require("会话绘制后 blit 到主屏", true);

@@ -100,7 +100,13 @@ fn warped(
 }
 
 /// 会话绘制：源纹理 → 四角 quad → 目标（打包即提交）
+///
+/// ⚠️ 采样源必须先 flush：源面的 fill/绘制可能还在待提交批里
+/// （ADR-5 延迟提交）——不冲刷则输出面采到的是**填充落地之前**的
+/// 空纹理（与 `DrawTarget::blit` 的"blit 源自动触发"同语义；
+/// 2026-10-12 transform 套件像素取证暴露：六个变换产物全透明）
 fn warped_corners(out: &Surface, s: &Surface, corners: [[f32; 2]; 4], uvs: [[f32; 2]; 4]) {
+    s.flush();
     let f = out.render();
     f.with_batch(|b| b.push_quad_corners(corners, uvs, [1.0; 4], Some(s.texture())));
     f.end(); // Surface 会话：打包 = 提交

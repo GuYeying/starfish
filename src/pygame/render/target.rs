@@ -54,8 +54,18 @@ fn rgba(c: impl Into<Color>) -> [f32; 4] {
 pub trait DrawTarget {
     /// 填充整个目标（返回受影响区域）
     fn fill(&self, color: impl Into<Color>) -> Rect;
-    /// 把离屏面画到目标 `(x, y)` 处（源自动 flush；返回目标 Rect）
+    /// 把离屏面画到目标 `(x, y)` 处（**左上角锚**——按层定约：blit/draw
+    /// = 左上、Sprite = 中心；源自动 flush；返回目标 Rect）
     fn blit(&self, src: &Surface, dest: impl Into<Coord>) -> Rect;
+    /// 中心锚 blit（便利口：pos = center − size/2）
+    ///
+    /// 旋转帧等"中心对位"场景的正典——blit 的左上角锚 + 尺寸随角度
+    /// 变化的产物会造成视觉中心漂移（transform 套件实测）；
+    /// Sprite 路径的 `centered=true` 内建同语义
+    fn blit_centered(&self, src: &Surface, center: (i32, i32)) -> Rect {
+        let (w, h) = src.size();
+        self.blit(src, (center.0 - w as i32 / 2, center.1 - h as i32 / 2))
+    }
     /// 目标尺寸（像素）
     fn size(&self) -> (u32, u32);
     /// batch 级绘制入口（`draw::*` / 自定义图元的执行通道；
@@ -194,18 +204,12 @@ impl Screen {
             let b = self.batch.borrow();
             b.len()
         };
-        if begun && batch_len == 0 {
-            crate::base::debug::devlog(&format!(
-                "[screen] present 批次为空（begun={begun}）——本帧无绘制？"
-            ));
-        }
         if !begun {
             crate::base::debug::devlog("[screen] present 跳过（未 begin）");
             return;
         }
         self.begun.set(false);
         self.pack(false);
-        crate::base::debug::devlog("[screen] present 打包+提交 ✓");
         // present 对"begin 未就绪无帧"自身免疫（跳过路径）
         self.surface.borrow_mut().present();
         self.batch.borrow_mut().clear();
@@ -280,15 +284,15 @@ impl Screen {
 
     // ── 固有形态（教程代码免 trait 导入：screen.fill(..) 直接可用）──
 
-    /// 填充（= [`DrawTarget::fill`]）
-    pub fn fill(&self, color: impl Into<Color>) -> Rect {
-        DrawTarget::fill(self, color)
-    }
+    // /// 填充（= [`DrawTarget::fill`]）
+    // pub fn fill(&self, color: impl Into<Color>) -> Rect {
+    //     DrawTarget::fill(self, color)
+    // }
 
-    /// blit（= [`DrawTarget::blit`]）
-    pub fn blit(&self, src: &Surface, dest: impl Into<Coord>) -> Rect {
-        DrawTarget::blit(self, src, dest)
-    }
+    // /// blit（= [`DrawTarget::blit`]）
+    // pub fn blit(&self, src: &Surface, dest: impl Into<Coord>) -> Rect {
+    //     DrawTarget::blit(self, src, dest)
+    // }
 
     /// 指令打包：当前 batch 编码为渲染通道，挂入本帧待提交队列
     /// （batch 空 / 帧未就绪 = 无操作）。`depth` = 本批按深度测试管线
@@ -462,6 +466,16 @@ impl<'a> RenderPass<'a> {
         }
     }
 
+    /// 裁剪矩形（会话内后续绘制生效；None = 解除）。
+    /// MRT v1 无裁剪面（随 v2 自定义材质开放），静默忽略。
+    pub fn set_clip(&self, clip: Option<Rect>) {
+        match &self.kind {
+            PassKind::Screen(s) => s.set_clip(clip),
+            PassKind::Surface(s) => s.set_clip(clip),
+            PassKind::Mrt { .. } => {}
+        }
+    }
+
     /// 目标尺寸
     pub fn size(&self) -> (u32, u32) {
         match &self.kind {
@@ -540,6 +554,29 @@ impl DrawTarget for RenderPass<'_> {
 
 /// 离屏绘制面（RenderTarget + Texture 封装，契约 ADR-1）
 ///
+/// CPU alpha 影子（每像素 1 字节；mask 的**构建期零回读**地基）
+///
+/// 语义 = **创建期快照**：只在像素天然过手的出生路径留存
+/// （from_rgba8 / image 解码 / font 光栅化），绘制与 fill 不回写——
+/// 运行期真值走 GPU 回读路径（原生同步 / web 异步）。
+#[derive(Clone, Debug)]
+pub(crate) struct CpuAlpha {
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) data: Vec<u8>,
+}
+
+impl CpuAlpha {
+    /// 从 RGBA8 像素抽取 alpha 平面（stride 4）
+    pub(crate) fn from_rgba8(size: (u32, u32), rgba: &[u8]) -> Self {
+        Self {
+            width: size.0,
+            height: size.1,
+            data: rgba.chunks_exact(4).map(|px| px[3]).collect(),
+        }
+    }
+}
+
 /// 透明底创建（契约 §七）；可整只 blit 到别处（纹理采样）；
 /// `with_depth` 附带深度缓冲（3D 内容 / 深度会话）。
 pub struct Surface {
@@ -555,6 +592,8 @@ pub struct Surface {
     /// 表面级 alpha（`set_alpha`；255 = 不透明。blit 时乘进顶点色
     /// alpha——着色器纹理×顶点色按分量相乘，pygame blit 语义）
     alpha: Cell<u8>,
+    /// CPU alpha 影子（CPU 出生路径留存；GPU 出生面 = None）
+    cpu_alpha: Option<CpuAlpha>,
 }
 
 impl Surface {
@@ -568,12 +607,15 @@ impl Surface {
         Self::build(size, true)
     }
 
-    /// 从 RGBA8 像素构造
+    /// 从 RGBA8 像素构造（**留 CPU alpha 影子**——mask 同步构建地基）
     pub fn from_rgba8(size: (u32, u32), pixels: &[u8]) -> Self {
-        Self::from_texture(Texture::from_rgba8(size, pixels))
+        let mut this = Self::from_texture(Texture::from_rgba8(size, pixels));
+        this.cpu_alpha = Some(CpuAlpha::from_rgba8(size, pixels));
+        this
     }
 
-    /// 从已有纹理构造（零拷贝；背板即该纹理，无深度）
+    /// 从已有纹理构造（零拷贝；背板即该纹理，无深度；**GPU 出生面——
+    /// 无 alpha 影子**，mask 走回读路径）
     pub fn from_texture(texture: Texture) -> Self {
         let gpu = gpu().clone();
         let size = texture.size();
@@ -589,7 +631,18 @@ impl Surface {
             camera,
             clip: Cell::new(None),
             alpha: Cell::new(255),
+            cpu_alpha: None,
         }
+    }
+
+    /// CPU alpha 影子（创建期快照；GPU 出生面 = None）
+    pub(crate) fn cpu_alpha(&self) -> Option<&CpuAlpha> {
+        self.cpu_alpha.as_ref()
+    }
+
+    /// 附加 CPU alpha 影子（image 解码等持有 RGBA 字节的路径用）
+    pub(crate) fn set_cpu_alpha(&mut self, alpha: CpuAlpha) {
+        self.cpu_alpha = Some(alpha);
     }
 
     /// 表面级 alpha（0..255；blit 时乘进顶点色——pygame set_alpha 语义）
@@ -609,7 +662,10 @@ impl Surface {
 
     fn build(size: (u32, u32), depth: bool) -> Self {
         let (w, h) = (size.0.max(1), size.1.max(1));
-        let mut this = Self::from_rgba8((w, h), &vec![0u8; (w * h * 4) as usize]);
+        // 绘制面 = **GPU 出生**（无 alpha 影子）：透明底经 from_texture
+        // 构造，不附影子——绘制面的运行期真值走回读路径（若误用
+        // from_rgba8 会附上全零影子，mask from_surface 将短路成空位面）
+        let mut this = Self::from_texture(Texture::from_rgba8((w, h), &vec![0u8; (w * h * 4) as usize]));
         if depth {
             let depth_tex = this.gpu.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("pygame_surface_depth"),
@@ -721,15 +777,15 @@ impl Surface {
 
     // ── 固有形态（教程代码免 trait 导入）──
 
-    /// 填充（= [`DrawTarget::fill`]）
-    pub fn fill(&self, color: impl Into<Color>) -> Rect {
-        DrawTarget::fill(self, color)
-    }
+    // /// 填充（= [`DrawTarget::fill`]）
+    // pub fn fill(&self, color: impl Into<Color>) -> Rect {
+    //     DrawTarget::fill(self, color)
+    // }
 
-    /// blit（= [`DrawTarget::blit`]）
-    pub fn blit(&self, src: &Surface, dest: impl Into<Coord>) -> Rect {
-        DrawTarget::blit(self, src, dest)
-    }
+    // /// blit（= [`DrawTarget::blit`]）
+    // pub fn blit(&self, src: &Surface, dest: impl Into<Coord>) -> Rect {
+    //     DrawTarget::blit(self, src, dest)
+    // }
 
     pub(crate) fn size32(&self) -> (f32, f32) {
         (self.size.0 as f32, self.size.1 as f32)
@@ -774,6 +830,18 @@ impl DrawTarget for Surface {
 /// 多渲染目标会话（N≥2 个 Surface 一次 pass 同时写入；v1 = 镜像双写
 /// 着色器、无深度——异构输出/深度 MRT 随 v2 自定义材质开放）。
 ///
+/// Arc 目标版 render_targets（**绑定层专用**）：`RenderPass` 需驻留
+/// thread-local（'static 化）——目标 `Arc` 由绑定桥保活至 `finish()`
+/// （keepalive 证据在桥的 `Vec<Arc>`，与 `session_begin` 的
+/// `&'static Screen` 同理；MRT Pass 内部持有的是目标借用表，本收口
+/// 依赖上述保活契约）。
+pub fn render_targets_arc(targets: &[std::sync::Arc<Surface>]) -> RenderPass<'static> {
+    let refs: Vec<&Surface> = targets.iter().map(|s| s.as_ref()).collect();
+    // SAFETY: 生命周期收口依赖上述保活契约（桥在 finish 时同步清空
+    // keepalive），Pass 存续期内目标必然存活
+    unsafe { std::mem::transmute::<RenderPass<'_>, RenderPass<'static>>(render_targets(&refs)) }
+}
+
 /// Python 绑定形态（兼容层模块架构 §3.1 预言）：`with pygame.targets([a, b]):`
 pub fn render_targets<'a>(targets: &[&'a Surface]) -> RenderPass<'a> {
     assert!(targets.len() >= 2, "render_targets: 至少 2 个颜色目标");

@@ -12,10 +12,14 @@
 //! `BindGroupBuilder::texture_view`（裸视图直绑口，视频帧同款先例）。
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::base::resources::image::ImageData;
 
 use super::Gpu;
+
+/// 纹理唯一 id 分配器（bind 缓存键；指针键在地址回收时会撞陈旧 BindGroup）
+static NEXT_TEXTURE_ID: AtomicU64 = AtomicU64::new(1);
 
 /// GPU 纹理（Rgba8Unorm，2D；采样语义由 [`super::Gpu`] 的默认采样器承担）
 #[derive(Clone)]
@@ -23,6 +27,8 @@ pub struct Texture {
     pub(crate) raw: Arc<wgpu::Texture>,
     pub(crate) view: Arc<wgpu::TextureView>,
     size: (u32, u32),
+    /// 唯一 id（[`Self::cache_key`] 的键源；进程内单调自增）
+    id: u64,
 }
 
 impl Texture {
@@ -55,9 +61,9 @@ impl Texture {
     }
 
     /// 从通用数据桥上传构造（ADR-10：Texture↔CPU 最小路径的入端）
-    pub fn from_buffer(proxy: &super::BufferProxy) -> Self {
-        Self::from_rgba8(proxy.size(), proxy.as_bytes())
-    }
+    // pub fn from_buffer(proxy: &super::BufferProxy) -> Self {
+    //     Self::from_rgba8(proxy.size(), proxy.as_bytes())
+    // }
 
     /// 纹理尺寸（像素）
     pub fn size(&self) -> (u32, u32) {
@@ -69,9 +75,17 @@ impl Texture {
         self.view.clone()
     }
 
-    /// bind group 缓存键（纹理本体指针；Arc 由段持有，键恒有效）
+    /// bind group 缓存键（纹理唯一 id——进程内单调自增，永不复用）
+    ///
+    /// ⚠️ 历史教训：曾用 `Arc::as_ptr`（堆地址）作键——每帧新建/销毁
+    /// 纹理时分配器回收地址，新纹理撞上旧键 → `ensure_bind_view` 复用
+    /// **陈旧 BindGroup**（绑着旧纹理视图）→ blit 采样旧内容 = 闪烁
+    /// （transform 套件旋转动画实测）。id 键保证"同地址不同纹理 =
+    /// 不同键"。注意：binds 缓存按键只增不减——逐帧新建纹理的反模式
+    /// 仍会造成缓存增长（性能定约禁止该用法），修复键型后不再闪烁但
+    /// 泄漏仍在，属已知问题。
     pub(crate) fn cache_key(&self) -> usize {
-        Arc::as_ptr(&self.raw) as usize
+        self.id as usize
     }
 }
 
@@ -130,5 +144,6 @@ pub(crate) fn upload_rgba8(
         raw: Arc::new(raw),
         view,
         size: (w, h),
+        id: NEXT_TEXTURE_ID.fetch_add(1, Ordering::Relaxed),
     }
 }

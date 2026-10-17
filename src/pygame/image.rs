@@ -21,7 +21,7 @@
 
 use crate::base::io as engine_io;
 use crate::base::resources::image::ImageData;
-use crate::pygame::render::{gpu, DrawTarget, Surface, Texture};
+use crate::pygame::render::{gpu, CpuAlpha, DrawTarget, Surface, Texture};
 
 /// 图像加载/保存错误
 #[derive(Debug)]
@@ -76,11 +76,18 @@ pub fn load(path: &str) -> Result<Surface, ImageError> {
     load_from_bytes(&bytes)
 }
 
-/// 从内存字节加载（全平台口；对位 `pygame.image.load(fileobj)` 形态）
+/// 从内存字节加载（全平台口；对位 `pygame.image.load(fileobj)` 形态）。
+/// **留 CPU alpha 影子**——RGBA 解码字节本就过手，抽取 alpha 平面留存，
+/// mask 同步构建零回读（GPU 出生面才需要回读路径）
 pub fn load_from_bytes(bytes: &[u8]) -> Result<Surface, ImageError> {
     let data = decode(bytes)?;
     let texture = Texture::from_image(&data);
-    Ok(Surface::from_texture(texture))
+    let mut surface = Surface::from_texture(texture);
+    if let ImageData::Rgba8(rgba) = &data {
+        let (w, h) = (rgba.width(), rgba.height());
+        surface.set_cpu_alpha(CpuAlpha::from_rgba8((w, h), rgba.as_raw()));
+    }
+    Ok(surface)
 }
 
 /// 解码为 CPU 统一图像格式（RGBA8；纯逻辑，可测）
@@ -144,6 +151,10 @@ fn unpad_rows(padded: &[u8], width: u32, height: u32, bpr: u32) -> Vec<u8> {
 
 /// GPU 回读 Surface 像素（紧凑 RGBA8；mask/save 共享的慢路径）
 pub(crate) async fn readback_rgba(surface: &Surface) -> Result<Vec<u8>, ImageError> {
+    // **先冲刷待提交批**（ADR-5 延迟提交）：transform 输出 / fill /
+    // 会话绘制的命令可能还躺在 batch 里——不 flush 回读到的是空纹理
+    // （2026-10-12 mask 套件像素级断言实测暴露的存量 bug）
+    surface.flush();
     let gpu = gpu();
     let (w, h) = surface.size();
     let bpr = padded_bpr(w);

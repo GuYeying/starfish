@@ -10,8 +10,8 @@ mod common;
 use common::{draw_status, Checks};
 use starfish::pygame::render::DrawTarget;
 use starfish::pygame::display;
+use starfish::pygame::render::Surface;
 use starfish::pygame::sprite;
-use starfish::pygame::surface;
 
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
     display::set_mode((800, 600)).await?;
@@ -19,9 +19,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut checks = Checks::new("pygame.sprite");
     common::log("[sprite] set_mode 完成，进入自检");
 
-    let s_red = surface::new((24, 24));
+    let s_red = Surface::new((24, 24));
     s_red.fill([220, 60, 60, 255]);
-    let s_blue = surface::new((24, 24));
+    let s_blue = Surface::new((24, 24));
     s_blue.fill([60, 120, 220, 255]);
 
     let mut g = sprite::Group::new();

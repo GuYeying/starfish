@@ -422,6 +422,75 @@ rAF 不走真实时钟），色彩核对须存活模式。
 - **真机验收**：Android 装 `pygame_test_time` 看 console 的
   `tick min/max` 与 `fps` 行（预期 ≈ 设备刷新率、无倍频尖峰）。
 
+### 批次三十四（2026-10-12，pygame-rs 接手后全体系对接）：绑定面 26 模块全覆盖
+
+（跨仓库记录：工作主体在 pygame-rs，starfish 侧仅两处引擎增补，见下）
+
+- **边界**：pygame-rs 移交收回、由 Claude 接手完成全体系对接（用户
+  2026-10-12 定）；基于既有探针（selftest 断言框架 + with 会话协议
+  + args 收参契约）与 starfish pygame 层 26 模块现状做缺口补齐；
+- **starfish 引擎侧增补（仅两处）**：
+  - `render_targets_arc`：MRT Pass 'static 收口（bridge 目标 Arc
+    保活契约；crate 内唯一 unsafe，SAFETY 注释随码）；
+  - 统一 `RenderPass::set_clip` 委托（Screen/Surface 分派；MRT v1
+    无裁剪面静默忽略）；
+- **绑定面新增（缺口清零）**：
+  - mask（Mask 全套 11 方法 + from_surface 影子快路径三端同步零回读）；
+  - permission（ensure + MICROPHONE/INTERNET 常量；Android MICROPHONE
+    阻塞授权语义**透传**，调用方自择时机）；
+  - video（VideoSystem/Video：open/update/size/position/ended/音视频
+    开关——接口面级，用户定约"三端能播 + 接口可调"即达标）；
+  - time.Clock（上限节流帧时钟；tick 返**毫秒**——引擎返秒，绑定位换算）；
+  - Surface 深度面（架构 §九.2 定约落地）：构造
+    `pygame.Surface((w,h), depth_buffer=True)` + `has_depth()`
+    （`depth=` 为真 pygame bpp 语义，禁用）；
+  - Session `set_clip`/`set_camera_ortho`/`set_camera_perspective` +
+    Surface 会话 `set_clip`；
+  - **`pygame.targets([a, b])`** MRT 会话（§3.1 预言形态：bridge 目标
+    Arc 保活表 + with_mrt_session 路由；fill/rect/circle/line/polygon/
+    ellipse/arc/blit 三会话同面）；
+  - **sprite pyclass 桥**：Sprite = 配置对象（at/tag/z/rotation/scale/
+    alpha/visible 链式 + 多帧动画 set_fps），Group.add 物化配置并
+    **回写世代 id 进 Python 对象**（Copy 纯值跨 GC 零负担）/remove
+    （旧句柄自动失效）/alive/count/position/move_by/set_*/with_tag/
+    tick/draw（路由活跃会话——单形态定约）；
+  - 补面：event poll/clear、display set_caption/get_init、io
+    write_text、KMOD_* 常量；
+- **with_batch 直通口**：`blit_area(src, dest, area, color=None)`
+  （push_quad_uv——pygame blit 的 area 子区域语义，此前绑定缺失）+
+  `quad(texture, corners, uvs, color)`（push_quad_corners 任意四角）
+  三会话同挂；args 新增 `SfFPoint/SfFPoints`（ArgIntoFloat f32 宽收，
+  角点亚像素坐标）；`push_geometry` 暂缓（需 Python 侧 Geometry
+  构建器，随 v2 静态网格立项）；
+- **探针 selftest 扩至 24 项**（新模块全量 + 既有 12 项）桌面全绿；
+  web 产物（pygame-rs/web/binding_probe.*）+ Android 包重出；
+- **绑定面铁律新增 4 条**（详见 pygame-rs/CLAUDE.md 批次 34 段）：
+  ① RP 同类型仅一个 `#[pyclass]` impl 块（跨文件第二个 E0119）；
+  ② pymethod 直写 `Option<T>` 形参不做缺省（可省参须 FromArgs
+  结构体 `#[pyarg(optional)]`）；③ **pymethod panic 穿透 Python
+  异常层直接带崩进程**（sprite 首版索引空 vec 实测——绑定面禁
+  panic）；④ Constructor tuple Args 无法变参（一参缺省形态须
+  derive struct）；
+- 逐模块断言与判读：pygame-rs/CLAUDE.md 批次 34 段 +
+  `pygame-rs/examples/binding_probe.py`。
+
+### 批次二十六补八（引擎 Batch API 基层化：push_vertices 顶点组直入）
+
+- **设计**（用户定调"怎么通用怎么来"）：`BatchTopology{Triangles, Lines}`
+  + `Batch::push_vertices(topo, texture, &[SpriteVertex]) -> Range<u32>`
+  基层接口——顶点组直入，纹理切段/拓扑分仓/打包上屏由流统一处理；
+  quad/quad_uv/quad_corners/push_geometry 全部降级为**基层展开糖**
+  （公开签名零变化，pygame-rs 绑定无感）；
+- **验证**：新增 batch 单测 6 项（基层等价性——push_quad 与手写同坐标
+  顶点组逐顶点一致/拓扑分仓/同纹续段/空组 no-op/线几何路由/填充退化
+  路径不变），pygame::render 9/9；lib 110 过（+5 已知 video 环境项）；
+  pygame_probe 600 帧 + 套件抽查 exit=0（渲染热路径零回归）；
+- **GLES 注意**：push_geometry 填充路径保持"退化四边形"实证路径
+  （直接三角段曾在部分 GLES 驱动静默不显示——直三角直入待真机复验
+  后切换，基层接口已为此就位：`push_vertices(Triangles, ...)`）；
+- pygame-rs 绑定层无感（签名未变）；with_batch 的 Python 直通口
+  （blit_area/quad）已随批次 34 落地。
+
 ### 批次二十六补五（色彩统一定案：桌面交换链默认改 linear——引擎侧修改）
 
 - **续补四的取证**：像素归一化修复后用户仍报"web 略深"→ 桌面/同点
@@ -453,6 +522,103 @@ rAF 不走真实时钟），色彩核对须存活模式。
 - **验证**：time 案例桌面 fps 53.8 → **59.6**，帧距 18-28.8ms →
   13.7-16.7ms（尖峰消失）；新增单测 `tick_is_cap_not_force`；
 - Web 平台睡眠为 no-op，帧率恒 = 浏览器 rAF（平台语义）。
+
+---
+
+### 批次二十七（2026-10-12）：mask 构建 CPU 影子化（方案 C，用户拍板）
+
+- **背景**：pygame-rs 对接评估中定位到 mask 绑定的平台分叉痛点
+  （web `from_surface_async` vs 原生同步）与回读带宽顾虑。分析定案：
+  mask 是"构建一次、查询万次"的 CPU 位面（检测核心本就纯 CPU），
+  痛点只在**构建来源**——而 mask 的主要用户（精灵贴图）像素在创建期
+  天然过手（from_rgba8 / image 解码 / font 光栅化），扔掉再回读纯属
+  自造带宽。用户拍板方案 C：**CPU alpha 影子**；
+- **实现**：
+  - `Surface` 增 `cpu_alpha: Option<CpuAlpha>`（1 字节/像素创建期
+    快照）——from_rgba8 / image.load_from_bytes / font.render 三条
+    CPU 出生路径留存；绘制/fill 不回写（快照语义，运行期真值走回读）；
+  - `Mask::from_surface` 升为**同步全平台**：有影子 → 纯 CPU 阈值
+    零回读（三端快路径）；GPU 出生面 → 原生同步回读 / web 报
+    `Readback` 错误并指引 async；`from_surface_async` 保留为全平台
+    通用口（影子同样快路径优先）；
+  - 检测核心（overlap 族）一行未动；
+- **连带修复（存量 bug，套件像素级断言首次暴露）**：
+  ① `readback_rgba` 不冲刷待提交批——transform 输出 / fill 的命令
+  还躺在 batch 里回读即得空纹理（ADR-5 延迟提交交互），修复 =
+  回读前 `surface.flush()`（image::save 一个 transform 输出有同样
+  潜在零 bug，一并治愈）；
+  ② `Surface::new/with_depth`（build）误经 from_rgba8 会附上全零
+  影子 → from_surface 短路成空位面——修复 = build 改走 from_texture
+  （绘制面 = GPU 出生，无影子）；
+- **验证**：套件 mask 案例 9/10 → **10/10**（影子 63 = 回读 63 =
+  透明像素 (7,7) false，新增"影子构建(同步)/回读一致性"双检查）；
+  lib 104 过（5 失败 = 已豁免 video 样本项）；
+- **绑定面收益**：`pygame.mask.from_surface(surf)` 可作**同步全平台**
+  直通（精灵贴图标准路径），无需 mixer needs_gesture 式分叉。
+
+### 批次二十八（2026-10-12）：transform 动画闪烁定案——bind 缓存指针键撞键（引擎修复）
+
+- **问题**（用户实测）：transform 案例旋转动画闪烁（图形在变但交替
+  显示错误内容）；
+- **根因**（代码级定位，非猜测）：`Texture::cache_key` 用
+  **`Arc::as_ptr`（堆地址）作 bind 缓存键**——旋转动画每帧
+  `rotozoom` 新建/销毁纹理，分配器回收地址 → 新纹理撞上旧键 →
+  `ensure_bind_view` 的 Vacant 判定失效 → **复用陈旧 BindGroup**
+  （绑着旧角度纹理视图；BindGroup→view→旧纹理引用链让旧纹理一直
+  存活、内容是旧角度）→ blit 采样旧图与正确帧交替 = 闪烁。原注释
+  "Arc 由段持有，键恒有效"前提不成立（段持的是 view，不延长
+  texture 的键语义）；附带问题：binds 缓存按键只增不减（泄漏）；
+- **修复（引擎）**：`Texture` 增唯一 id（进程内 AtomicU64 单调自增），
+  `cache_key` 返回 id——"同地址不同纹理 = 不同键"，数学上杜绝撞键；
+  binds 缓存增长随逐帧建面反模式的存在而存在（记为已知问题，见下）；
+- **修复（套件侧反模式）**：transform 案例旋转动画改为**预建 60 帧
+  × 6° 轮换 blit**（创建一次——探针批次 F/G 性能定约的正例：每帧
+  新建 GPU 表面即使不闪烁也有分配/上传/销毁开销）；
+- **验证**：transform 案例 5/5；桌面全量 25/25（见批次回归记录）；
+- **绑定影响**：pygame-rs 的 draw/Surface 每帧建面用法同样受益于此
+  修复（陈旧采样是跨绑定面通用的正确性问题）。
+
+### 批次二十九（2026-10-12）：transform 产物隐形定案——跨面采样不冲刷源（引擎修复）
+
+- **续批次二十八**：id 键修复后用户复测——变换产物**完全隐形**（只剩
+  裸 src 一只红矩形，512 像素整；全色普查证实变换位区域为背景色）；
+- **像素取证**：桌面 PrintWindow 抓窗 + 逐色统计——fill/横幅/裸 src
+  全部正确，唯独六个变换产物不可见；mask 案例同构建下回读 scale
+  输出 count=63（**纹理内容正确**）→ 矛盾锁定在"屏幕采样"与
+  "内容时序"；
+- **根因**：`src.fill(红)` 走 ADR-5 延迟提交躺在 src 的待提交批里；
+  `warped_corners` 用会话**直接采样 `src.texture()`**——不像
+  `DrawTarget::blit` 有"blit 源自动触发 flush"——输出面提交的是
+  **fill 落地之前的空纹理** → 全透明隐形。批次二十八的 id 键修复
+  （消除陈旧 BindGroup 闪烁）是必要不充分——跨面采样的源冲刷才是
+  隐形主因，两个 bug 叠加构成了"闪烁 → 修复后隐形"的完整链条；
+- **修复（引擎）**：`warped_corners` 采样前 `s.flush()`（与 blit
+  源自动触发同语义）；
+- **验证**：像素计数 512 → **3584**，与可见区理论值精确一致
+  （src 512 + scale 2048 + rotated 512 + flip_x 512；flip_y/zoomed/
+  旋转带在 471 宽的裁剪窗外——窗口尺寸是 DPI 层独立事项）；套件
+  transform 案例 5/5；
+- **同族排查提示**：凡"采样别的 Surface 的纹理"的路径（sprite 持
+  纹理克隆、video 帧纹理）都需要同样的源冲刷语义——sprite 在
+  `Sprite::new` 构造期即持纹理（fill 待提交风险同在），绑定对接时
+  按 `warped_corners` 先例补 flush。
+
+### 批次二十九补（2026-10-12）：渲染锚点定约（按层定锚）+ blit_centered
+
+- **背景**：transform 中心锚修复后用户提出——渲染默认锚点（中心 vs
+  左上）需要统一定约，此为 API 契约级决策；
+- **定约（用户拍板"按层定锚"）**：
+  - `blit`/`draw::*`/transform 产物 = **左上角**（pygame 契约语义；
+    整数网格防亚像素软化——中心锚 + 奇数尺寸纹理 = 半像素角点，线性
+    采样下边缘发虚）；
+  - `sprite::Sprite` = **中心**（Godot 重设计契约，旋转/缩放绕锚点
+    零补偿；`centered(false)` 切左上）；
+  - 已写入 `architecture/pygame层设计.md` §五（锚点定约注记）；
+- **新增便利口**：`DrawTarget::blit_centered(src, center)`（pos =
+  center − size/2）——旋转帧等中心对位场景的正典，trait 默认实现
+  零成本覆盖全部目标类型；transform 套件改用之；
+- **验证**：transform 5/5；像素三帧质心恒定 (364.5, 335.6)
+  （中心锚定生效的直接证据）；lib 104 过 / 桌面 25/25（见回归记录）。
 
 ---
 

@@ -83,7 +83,17 @@ impl Stream {
         self.vertices.is_empty()
     }
 
-    fn push(&mut self, texture: Option<&Texture>, vs: impl IntoIterator<Item = SpriteVertex>) {
+    /// 顶点组入流（段边界 = 纹理切换；返回本组区间 [start, end)）
+    fn push(
+        &mut self,
+        texture: Option<&Texture>,
+        vs: impl IntoIterator<Item = SpriteVertex>,
+    ) -> std::ops::Range<u32> {
+        let vs: Vec<_> = vs.into_iter().collect();
+        if vs.is_empty() {
+            let end = self.vertices.len() as u32;
+            return end..end;
+        }
         // 段边界判定：纹理切换（含 None ↔ Some）即开新段
         let key = texture.map(Texture::cache_key);
         let need_new = match (self.segments.last(), &key) {
@@ -103,6 +113,7 @@ impl Stream {
         } else if let Some(last) = self.segments.last_mut() {
             last.end = end;
         }
+        start..end
     }
 
     fn clear(&mut self) {
@@ -113,6 +124,18 @@ impl Stream {
     fn vertex_bytes(&self) -> &[u8] {
         bytemuck::cast_slice(&self.vertices)
     }
+}
+
+/// 顶点组拓扑（基层接口的流选择 + 管线解释约定）
+///
+/// 流按拓扑分仓：Triangles 入填充流（三角形列表管线）、Lines 入线流
+/// （线段列表管线）——同流内段边界只由纹理切换决定。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchTopology {
+    /// 三角列表：vertices 按 **3 个一组**解释（一顶点组 = N 个三角）
+    Triangles,
+    /// 线段列表：vertices 按 **2 个一组**解释
+    Lines,
 }
 
 /// 顶点批处理（pygame 词汇 draw::* 的执行体；base 风格公开面——
@@ -143,6 +166,31 @@ impl Batch {
         self.lines.clear();
     }
 
+    // ── 基层接口：顶点组直入 ────────────────────────────────────────
+    // quad/triangle/线段/几何 全部经此入流——上层只负责把图元展开成
+    // 顶点组；纹理切段、拓扑分仓、打包上屏由流统一处理。
+
+    /// 顶点组直入（基层接口）。
+    ///
+    /// - `topo`：Triangles = 每 **3** 顶点一三角（三角形列表管线）；
+    ///   Lines = 每 **2** 顶点一线段。不对齐尾组会被管线丢弃——上层
+    ///   展开时保证整组。
+    /// - `texture`：None = 1×1 白纹理（纯色路径）。
+    /// - 段边界：同流内纹理切换；返回本组流内区间（诊断/高级用法）。
+    ///
+    /// 便利层（`push_quad*` / `push_geometry`）全部是本接口的展开糖。
+    pub fn push_vertices(
+        &mut self,
+        topo: BatchTopology,
+        texture: Option<&Texture>,
+        vertices: &[SpriteVertex],
+    ) -> std::ops::Range<u32> {
+        match topo {
+            BatchTopology::Triangles => self.tris.push(texture, vertices.iter().copied()),
+            BatchTopology::Lines => self.lines.push(texture, vertices.iter().copied()),
+        }
+    }
+
     /// 矩形 quad（x/y/w/h 像素，y 向下；全 uv）——blit 的执行原语
     ///
     /// `texture = None` → 1×1 白纹理（纯色路径）
@@ -158,7 +206,8 @@ impl Batch {
         self.push_quad_uv(x, y, w, h, [0.0, 0.0, 1.0, 1.0], color, texture);
     }
 
-    /// 矩形 quad + 自定 uv 子区域（图集/字体地基）
+    /// 矩形 quad + 自定 uv 子区域（图集/字体地基）——基层展开糖：
+    /// 两三角 (0,1,2)(0,2,3) 六顶点入 Triangles 流（剔除关闭，绕向不敏感）
     pub fn push_quad_uv(
         &mut self,
         x: f32,
@@ -176,10 +225,10 @@ impl Batch {
         };
         let (x1, y1) = (x + w, y + h);
         let [u0, v0, u1, v1] = uv;
-        // 两三角：(0,1,2)(0,2,3)——剔除关闭，绕向不敏感
-        self.tris.push(
+        self.push_vertices(
+            BatchTopology::Triangles,
             texture,
-            [
+            &[
                 v(x, y, u0, v0),
                 v(x1, y, u1, v0),
                 v(x1, y1, u1, v1),
@@ -191,7 +240,7 @@ impl Batch {
     }
 
     /// 任意四角 quad（transform 旋转/镜像等仿射变形的执行原语；
-    /// 角序 TL/TR/BR/BL，两三角 (0,1,2)(0,2,3)）
+    /// 角序 TL/TR/BR/BL，两三角 (0,1,2)(0,2,3)）——基层展开糖
     pub fn push_quad_corners(
         &mut self,
         corners: [[f32; 2]; 4],
@@ -206,9 +255,10 @@ impl Batch {
         };
         let [c0, c1, c2, c3] = corners;
         let [u0, u1, u2, u3] = uvs;
-        self.tris.push(
+        self.push_vertices(
+            BatchTopology::Triangles,
             texture,
-            [
+            &[
                 v(c0, u0),
                 v(c1, u1),
                 v(c2, u2),
@@ -240,7 +290,9 @@ impl Batch {
         };
         match kind {
             GeometryKind::Filled => {
-                // 三角形 → 退化四边形序列（同段合并由 Stream::push 处理）
+                // 三角形 → 退化四边形序列（GLES 兼容——直接三角段曾在
+                // 部分驱动上静默不显示，Android 真机实测；直三角直入待
+                // 真机复验后可切 push_vertices(Triangles) 免退化顶点）
                 let mut tris: Vec<[SpriteVertex; 3]> = Vec::new();
                 if geometry.indices.is_empty() {
                     for t in geometry.vertices.chunks(3) {
@@ -260,9 +312,10 @@ impl Batch {
                     }
                 }
                 for tri in &tris {
-                    self.tris.push(
+                    self.push_vertices(
+                        BatchTopology::Triangles,
                         None,
-                        [
+                        &[
                             tri[0], tri[1], tri[2], // (a,b,c)
                             tri[0], tri[2], tri[2], // (a,c,c)=退化
                         ],
@@ -270,18 +323,16 @@ impl Batch {
                 }
             }
             GeometryKind::Line => {
-                let stream = &mut self.lines;
-                if geometry.indices.is_empty() {
-                    stream.push(None, geometry.vertices.iter().map(|sv| v(sv)));
+                let verts: Vec<SpriteVertex> = if geometry.indices.is_empty() {
+                    geometry.vertices.iter().map(|sv| v(sv)).collect()
                 } else {
-                    stream.push(
-                        None,
-                        geometry
-                            .indices
-                            .iter()
-                            .map(|&i| v(&geometry.vertices[i as usize])),
-                    );
-                }
+                    geometry
+                        .indices
+                        .iter()
+                        .map(|&i| v(&geometry.vertices[i as usize]))
+                        .collect()
+                };
+                self.push_vertices(BatchTopology::Lines, None, &verts);
             }
         }
     }
@@ -457,5 +508,117 @@ fn draw_stream(pass: &mut RenderPass, stream: &Stream, lines: bool, ctx: &Encode
             (None, _) => pass.set_bind_group(1, ctx.white_bind),
         }
         pass.draw(seg.start..seg.end, 0..1);
+    }
+}
+
+#[cfg(test)]
+mod batch_tests {
+    use super::*;
+
+    const WHITE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+
+    /// 手写 quad 顶点组（与 push_quad 同坐标同 UV，基层等价性对照组）
+    fn quad_verts(x: f32, y: f32) -> [SpriteVertex; 6] {
+        let vx = |px: f32, py: f32, u: f32, t: f32| SpriteVertex {
+            pos: [px, py, 0.0],
+            uv: [u, t],
+            color: WHITE,
+        };
+        [
+            vx(x, y, 0.0, 0.0),
+            vx(x + 30.0, y, 1.0, 0.0),
+            vx(x + 30.0, y + 40.0, 1.0, 1.0),
+            vx(x, y, 0.0, 0.0),
+            vx(x + 30.0, y + 40.0, 1.0, 1.0),
+            vx(x, y + 40.0, 0.0, 1.0),
+        ]
+    }
+
+    #[test]
+    fn quad_family_equivalent_through_base() {
+        // push_quad 与手写顶点组（同坐标）逐顶点一致——基层等价性
+        let mut a = Batch::new();
+        a.push_quad(10.0, 20.0, 30.0, 40.0, WHITE, None);
+        let mut b = Batch::new();
+        b.push_vertices(BatchTopology::Triangles, None, &quad_verts(10.0, 20.0));
+        assert_eq!(a.tris.vertices.len(), b.tris.vertices.len());
+        for (x, y) in a.tris.vertices.iter().zip(b.tris.vertices.iter()) {
+            assert_eq!(x.pos, y.pos);
+            assert_eq!(x.uv, y.uv);
+            assert_eq!(x.color, y.color);
+        }
+        assert_eq!(a.tris.segments.len(), b.tris.segments.len());
+    }
+
+    #[test]
+    fn topology_splits_streams() {
+        let mut b = Batch::new();
+        b.push_vertices(BatchTopology::Triangles, None, &quad_verts(0.0, 0.0));
+        b.push_vertices(
+            BatchTopology::Lines,
+            None,
+            &[
+                SpriteVertex { pos: [0.0, 0.0, 0.0], uv: [0.0; 2], color: WHITE },
+                SpriteVertex { pos: [1.0, 1.0, 0.0], uv: [0.0; 2], color: WHITE },
+            ],
+        );
+        assert_eq!(b.tris.vertices.len(), 6);
+        assert_eq!(b.lines.vertices.len(), 2);
+    }
+
+    #[test]
+    fn same_texture_continues_segment() {
+        let mut b = Batch::new();
+        b.push_vertices(BatchTopology::Triangles, None, &quad_verts(0.0, 0.0));
+        b.push_vertices(BatchTopology::Triangles, None, &quad_verts(50.0, 0.0));
+        assert_eq!(b.tris.vertices.len(), 12);
+        assert_eq!(b.tris.segments.len(), 1, "同纹理（None）续段不开新段");
+    }
+
+    #[test]
+    fn empty_group_is_noop() {
+        let mut b = Batch::new();
+        let r = b.push_vertices(BatchTopology::Triangles, None, &[]);
+        assert!(r.is_empty());
+        assert!(b.is_empty());
+        assert!(b.tris.segments.is_empty(), "空组不得产生空段");
+    }
+
+    #[test]
+    fn push_geometry_lines_route_through_base() {
+        // 线段几何经基层入线流（2 顶点一组；填充流保持空）
+        let geo = crate::base::gfx::geometry::shape2d::line(
+            [0.0, 0.0].into(),
+            [10.0, 10.0].into(),
+            WHITE,
+        );
+        let expect = geo.vertices.len();
+        let mut b = Batch::new();
+        b.push_geometry(GeometryKind::Line, &geo, [0.0, 0.0], WHITE);
+        assert_eq!(b.lines.vertices.len(), expect);
+        assert!(b.tris.is_empty());
+    }
+
+    #[test]
+    fn push_geometry_filled_degenerate_path_unchanged() {
+        // 填充几何保持退化四边形实证路径（GLES 兼容）：每三角 6 顶点
+        let tri = crate::base::gfx::geometry::shape2d::circle(
+            [100.0, 100.0].into(),
+            30.0,
+            3,
+            WHITE,
+        );
+        let expect_tris = if tri.indices.is_empty() {
+            tri.vertices.len() / 3
+        } else {
+            tri.indices.len() / 3
+        };
+        let mut b = Batch::new();
+        b.push_geometry(GeometryKind::Filled, &tri, [0.0, 0.0], WHITE);
+        assert_eq!(
+            b.tris.vertices.len(),
+            expect_tris * 6,
+            "每三角退化展开为 6 顶点（零面积第二三角）"
+        );
     }
 }

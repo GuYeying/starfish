@@ -1,7 +1,8 @@
-//! pygame.mask 运行测试：位面操作族 + 重叠判定。
+//! pygame.mask 运行测试：位面操作族 + 重叠判定 + 双构建路径。
 //!
 //! 自检项（状态条顺序）：new+set_at/get_at / count / invert / scale /
-//! overlap / overlap_area / overlap_mask / to_surface / from_surface。
+//! overlap / overlap_area / overlap_mask / to_surface / 影子构建(同步) /
+//! 回读一致性(影子 vs 回读，原生)或 GPU 出生 async(web)。
 //! 场景：两个 8×8 位面的重叠关系可视化（绿=基准 / 黄=偏移 4px 的对比面
 //! / 白=overlap 首个交点）。
 
@@ -12,7 +13,7 @@ use common::{draw_status, Checks};
 use starfish::pygame::render::DrawTarget;
 use starfish::pygame::display;
 use starfish::pygame::mask::Mask;
-use starfish::pygame::surface;
+use starfish::pygame::transform;
 
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
     display::set_mode((800, 600)).await?;
@@ -43,21 +44,41 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let ts = full_a.to_surface();
     checks.require("to_surface", ts.size() == (8, 8));
 
-    // 不透明面 → 位面（阈值路径健康：尺寸一致即过——读回位型不在此断言）。
-    // from_surface 是桌面同步壳；Web 走 from_surface_async（回读异步）
-    let mut surf = surface::new((16, 16));
-    surf.fill([255, 255, 255, 255]);
+    // CPU 出生面（from_rgba8 → 自带 alpha 影子）：from_surface **三端
+    // 同步零回读**——8×8 不透明白、末像素全透明 → count = 63
+    let mut px = vec![255u8; 8 * 8 * 4];
+    if let Some(last) = px.chunks_exact_mut(4).last() {
+        last.copy_from_slice(&[0, 0, 0, 0]);
+    }
+    let shadow_surf = starfish::pygame::render::Surface::from_rgba8((8, 8), &px);
+    let m_shadow = Mask::from_surface(&shadow_surf, 1).expect("影子构建失败");
+    checks.require("影子构建(同步)", m_shadow.count() == 63 && m_shadow.size() == (8, 8));
+
+    // GPU 出生面（transform 输出，无影子）→ 回读路径；位面应与影子一致
+    let gpu_born = transform::scale(&shadow_surf, (8, 8));
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let from_surf = Mask::from_surface(&surf, 1).expect("from_surface 失败");
-        checks.require("from_surface", from_surf.size() == (16, 16));
+        let m_rb = Mask::from_surface(&gpu_born, 1).expect("回读构建失败");
+        common::log(&format!(
+            "[mask] 影子 count = {}，回读 count = {}，回读(7,7) = {}",
+            m_shadow.count(),
+            m_rb.count(),
+            m_rb.get_at(7, 7)
+        ));
+        checks.require(
+            "回读一致性(影子 vs 回读)",
+            m_rb.count() == m_shadow.count() && !m_rb.get_at(7, 7),
+        );
     }
     #[cfg(target_arch = "wasm32")]
     {
-        let from_surf = Mask::from_surface_async(&surf, 1)
+        let m_async = Mask::from_surface_async(&gpu_born, 1)
             .await
-            .expect("from_surface_async 失败");
-        checks.require("from_surface(async)", from_surf.size() == (16, 16));
+            .expect("async 构建失败");
+        checks.require(
+            "GPU 出生 async",
+            m_async.count() == m_shadow.count() && !m_async.get_at(7, 7),
+        );
     }
 
     let mut frames = 0u32;

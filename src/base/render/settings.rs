@@ -204,9 +204,6 @@ impl SurfaceSettings {
 
 #[derive(Clone, Debug)]
 pub struct GpuSettings {
-    
-    pub(crate) use_depth: bool,
-
 
     // InstanceDescriptor
     pub backends: Backends,
@@ -232,7 +229,6 @@ pub struct GpuSettings {
 impl Default for GpuSettings {
     fn default() -> Self {
         Self {
-            use_depth: true,
             backends: Backends::all(),
             flags: if cfg!(debug_assertions) {
                 InstanceFlags::DEBUG | InstanceFlags::VALIDATION
@@ -253,10 +249,6 @@ impl Default for GpuSettings {
 
 impl GpuSettings {
 
-    pub fn with_depth(mut self, use_depth: bool) -> Self {
-        self.use_depth = use_depth;
-        self
-    }
 
     pub fn with_backends(mut self, backends: Backends) -> Self {
         self.backends = backends;

@@ -145,6 +145,14 @@ with small pthread key pools"。合入后本清单归零。
 |---|---|---|
 | ①+② | **高**——NDK 嵌入者当前链接必败(硬阻断,且 check 不暴露) | **合并一个 PR**:"gate host_env libffi/ctypes on android"(几行 cfg,低成本)。先 rebase 最新 main 查重 |
 | ③ | **bug 报告价值极高**——跑完整 genesis 的安卓嵌入者必撞 TLS 耗尽 | **先提 issue**(复现 + PTHREAD_KEYS_MAX 分析);PR 缓提——全局 cell 方案靠本项目单线程契约兜底,上游支持多线程,照搬不合上游;PR 需线程兼容重设计(如单 TLS 槽持注册表) |
+
+> **执行状态(2026-10-01)**:核查上游 main 发现 **①② 已被上游以不同方案修复**——
+> host_env 的 libffi 改 optional、ctypes 模块门控进 `ctypes` feature(opt-in,
+> 不启用即不链接 libffi),无需再提 PR;③ 核实仍未修(non_threading 变体
+> 仍为 LocalKey/thread_local),已按建议提交 issue
+> [RustPython/RustPython#9084](https://github.com/RustPython/RustPython/issues/9084)
+> (含 PTHREAD_KEYS_MAX 机制分析 + 我方 global-cell workaround 说明),
+> 待上游响应后再评估线程兼容 PR。
 | (附)host_env 默认特性破坏 wasm 构建 | 中——wasm32-unknown-unknown 嵌入者的第一堵墙 | 顺手提 issue(本项目以 `default-features=false` 绕过) |
 
 操作路径:

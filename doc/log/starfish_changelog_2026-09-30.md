@@ -510,6 +510,97 @@ Android/iOS/WASM 排除（Vulkan/移动表面无逐像素、Canvas 无透明语�
 桌宠深化（拖拽/贴边/点击穿透）；mask 绑定、dialog 轮询式 job API
 （Android SAF）、面 B、.pyi 桩体系、M5 launcher、行为回归集。
 
+## 批次四十（2026-10-12/17）：架构收口——locals 剪除 + surface 直绘接口剪除 + 绑定面优化（用户主刀）
+
+### 落地（starfish 侧）
+
+- **`pygame/locals.rs` 剪除**（149 行）：旗标/键值等常量**并入各自模块**
+  （display 旗标 → display 模块、KMOD/K_SPACE 等 → key 模块）——
+  "常量枢纽"中转层取消，消费方直引模块常量；
+- **surface 直绘接口剪除**：`surface.rect/circle/ellipse/line/polygon/arc`
+  等方法面剔除，**严格 with render() 形态**（会话方法单一定约收口）；
+  gfxdraw 兼容面保留（目标会话作首参，仍在会话语义内）；
+- version.rs：get_version 命名对位pygame.version.get_version。
+
+### 落地（pygame-rs 侧）
+
+- **native_pygame/pygame_impls/args/bridge 架构优化**：类型归对应模块、
+  收参层扩充（BlitAreaArgs/QuadCornersArgs/VerticesArgs/GeometryArgs）、
+  bridge 泛型主体（vertices/geometry/blit_area/quad_corners）收敛；
+- **surface.xxx 会话方法剪除**（同 starfish 定约）；
+- sig_probe version 断言同步 0.9.20。
+
+### 版本
+
+- starfish `0.9.10 → 0.9.20`（pygame.version.ver 同步）；
+- pygame-rs 维持 0.1.0（绑定层版本与引擎版本解耦）。
+
+### 验证
+
+| 路径 | 结果 |
+|---|---|
+| sig_probe | ✅ 153/153（含 version 0.9.20 断言） |
+| 桌面 font_test / draw_test / transparent_test | ✅ 全绿持续运行 |
+| 三平台打包 | ✅ |
+
+## 批次三十九：pygame.Color 提升为 class（替代旧 fn Color 函数）
+
+### 背景
+
+pygame.Color 原为 `#[pyfunction]` 返回归一 4 元 tuple——不是一等类型，
+无属性/方法面。starfish `pygame::color::Color`（r/g/b/a + 缓存派生色彩
+空间 + 完整方法族）早已就绪，直通即可。
+
+### 落地（pygame-rs；starfish 零改动）
+
+- **PyColor pyclass**（`Cell<Color>` payload，Rect 同款 Copy 模式）：
+  - 构造：`Color()`/`Color(r,g,b)`/`Color(r,g,b,a)`/`Color((r,g,b[,a]))`/
+    `Color("name")`/`Color(Color)`（FuncArgs 手动解析，六形态）；
+  - r/g/b/a 读写 pygetset（setter 走 `update` 清缓存）；
+  - 方法：normalize（→4 元 tuple）、premul_alpha、lerp、grayscale、
+    invert、correct_gamma（均返回新 Color）；
+  - Comparable：`Color == Color` + **`Color == (r,g,b[,a])`**（兼容旧
+    fn Color 的元组契约，sig_probe 旧断言零改动）；Representable。
+- **SfColor 直通分支**：downcast PyColor → 零转换（Color 实例直接作
+  颜色参数，Rect 直通同形态）。
+- 删旧 `fn Color`。
+- **顺带修**：sig_probe version 断言 0.9.2 → 0.9.10（starfish crate
+  版本已升级，断言未同步——另一 agent 升级遗留）。
+
+### 验证
+
+| 路径 | 结果 |
+|---|---|
+| sig_probe | ✅ 153/153（Color class 8 项新断言 + 旧 tuple 契约 3 项全兼容） |
+| 三平台打包 | ✅ |
+
+## 批次三十八：with_batch 逃逸舱补全（vertices / geometry 直通）
+
+### 背景
+
+with_batch 五接口中 quad_uv/quad_corners 已有绑定直通（批次 34 续），
+**push_vertices（原始顶点 + Lines 拓扑）与 push_geometry（shape2d
+Geometry 家族 + GLES 兼容退化展开）两个逃逸舱未对接**。
+
+### 落地（pygame-rs；starfish 零改动）
+
+- **bridge**：`vertices` / `geometry` 泛型主体（BdTarget 三会话通吃；
+  topo/kind 白名单校验，非法值 ValueError；points = f32 点列）。
+- **三会话同挂**：Session（with_session 路由）/ SurfaceSession（直绘）/
+  TargetsSession（MRT）——`vertices(topo, points, color)` +
+  `geometry(kind, points, indices, color)`。
+- **args**：VerticesArgs（topo/points/color，color 缺省白）/
+  GeometryArgs（kind/points/indices/color，indices 缺省空 = 逐 3 顶点
+  一切三角）。
+- draw_test：三角扇 + 线框 + 索引填充四边形样张上屏 + 离屏会话断言。
+
+### 验证
+
+| 路径 | 结果 |
+|---|---|
+| 桌面真跑 | ✅ 7/7 PASS（六形状/半透明/gfxdraw/vertices/geometry/负路径 ×2），持续运行零异常 |
+| 三平台打包 | ✅ |
+
 ## 批次三十七：Web 深度/颜色附件脱节修复（draw_test Web 实测）
 
 ### 根因

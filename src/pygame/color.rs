@@ -62,37 +62,6 @@ pub fn init_colors(json_str: &str, append_base: bool) -> Result<(), String> {
 
 
 
-// #[derive(Debug, Clone, Copy, PartialEq)]
-// pub struct FloatColor {
-//     pub r: f64,
-//     pub g: f64,
-//     pub b: f64,
-//     pub a: f64,
-// }
-
-// impl FloatColor {
-//     // 从配置字节色转浮点(0~1)
-//     pub fn from_color(c: Color) -> Self {
-//         let (r,g,b,a) = c.to_f64();
-//         Self { r, g, b, a }
-//     }
-
-//     // 支持HDR，亮度放大
-//     pub fn scale_brightness(mut self, factor: f64) -> Self {
-//         self.r *= factor;
-//         self.g *= factor;
-//         self.b *= factor;
-//         self
-//     }
-
-//     // 转回字节色（自动钳位0~1，超出部分截断）
-//     pub fn to_color(&self) -> Color {
-//         Color::from_f64(self.r, self.g, self.b, self.a)
-//     }
-// }
-
-
-
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Color {
     pub r: u8,

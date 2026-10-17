@@ -24,7 +24,6 @@ pub mod gamepad;
 pub mod image;
 pub mod io;
 pub mod key;
-pub mod locals;
 pub mod mask;
 pub mod math;
 pub mod mouse;
@@ -37,8 +36,6 @@ pub mod sndarray;
 /// pygame.sprite 对应物（Godot 式重设计——池化 Group + 世代 id +
 /// (z,y) 排序会话绘制；细案见 reference/）
 pub mod sprite;
-/// pygame.surface 对应物（ADR-1 离屏绘制面；绑定定约见模块文档）
-pub mod surface;
 pub mod touch;
 pub mod time;
 pub mod transform;

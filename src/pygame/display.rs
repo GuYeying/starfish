@@ -23,6 +23,46 @@ thread_local! {
     static SCREEN: RefCell<Option<&'static Screen>> = const { RefCell::new(None) };
 }
 
+
+/// 可调整大小（对位 pygame RESIZABLE）
+pub const RESIZABLE: u32 = 1 << 0;
+/// 全屏（无边框占屏；对位 pygame FULLSCREEN）
+pub const FULLSCREEN: u32 = 1 << 1;
+/// 无边框（对位 pygame NOFRAME）
+pub const NOFRAME: u32 = 1 << 2;
+/// 创建时隐藏（对位 pygame WINDOW_HIDDEN）
+pub const HIDDEN: u32 = 1 << 3;
+/// 窗口置顶（对位 pygame WINDOW_ALWAYS_ON_TOP）
+pub const ALWAYS_ON_TOP: u32 = 1 << 6;
+/// 透明窗口（**创建期**——透明合成 + Screen 清屏改 alpha 0；
+/// 桌宠/悬浮件形态。运行期不可追溯）
+pub const TRANSPARENT: u32 = 1 << 7;
+/// 后端声明（wgpu 在声明位集内自动挑选、不可用即隐式退化；
+/// 未声明任何后端位 = `Backends::all()` 平台最优）。
+/// 注意：GPU 初始化在 set_mode_ex 内进程一次——后端声明须在
+/// 首次 set_mode 时给出（运行期不可重选）。
+pub const VULKAN: u32 = 1 << 8;
+pub const DIRECTX: u32 = 1 << 9;
+pub const METAL: u32 = 1 << 10;
+pub const OPENGLES: u32 = 1 << 11;
+/// GL 上下文请求（2026-09-30 语义变更：由"显式报错"改为后端声明
+/// = wgpu GL 后端，不可用隐式退化）
+pub const OPENGL: u32 = 1 << 30;
+
+/// 已登记旗标全集（未登记位 → 警告并忽略，垫底原则）
+pub const KNOWN_MASK: u32 = RESIZABLE
+    | FULLSCREEN
+    | NOFRAME
+    | HIDDEN
+    | ALWAYS_ON_TOP
+    | TRANSPARENT
+    | VULKAN
+    | DIRECTX
+    | METAL
+    | OPENGLES
+    | OPENGL;
+
+
 /// 建窗 + GPU 装配（契约 §七：**进程一次**；重复调用 = 契约违例 panic）
 ///
 /// 尺寸即 display 逻辑尺寸（ADR-8：1 px ≡ 1 surface 逻辑像素；此后窗口
@@ -41,26 +81,26 @@ pub async fn set_mode(size: (u32, u32)) -> Result<(), RenderContextError> {
 pub async fn set_mode_ex(size: (u32, u32), flags: u32) -> Result<(), RenderContextError> {
     use crate::base::render::settings::{GpuSettings, SurfaceSettings};
     use crate::base::window::WindowFlags;
-    use crate::pygame::locals::display as dflags;
+
 
     let exists = SCREEN.with(|s| s.borrow().is_some());
     if exists {
         panic!("display.set_mode 进程一次（契约 §七）；重复调用不支持");
     }
-    if flags & !dflags::KNOWN_MASK != 0 {
+    if flags & !KNOWN_MASK != 0 {
         crate::base::debug::console_log(&format!(
             "[pygame] set_mode: 未登记旗标位 0x{:X} 忽略（垫底原则）",
-            flags & !dflags::KNOWN_MASK
+            flags & !KNOWN_MASK
         ));
     }
     let mut wf = WindowFlags::from_bits(0);
     for (bit, flag) in [
-        (dflags::RESIZABLE, WindowFlags::RESIZABLE),
-        (dflags::FULLSCREEN, WindowFlags::FULLSCREEN),
-        (dflags::NOFRAME, WindowFlags::NOFRAME),
-        (dflags::HIDDEN, WindowFlags::HIDDEN),
-        (dflags::ALWAYS_ON_TOP, WindowFlags::ALWAYS_ON_TOP),
-        (dflags::TRANSPARENT, WindowFlags::TRANSPARENT),
+        (RESIZABLE, WindowFlags::RESIZABLE),
+        (FULLSCREEN, WindowFlags::FULLSCREEN),
+        (NOFRAME, WindowFlags::NOFRAME),
+        (HIDDEN, WindowFlags::HIDDEN),
+        (ALWAYS_ON_TOP, WindowFlags::ALWAYS_ON_TOP),
+        (TRANSPARENT, WindowFlags::TRANSPARENT),
     ] {
         if flags & bit != 0 {
             wf = wf.union(flag);
@@ -73,10 +113,10 @@ pub async fn set_mode_ex(size: (u32, u32), flags: u32) -> Result<(), RenderConte
     // 不可用隐式退化——旧"显式报错"垫底表已废）
     let mut backends = wgpu::Backends::empty();
     for (bit, be) in [
-        (dflags::VULKAN, wgpu::Backends::VULKAN),
-        (dflags::DIRECTX, wgpu::Backends::DX12),
-        (dflags::METAL, wgpu::Backends::METAL),
-        (dflags::OPENGLES | dflags::OPENGL, wgpu::Backends::GL),
+        (VULKAN, wgpu::Backends::VULKAN),
+        (DIRECTX, wgpu::Backends::DX12),
+        (METAL, wgpu::Backends::METAL),
+        (OPENGLES | OPENGL, wgpu::Backends::GL),
     ] {
         if flags & bit != 0 {
             backends |= be;
@@ -89,7 +129,7 @@ pub async fn set_mode_ex(size: (u32, u32), flags: u32) -> Result<(), RenderConte
     // ⚠ 逐像素透明 = **DX12 专属**（Vulkan Win32 表面只报 Opaque）——
     // 透明时强制 DX12 后端（平台矩阵：Windows ✓；Linux/macOS 窗口后端
     // 未实现——透明随平台后端落地；Android/Web 排除）
-    let transparent = flags & dflags::TRANSPARENT != 0;
+    let transparent = flags & TRANSPARENT != 0;
     let mut surface_settings = SurfaceSettings::default();
     #[cfg(target_os = "windows")]
     if transparent {
@@ -153,20 +193,20 @@ pub fn set_caption(title: &str) {
 /// 脚本 set_mode 为完整请求：set_size 跟随 + 旗标经 Window::set_* 即时
 /// 生效。创建期一次性旗标（透明）垫底收下；OPENGL 垫底：引擎恒 wgpu）
 pub fn apply_window_request(size: (u32, u32), flags: u32) {
-    use super::locals::display as fl;
-    if flags & fl::OPENGL != 0 {
+
+    if flags & OPENGL != 0 {
         crate::base::debug::console_log("[display] OPENGL 旗标垫底（引擎恒 wgpu）");
     }
     with_window(|w| {
         w.set_size(size);
-        w.set_resizable(flags & fl::RESIZABLE != 0);
-        w.set_fullscreen(flags & fl::FULLSCREEN != 0);
-        w.set_borderless(flags & fl::NOFRAME != 0);
+        w.set_resizable(flags & RESIZABLE != 0);
+        w.set_fullscreen(flags & FULLSCREEN != 0);
+        w.set_borderless(flags & NOFRAME != 0);
         // HIDDEN 运行时语义 = 隐藏窗口（真 pygame 为创建期；垫底执行）
-        if flags & fl::HIDDEN != 0 {
+        if flags & HIDDEN != 0 {
             w.set_visible(false);
         }
-        if flags & fl::ALWAYS_ON_TOP != 0 {
+        if flags & ALWAYS_ON_TOP != 0 {
             w.set_always_on_top(true);
         }
     });

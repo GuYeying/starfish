@@ -6,6 +6,8 @@
 
 use std::cell::Cell;
 
+use starfish_window::MouseButton;
+
 thread_local! {
     static POS: Cell<(i32, i32)> = const { Cell::new((0, 0)) };
     static BUTTONS: Cell<(bool, bool, bool)> = const { Cell::new((false, false, false)) };
@@ -14,6 +16,15 @@ thread_local! {
     /// 光标可见态（set_visible 维护；窗口实际态可能被系统改写）
     static VISIBLE: Cell<bool> = const { Cell::new(true) };
 }
+
+
+
+pub const BUTTON_LEFT: MouseButton = MouseButton::Left;
+pub const BUTTON_MIDDLE: MouseButton = MouseButton::Middle;
+pub const BUTTON_RIGHT: MouseButton = MouseButton::Right;
+pub const BUTTON_BACK: MouseButton = MouseButton::Back;
+pub const BUTTON_FORWARD: MouseButton = MouseButton::Forward;
+
 
 /// 更新状态表位置（事件翻译喂 + `pygame.mouse.set_pos` 垫底共用——
 /// starfish-window v1 无光标扭曲，仅状态表生效）

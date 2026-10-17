@@ -30,10 +30,43 @@ impl Mask {
         }
     }
 
-    /// 从离屏面构建（异步全平台；alpha > threshold 的像素置位）
+    /// 从离屏面构建（**同步全平台**；alpha > threshold 的像素置位）
     ///
-    /// 一次性回读慢路径——建议资产装载期构建、缓存复用。
+    /// 路径分派：
+    /// - **CPU alpha 影子**（from_rgba8 / image 解码 / font 光栅化出生
+    ///   面——像素创建期过手留存）→ 纯 CPU 阈值，**零回读**，三端同步
+    ///   快路径（精灵贴图的标准路径）；
+    /// - GPU 出生面（transform 输出 / 会话绘制面）→ 原生同步回读；
+    ///   web 无阻塞回读通道 → Err（用 [`from_surface_async`]）。
+    ///
+    /// 快照语义：影子是**创建期** alpha——绘制/fill 不回写；运行期
+    /// 真值走回读（本函数原生分支 / 全平台 [`from_surface_async`]）。
+    pub fn from_surface(s: &Surface, threshold: u8) -> Result<Self, crate::pygame::image::ImageError> {
+        if let Some(a) = s.cpu_alpha() {
+            return Ok(Self::from_alpha_plane(&a.data, a.width, a.height, threshold));
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            crate::base::app::block_on(Self::from_surface_async(s, threshold))
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            Err(crate::pygame::image::ImageError::Readback(
+                "web 无同步 GPU 回读通道：GPU 出生面请用 from_surface_async，\
+                 或改用 CPU 出生面（from_rgba8 / image / font——自带 alpha 影子）"
+                    .into(),
+            ))
+        }
+    }
+
+    /// 从离屏面构建（异步全平台；三端通用口）
+    ///
+    /// 有影子走 CPU 快路径（同步语义，零回读）；GPU 出生面走一次性
+    /// 回读慢路径——建议资产装载期构建、缓存复用。
     pub async fn from_surface_async(s: &Surface, threshold: u8) -> Result<Self, crate::pygame::image::ImageError> {
+        if let Some(a) = s.cpu_alpha() {
+            return Ok(Self::from_alpha_plane(&a.data, a.width, a.height, threshold));
+        }
         let rgba = crate::pygame::image::readback_rgba(s).await?;
         let (w, h) = s.size();
         let mut bits = Vec::with_capacity((w * h) as usize);
@@ -43,10 +76,13 @@ impl Mask {
         Ok(Self { width: w, height: h, bits })
     }
 
-    /// [`from_surface_async`] 的桌面同步壳
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn from_surface(s: &Surface, threshold: u8) -> Result<Self, crate::pygame::image::ImageError> {
-        crate::base::app::block_on(Self::from_surface_async(s, threshold))
+    /// alpha 平面 → 位图（阈值置位；纯 CPU，mask 检测核心的地基）
+    pub(crate) fn from_alpha_plane(data: &[u8], width: u32, height: u32, threshold: u8) -> Self {
+        Self {
+            width,
+            height,
+            bits: data.iter().map(|&a| a > threshold).collect(),
+        }
     }
 
     pub fn size(&self) -> (u32, u32) {

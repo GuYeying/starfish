@@ -24,11 +24,12 @@ pub mod material;
 pub mod target;
 pub mod texture;
 
-pub use batch::{Batch, GeometryKind, SpriteVertex};
-pub use buffer_proxy::{BufferProxy, Layout, PixelFormat};
+pub use batch::{Batch, BatchTopology, GeometryKind, SpriteVertex};
+// pub use buffer_proxy::{BufferProxy, Layout, PixelFormat};
 pub use camera::Camera;
 pub use material::{Material, SPRITE_MRT_WGSL, SPRITE_WGSL};
-pub use target::{render_targets, DrawTarget, RenderPass, Screen, Surface};
+pub use target::{render_targets, render_targets_arc, DrawTarget, RenderPass, Screen, Surface};
+pub(crate) use target::CpuAlpha;
 pub use texture::Texture;
 
 use std::cell::RefCell;

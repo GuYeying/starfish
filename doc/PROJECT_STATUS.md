@@ -26,6 +26,17 @@
   Cargo `package =` 别名过渡，代码路径 `starfish_window::` 零改动；
 - **pygame-rs 交由他人接管**（2026-10-11 定）——本仓库后续不涉其代码。
 
+**里程碑（2026-10-12，批次三十四）：pygame-rs 全体系对接完成**——
+绑定面 26 模块全覆盖清零：mask/permission/video/time.Clock 三新模块
++ Surface 深度面（`depth_buffer=` 构造定约 §九.2）+ Session 相机/裁剪
++ **`pygame.targets` MRT 会话**（§3.1 预言形态）+ sprite pyclass 桥
+（世代 id 回写 Python 对象）+ with_batch 直通口（blit_area/quad）+
+event/display/io/KMOD 补面；探针 selftest 扩至 **24 项桌面全绿**，
+web/APK 产物重出。引擎侧仅增补 render_targets_arc + 统一 set_clip
+委托两处。详见 pygame-rs/CLAUDE.md 批次 34 段与
+`pygame-rs/examples/binding_probe.py`。pygame-rs 移交收回、由 Claude
+接手（2026-10-12 定）。
+
 **里程碑（2026-09-30，批次二十二~二十四）：Web 音频闭环 + pygame-rs
 绑定扩容四连**——AudioContext 捕获修复（cpal 0.18 平台包装层 as_inner
 解包）+ Web 手势门定约（needs_gesture / 手势前 play 跳过）；
@@ -90,10 +101,11 @@ Cargo `package =` 别名过渡（代码路径不变）。
 `Surface::with_depth/has_depth/render_depth`（带校验断言）+ Screen 深度
 缓冲默认创建（Depth24Plus 无条件）+ resize 深度重建，全部就位且
 pygame_probe（with_depth + render_depth 会话演示）600 帧×2 回归零错。
-**剩余 = 绑定层透传**（`depth_buffer=True` → `with_depth`、
-`render_depth` 入口、`has_depth` 校验消息）——归 pygame 绑定 agent；
-绑定面本体（bridge/native_pygame/pygame_impls）已由用户侧实现
-（pygame_shim 时代结束），M1 剩余 = 行为回归集。
+**剩余 = 绑定层透传 → 已落地（2026-10-12 批次三十四）**：
+`pygame.Surface((w,h), depth_buffer=True)` → with_depth + `has_depth()`
++ `render_depth` 会话均已绑定（§九.2 定约）；绑定面本体
+（bridge/native_pygame/pygame_impls）已扩至 26 模块全覆盖，
+行为回归 = 探针 selftest 24 项（三端）。
 
 **② rp_main_loop 挂起 → 已作废（2026-10-11）**：该示例已在 pygame-rs
 重构中移除（binding_probe 为存活的等价案例且三端验证通过）——旧挂起
