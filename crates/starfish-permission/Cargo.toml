@@ -1,0 +1,24 @@
+[package]
+name = "starfish-permission"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "运行时权限申请（全平台统一入口）：Android 系统弹框受控阻塞 / 桌面恒 true / Web 委派+ensure_async 授权即取流"
+
+[dependencies]
+# wasm 分支诊断输出（ensure_async 授权打点走 console_log）
+starfish-std = { workspace = true }
+
+# Android：jni / robius-android-env / ndk-context 为非可选（核心路径使用，
+# 对齐批次 17 的 ndk-context 先例）
+[target.'cfg(target_os = "android")'.dependencies]
+jni = { workspace = true }
+ndk-context = { workspace = true }
+robius-android-env = { workspace = true }
+
+# Web：ensure_async 对 Microphone 发起 getUserMedia 真实授权
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+wasm-bindgen = { workspace = true }
+wasm-bindgen-futures = { workspace = true }
+js-sys = { workspace = true }
+web-sys = { workspace = true }

@@ -1,0 +1,15 @@
+[package]
+name = "starfish-net"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "网络接口（TCP 消息连接 / UDP 轮询）：每连接一后台线程，不引入 tokio；Web 走 WebSocket"
+
+[dependencies]
+starfish-permission = { workspace = true }
+
+# Web：WebSocket（稳定 API，自持 js_sys Reflect 绑定）
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+wasm-bindgen = { workspace = true }
+js-sys = { workspace = true }
+web-sys = { workspace = true }

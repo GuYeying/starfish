@@ -1,0 +1,12 @@
+[package]
+name = "starfish-gfx"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "几何绘制：形状生成器（纯数据）+ 标准渲染对象工厂（Mesh/BindGroup/RenderPipeline）"
+
+[dependencies]
+starfish-render = { workspace = true }
+wgpu = { workspace = true }
+glam = { workspace = true }
+bytemuck = { workspace = true }

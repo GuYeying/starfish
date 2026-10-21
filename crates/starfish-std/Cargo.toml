@@ -1,0 +1,29 @@
+[package]
+name = "starfish-std"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "starfish 引擎核心共用组件：错误/诊断/平台驱动器/app_entry! 入口宏/资源装载"
+
+# ── 特性 ──
+# we（可选）：再导出 starfish-we 的 Android 宿主装配（AndroidApp/android_init），
+# app_entry! 的 android 分支依赖之——Android 构建必须启用；桌面/Web 零成本。
+[features]
+default = []
+we = ["dep:starfish-we"]
+
+[dependencies]
+starfish-we = { workspace = true, optional = true }
+
+# 桌面/Android：阻塞式异步驱动（app 再导出 pollster::block_on）
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+pollster = { workspace = true }
+
+# wasm32（含 emscripten 变体）：debug/web.rs 的 console.log 与 panic hook
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = { workspace = true }
+console_error_panic_hook = { workspace = true }
+
+# Web（unknown-unknown）：app 再导出 spawn_local（rAF 帧拍调度）
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+wasm-bindgen-futures = { workspace = true }

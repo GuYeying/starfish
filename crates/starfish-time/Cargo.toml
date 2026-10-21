@@ -1,0 +1,9 @@
+[package]
+name = "starfish-time"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "时间原语：度量/缩放/固定步长/节流（基于 std Instant；wasm 走 performance.now）"
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+web-sys = { workspace = true }

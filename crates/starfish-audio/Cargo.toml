@@ -1,0 +1,27 @@
+[package]
+name = "starfish-audio"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "音频引擎：cpal 设备层 + symphonia 解码 + 混音器/流式/录音（平台中立纯逻辑）"
+
+# ── 特性 ──
+# dialog（可选）：录音保存走系统文件对话框（record.rs）；不启用则零成本。
+[features]
+default = ["dialog"]
+dialog = ["dep:starfish-dialog"]
+
+[dependencies]
+starfish-permission = { workspace = true }
+starfish-dialog = { workspace = true, optional = true }
+cpal = { workspace = true }
+symphonia = { workspace = true }
+bytemuck = { workspace = true }
+log = { workspace = true }
+
+# Web：cpal WebAudio 设备后端；getUserMedia 录音采集（device.rs wasm 输入分支）
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+cpal = { workspace = true, features = ["wasm-bindgen"] }
+wasm-bindgen = { workspace = true }
+wasm-bindgen-futures = { workspace = true }
+web-sys = { workspace = true }

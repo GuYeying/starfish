@@ -1,0 +1,60 @@
+[package]
+name = "starfish-we"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "跨平台单窗口 + 事件 crate（SDL 风格 poll 模型）：调用方持主循环，主动轮询事件"
+
+# ── 特性 ──
+# we-wgpu：实现 raw-window-handle traits——`instance.create_surface(&window)`
+#   零 unsafe 直通；刻意不依赖 wgpu 本体。
+# wgpu-auto：自动适配 surface（库接管 resize→configure 循环），引入 wgpu。
+[features]
+default = []
+we-wgpu = ["dep:raw-window-handle"]
+wgpu-auto = ["we-wgpu", "dep:wgpu"]
+
+[dependencies]
+raw-window-handle = { workspace = true, optional = true }
+wgpu = { workspace = true, optional = true }
+
+# 桌面：wgpu_auto 的阻塞初始化（wasm 无阻塞模型）
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+pollster = { workspace = true }
+
+# wasm 变体：Web canvas 句柄类型（WebCanvasWindowHandle）
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+raw-window-handle = { workspace = true, features = ["wasm-bindgen-0-2"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { workspace = true }
+objc2-app-kit = { workspace = true }
+objc2-foundation = { workspace = true }
+
+[target.'cfg(target_os = "ios")'.dependencies]
+objc2 = { workspace = true }
+objc2-ui-kit = { workspace = true }
+objc2-quartz-core = { workspace = true }
+objc2-foundation = { workspace = true }
+
+# Linux 后端：Wayland-only（X11 已弃）。system：wgpu 互操作需真实
+# wl_display*/wl_surface* 指针；dlopen：运行期加载 libwayland。
+# sctk 关 calloop（本库 poll 模型自带非阻塞泵），留 xkbcommon
+# （C 链接依赖，构建需 pkg-config + libxkbcommon-dev）。
+[target.'cfg(target_os = "linux")'.dependencies]
+wayland-client = { workspace = true }
+smithay-client-toolkit = { workspace = true }
+sctk-adwaita = { workspace = true }
+
+[target.'cfg(target_os = "android")'.dependencies]
+android-activity = { workspace = true }
+
+# Web（wasm32-unknown-unknown）：DOM 事件 / canvas 接管 / rAF 帧拍
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+wasm-bindgen = { workspace = true }
+wasm-bindgen-futures = { workspace = true }
+js-sys = { workspace = true }
+web-sys = { workspace = true }

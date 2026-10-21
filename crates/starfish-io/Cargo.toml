@@ -1,0 +1,17 @@
+[package]
+name = "starfish-io"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "跨平台文件/数据读取与保存：一套通用异步 API，原生 std::fs 直实现 / Web fetch 直实现"
+
+# 桌面/移动：阻塞实现包在 async 体外壳内
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+pollster = { workspace = true }
+
+# Web：fetch 读 / POST 保存
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+wasm-bindgen = { workspace = true }
+wasm-bindgen-futures = { workspace = true }
+js-sys = { workspace = true }
+web-sys = { workspace = true }
