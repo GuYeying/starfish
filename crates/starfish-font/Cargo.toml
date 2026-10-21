@@ -1,0 +1,14 @@
+[package]
+name = "starfish-font"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "字体：ttf-parser 解析 + 自研扫描线光栅化 + 图集 + 标准渲染对象（对位 pygame.font.Font，服务游戏内文本）"
+
+[dependencies]
+starfish-render = { workspace = true }
+image = { workspace = true }
+glam = { workspace = true }
+bytemuck = { workspace = true }
+ttf-parser = { workspace = true }
+wgpu = { workspace = true }

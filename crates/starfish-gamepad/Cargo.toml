@@ -1,0 +1,16 @@
+[package]
+name = "starfish-gamepad"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "手柄输入：gilrs 原生（win/linux/mac，SDL 兼容布局）/ Web Gamepad API Reflect 轮询 / 移动端空实现占位"
+
+# 桌面：gilrs 原生（震动 rumble：win/linux ✓，macos ✗）
+[target.'cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))'.dependencies]
+gilrs = { workspace = true }
+
+# Web：自持 js_sys Reflect 轮询 navigator.getGamepads()（标准布局映射）
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+wasm-bindgen = { workspace = true }
+js-sys = { workspace = true }
+web-sys = { workspace = true }

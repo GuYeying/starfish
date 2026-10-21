@@ -1,0 +1,15 @@
+# ── 构建产物 ──
+/target
+/examples/web
+/examples/jniLibs
+
+# ── 测试运行产物（pygame 套件在 crate 根落盘的自检中间文件）──
+__pygame_*
+_sig_io_tmp.bin
+
+# ── 工具产物 ──
+.VSCodeCounter/
+
+# ── 系统文件 ──
+.DS_Store
+Thumbs.db

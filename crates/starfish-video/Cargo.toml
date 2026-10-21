@@ -1,0 +1,48 @@
+[package]
+name = "starfish-video"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "视频硬解抽象（无硬件解码器直接报错，不落软解）：Windows MF / Linux GStreamer / Apple VideoToolbox / Web WebCodecs + NV12→RGBA（yuv）"
+
+[dependencies]
+starfish-std = { workspace = true }
+starfish-audio = { workspace = true }
+mp4 = { workspace = true }
+# player 纹理上传（RGBA→wgpu::Texture）与音轨 AAC 软解（symphonia，与
+# starfish-audio 同版本单源）
+wgpu = { workspace = true }
+symphonia = { workspace = true }
+
+# Windows：Media Foundation SourceReader（D3D11 前置硬解探测）
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { workspace = true }
+
+# Linux：GStreamer 硬解聚合（klass=Hardware 过滤；仅链接系统动态库，
+# Ubuntu 24.04 自带 GStreamer 1.24）
+[target.'cfg(target_os = "linux")'.dependencies]
+gstreamer = { workspace = true }
+gstreamer-app = { workspace = true }
+gstreamer-video = { workspace = true }
+
+# macOS/iOS：VideoToolbox 系统框架
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+objc2 = { workspace = true }
+objc2-foundation = { workspace = true }
+objc2-av-foundation = { workspace = true }
+objc2-core-media = { workspace = true }
+objc2-core-video = { workspace = true }
+objc2-video-toolbox = { workspace = true }
+objc2-core-foundation = { workspace = true }
+
+# Android：MediaCodec via JNI
+[target.'cfg(target_os = "android")'.dependencies]
+jni = { workspace = true }
+ndk-context = { workspace = true }
+
+# Web：WebCodecs 自持绑定（fetch 取流 + mp4 纯 Rust 解复用）
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+wasm-bindgen = { workspace = true }
+wasm-bindgen-futures = { workspace = true }
+js-sys = { workspace = true }
+web-sys = { workspace = true }

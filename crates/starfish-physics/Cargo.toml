@@ -1,0 +1,7 @@
+[package]
+name = "starfish-physics"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]

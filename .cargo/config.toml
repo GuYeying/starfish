@@ -1,0 +1,12 @@
+# 本仓库本地镜像配置（仅影响本仓库；直连 crates.io 不可用时走 rsproxy）
+[source.crates-io]
+replace-with = 'rsproxy-sparse'
+
+[source.rsproxy-sparse]
+registry = "sparse+https://rsproxy.cn/index/"
+
+[registries.rsproxy]
+index = "sparse+https://rsproxy.cn/index/"
+
+[net]
+git-fetch-with-cli = true
