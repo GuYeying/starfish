@@ -8,7 +8,8 @@ description = "wgpu 渲染封装：bind_group/mesh/pipeline/render_pass/shader_m
 [dependencies]
 starfish-std = { workspace = true }
 # we-wgpu：raw-window-handle trait 实现，create_surface 零 unsafe 直通
-starfish-we = { workspace = true, features = ["we-wgpu"] }
+# （可选——无窗渲染/headless 场景不需要 starfish-we；见 features.we）
+starfish-we = { workspace = true, features = ["we-wgpu"], optional = true }
 wgpu = { workspace = true }
 raw-window-handle = { workspace = true }
 image = { workspace = true }
@@ -25,3 +26,9 @@ raw-window-handle = { workspace = true, features = ["wasm-bindgen-0-2"] }
 # Web：render_entry 的 canvas 直传路径（HtmlCanvasElement）
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 web-sys = { workspace = true }
+
+[features]
+default = []
+# 窗口对接（RenderEntry：Window → GPU 上下文 + 渲染表面）——依赖
+# starfish-we；无窗渲染/headless 场景可关
+we = ["dep:starfish-we"]

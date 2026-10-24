@@ -28,7 +28,7 @@ async fn app_body() -> Result<(), Box<dyn std::error::Error>> {
         .await
         .expect("RenderContext 初始化失败");
     // 1. 纯色三角形着色器（无贴图）
-    let shader_source: String = fs::read_to_string("examples/triangle.wgsl").unwrap();
+    let shader_source: String = fs::read_to_string("resources/shaders/triangle.wgsl").unwrap();
     let shader = resouce.shader_module_builder(shader_source)
         .build(Some("triangle_shader"));
     // 2. 三角形顶点数据：pos xyz + color rgb，共3个顶点，无索引

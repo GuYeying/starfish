@@ -1,14 +1,66 @@
 # PROJECT STATUS — 进度快照与下一步计划
 
-> 更新：2026-10-21（架构重构批次）。本仓库已重建为 git 仓库并完成
-> workspace 化拆分——14 个引擎 crate + examples（DAG 与命令见根 `CLAUDE.md`，
-> 批次记录见 `doc/log/starfish_changelog_2026-10-21.md`）；下文批次记录
-> 对应拆分前的单 crate 时代。接手工作**先读本文档**，再读根 `CLAUDE.md`
+> 更新：2026-10-24（事件帧尾清空 / Rect 退役 / 光标修复）。workspace
+> 化拆分（14 引擎 crate +
+> examples，DAG 与命令见根 `CLAUDE.md`）之后的最新批次记录见
+> `doc/log/starfish_changelog_2026-10-24.md`；下文批次记录主体对应
+> 拆分前的单 crate 时代。接手工作**先读本文档**，再读根 `CLAUDE.md`
 > 与 `architecture/pygame层设计.md`（契约定稿 v1.0）。
 
 ---
 
 ## 一、当前阶段
+
+**里程碑（2026-10-24 续）：事件帧尾清空 + Rect 类型退役 + Windows
+光标修复**——同日三批后续（详见 `doc/log/starfish_changelog_2026-10-24.md`
+各追加节）：
+
+- **事件队列帧尾清空**（用户定约"每次循环结束不管用没用都清空"）：
+  `event::pump()` 起点排空上帧未消费事件；`post_user` 改走
+  `USER_PENDING` 列、pump 时补发——**保一帧**（post 后下一帧 get/poll
+  可见，同帧 post→get 不再立即可见：契约变更，引擎测试同步改写）；
+- **Rect 类型退役**（用户定约：GPU 渲染下 Rect 未达原版"描述 surface
+  信息"的等价能力，碰撞/触发器今后统一走物理引擎）：`rect.rs`（pygame
+  全量 parity，418 行）删除；draw 族全部改**无返回值**签名；clip/
+  scissor/blit_area 几何改 **`IRect = [i32; 4]` 数组别名**（纯别名无
+  方法面，用户定约 struct 也不要）；`DrawTarget` 的 fill/blit/
+  blit_centered/blit_area 返回 `()`。下游 pygame-rs 联动：`pygame.Rect`
+  pyclass 删除、会话绘制面无返回值、碰撞查询助手（collidelist 族）
+  随之消失——**区域参数 = `(x, y, w, h)` 元组**；
+- **starfish-we Windows 光标修复**：窗口类 `hCursor = NULL` 使
+  DefWindowProc 的 HTCLIENT 分支 `SetCursor(NULL)` 成空操作——边框缩放
+  光标滞留客户区；wndproc 新增 `WM_SETCURSOR` 臂：客户区显式恢复标准
+  箭头，非客户区回落系统语义；
+- 验收：starfish workspace check 绿 + starfish-pygame 测试 49/51
+  （存量字体环境问题）；下游 pygame-rs sig_probe 124/124（Rect 断言
+  随类型删除）+ binding_probe selftest 全 PASS + rapier_test
+  SUMMARY PASS + egui/draw 烟测零 panic。
+
+**里程碑（2026-10-24）：pygame 层通用直绘能力三件**（定约：接口核心
+先落 starfish、通用情况不针对特定库，具体库经绑定层对接）——
+`Screen::with_overlay`（LoadOp::Load 叠加 pass + OverlayCtx：with_pass
+直绘 / create_command_encoder+submit_before 通道前命令 / device·queue·
+access）、`event::add/remove_raw_listener`（翻译前原始事件镜像，多消费
+者表）、`display::with_window` pub + `render::gpu_info` + Screen 格式/
+采样访问器。接口面只有 wgpu / starfish-render 公共类型（依赖单向红线）；
+下游 pygame-rs 据此对接 egui-starfish-we 与 rapier-starfish-debug（现役
+消费者实测：rapier_test 15/15 + egui_test 14/14 全 PASS）。详见
+`doc/log/starfish_changelog_2026-10-24.md`。
+
+**里程碑（2026-10-23）：多窗口支持——上下文/表面分离模型定稿**——
+render 侧 `RenderContext` headless 化（删 `surface` 死字段），新多窗口
+核心入口 `RenderEntry::new_surface`/`async_new_surface`
+（复用设备族，仅新建交换链；冗余的 `surface_from_context` 族删除）；
+we 侧 feature `multi-window` + 编译期平台白名单
+（当前仅 Windows，白名单外 `compile_error!`——行为差异过大不做运行期
+降级）。事件拓扑：归属被 poll 的窗口（无 ID 路由），每帧轮询每窗纪律。
+验收示例 `demos/examples/multi_window.rs`（双窗独立表面，关一窗另一窗
+继续跑）实机冒烟通过。**下一步**：①逐窗关闭归属人工验收；②Linux/macOS
+逐平台实测后扩白名单；③pygame 层多窗口面（`display.set_mode` 之外的第二
+窗语义）另批论证；④rapier-sf 已迁出 workspace（独立项目
+`D:/Projects/Rust/rapier-sf`，预设计见其 `doc/设计文档.md`，v1 落地在
+彼仓库推进——本仓库后续仅以路径依赖被消费）。详见
+`doc/log/starfish_changelog_2026-10-23.md`。
 
 **版本 v0.9.10（2026-10-11，批次二十五~二十六）：pygame 层测试套件
 全模块覆盖 + 三端一致性两连修**——

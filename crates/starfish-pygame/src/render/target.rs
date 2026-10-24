@@ -25,10 +25,13 @@ use glam::Mat4;
 
 use starfish_render::bind_group::bind_group::BindGroup;
 use starfish_render::render_entry::{RenderContextError, RenderEntry};
+use starfish_render::render_pass::attachments::{ColorAttachment, DepthAttachment};
+use starfish_render::render_pass::render_pass::RenderPass as SfRenderPass;
+use starfish_render::render_resource_access::RenderResourceAccess;
 use starfish_render::render_surface::RenderSurface;
 use starfish_render::settings::{GpuSettings, SurfaceSettings};
 use starfish_we::Window;
-use crate::{Color, Rect};
+use crate::{Color, IRect};
 
 use super::batch::{encode, Batch, BatchTopology, EncodeCtx, GeometryKind, PassColor, PassDepth,
     SpriteVertex};
@@ -54,37 +57,37 @@ fn rgba(c: impl Into<Color>) -> [f32; 4] {
 /// ——不是即时上屏。需要显式打包边界用 [`Screen::render`] /
 /// [`Surface::render`]（Rust 版 with 语法）。
 pub trait DrawTarget {
-    /// 填充整个目标（返回受影响区域）
-    fn fill(&self, color: impl Into<Color>) -> Rect;
+    /// 填充整个目标
+    fn fill(&self, color: impl Into<Color>);
     /// 把离屏面画到目标 `(x, y)` 处（**左上角锚**——按层定约：blit/draw
-    /// = 左上、Sprite = 中心；源自动 flush；返回目标 Rect）
-    fn blit(&self, src: &Surface, dest: impl Into<Coord>) -> Rect;
+    /// = 左上、Sprite = 中心；源自动 flush）
+    fn blit(&self, src: &Surface, dest: impl Into<Coord>);
     /// 中心锚 blit（便利口：pos = center − size/2）
     ///
     /// 旋转帧等"中心对位"场景的正典——blit 的左上角锚 + 尺寸随角度
     /// 变化的产物会造成视觉中心漂移（transform 套件实测）；
     /// Sprite 路径的 `centered=true` 内建同语义
-    fn blit_centered(&self, src: &Surface, center: (i32, i32)) -> Rect {
+    fn blit_centered(&self, src: &Surface, center: (i32, i32)) {
         let (w, h) = src.size();
         self.blit(src, (center.0 - w as i32 / 2, center.1 - h as i32 / 2))
     }
     /// area blit（pygame blit 的 area 语义）：src 的像素子区域一次
-    /// 四边形贴入 dest，绘制尺寸 = area 尺寸（返回目标 Rect）。
+    /// 四边形贴入 dest，绘制尺寸 = area 尺寸。
     /// 源面先 flush（未提交 batch 先上 GPU 再采样——与 blit 同保险）
     fn blit_area(
         &self,
         src: &Surface,
         dest: impl Into<Coord>,
-        area: Rect,
+        area: IRect,
         tint: impl Into<Color>,
-    ) -> Rect {
+    ) {
         let (x, y) = dest.into();
         let (sw, sh) = src.size32();
         let uv = [
-            area.left as f32 / sw,
-            area.top as f32 / sh,
-            (area.left + area.width) as f32 / sw,
-            (area.top + area.height) as f32 / sh,
+            area[0] as f32 / sw,
+            area[1] as f32 / sh,
+            (area[0] + area[2]) as f32 / sw,
+            (area[1] + area[3]) as f32 / sh,
         ];
         src.flush();
         let tint = rgba(tint);
@@ -92,14 +95,13 @@ pub trait DrawTarget {
             b.push_quad_uv(
                 x as f32,
                 y as f32,
-                area.width as f32,
-                area.height as f32,
+                area[2] as f32,
+                area[3] as f32,
                 uv,
                 tint,
                 Some(&src.texture),
             )
         });
-        Rect::new(x, y, area.width, area.height)
     }
     /// 点集直入 batch（topo 任选；z=0、uv 取中心、统一色）——过程式
     /// 几何的快速通道
@@ -199,12 +201,14 @@ pub struct Screen {
     batch: RefCell<Batch>,
     camera: RefCell<CameraRig>,
     /// 裁剪区（`set_clip`；None = 不裁剪）
-    clip: Cell<Option<Rect>>,
+    clip: Cell<Option<IRect>>,
     format: wgpu::TextureFormat,
     samples: u32,
     /// 透明底模式（TRANSPARENT 创建旗标；begin_frame 清屏改 alpha 0
-    /// ——桌宠/悬浮件形态，配表面 alpha 合成）
+    ///——桌宠/悬浮件形态，配表面 alpha 合成）
     transparent_bg: Cell<bool>,
+    /// 延迟叠加队列（[`Screen::defer_overlay`] 的排程；present 时统一执行）
+    pending_overlays: RefCell<Vec<Box<dyn FnOnce(&mut OverlayCtx)>>>,
 }
 
 impl Screen {
@@ -237,6 +241,7 @@ impl Screen {
             format,
             samples,
             transparent_bg: Cell::new(false),
+            pending_overlays: RefCell::new(Vec::new()),
         })
     }
 
@@ -284,6 +289,12 @@ impl Screen {
         }
         self.begun.set(false);
         self.pack(false);
+        // 延迟叠加（定约见 defer_overlay）：本帧全部 pack 之后、present
+        // 之前执行——登记序即画家序，恒在游戏内容之上
+        let deferred: Vec<_> = self.pending_overlays.borrow_mut().drain(..).collect();
+        for f in deferred {
+            self.run_overlay(f);
+        }
         // present 对"begin 未就绪无帧"自身免疫（跳过路径）
         self.surface.borrow_mut().present();
         self.batch.borrow_mut().clear();
@@ -316,12 +327,12 @@ impl Screen {
     }
 
     /// 裁剪区（scissor；作用于本目标全部绘制，None = 不裁剪）
-    pub fn set_clip(&self, clip: Option<Rect>) {
+    pub fn set_clip(&self, clip: Option<IRect>) {
         self.clip.set(clip);
     }
 
     /// 当前裁剪区
-    pub fn get_clip(&self) -> Option<Rect> {
+    pub fn get_clip(&self) -> Option<IRect> {
         self.clip.get()
     }
 
@@ -359,12 +370,12 @@ impl Screen {
     // ── 固有形态（教程代码免 trait 导入：screen.fill(..) 直接可用）──
 
     // /// 填充（= [`DrawTarget::fill`]）
-    // pub fn fill(&self, color: impl Into<Color>) -> Rect {
+    // pub fn fill(&self, color: impl Into<Color>) {
     //     DrawTarget::fill(self, color)
     // }
 
     // /// blit（= [`DrawTarget::blit`]）
-    // pub fn blit(&self, src: &Surface, dest: impl Into<Coord>) -> Rect {
+    // pub fn blit(&self, src: &Surface, dest: impl Into<Coord>) {
     //     DrawTarget::blit(self, src, dest)
     // }
 
@@ -412,25 +423,154 @@ impl Screen {
         }
         self.batch.borrow_mut().clear();
     }
+
+    // ── 叠加渲染通道（自绘内容直绘屏幕的通用出口）──────────────────
+    //
+    // **接口核心 = 通用能力**（2026-10-24 定约：先落引擎、再做绑定；
+    // 不针对任何特定库设计）：任何"自持管线、借通道直绘"的外接渲染器
+    // 都从这里落笔——本层 batch 是延迟提交，`render()` 会话期间没有活的
+    // RenderPass，叠加通道在当前帧已绘内容之上开独立通道交给调用方
+    // （颜色/深度附件均 LoadOp::Load，清屏归 begin_frame，本帧内多通道
+    // 按提交序即画家序叠加）。次序定约：会话 pack 之后、present 之前
+    // 调用 = 叠在游戏画面之上。
+    //
+    // 现役消费者（pygame-rs 绑定层）：egui-wgpu（UI 面板）、rapier
+    // 物理调试线——仅是用例，接口面不感知它们（依赖单向红线）。
+
+    /// 交换链颜色格式（外接渲染器管线创建期依赖）
+    pub fn color_format(&self) -> wgpu::TextureFormat {
+        self.format
+    }
+
+    /// 交换链 MSAA 采样数（外接渲染器管线须匹配，否则 wgpu 校验错）
+    pub fn sample_count(&self) -> u32 {
+        self.samples
+    }
+
+    /// 叠加渲染通道——**立即形态**（定约见上方注释块）：`f` 内经
+    /// [`OverlayCtx::with_pass`] 开通道直绘、可多次；闭包返回即 finish +
+    /// 提交（[`OverlayCtx::submit_before`] 收的命令先于全部绘制通道）。
+    /// 未 begin（无帧）自动 begin；表面未就绪静默跳过（同 [`Self::present`]
+    /// 语义）。⚠️ 次序敏感：须在游戏会话 pack 之后调用才不被反盖——
+    /// 任意时点可调的排程形态用 [`Self::defer_overlay`]。
+    pub fn with_overlay(&self, f: impl FnOnce(&mut OverlayCtx)) {
+        self.run_overlay(f);
+    }
+
+    /// 叠加渲染通道——**延迟形态**（排程）：任意时点调用（含游戏会话内），
+    /// [`Self::present`] 在本帧全部 batch pack 之后、交换链 present 之前
+    /// 统一执行——多客人按登记序画家序叠加，恒在游戏内容之上（GUI 类
+    /// 客人的推荐形态）。表面未就绪的帧（present 跳过）排程保留到下一帧。
+    pub fn defer_overlay(&self, f: impl FnOnce(&mut OverlayCtx) + 'static) {
+        self.pending_overlays.borrow_mut().push(Box::new(f));
+    }
+
+    /// 叠加执行体（with/defer 两形态共用）：组上下文 → 执行 → 收口提交
+    /// （Box<dyn FnOnce> 本就实现 FnOnce，present 排程直接传入）
+    fn run_overlay<F: FnOnce(&mut OverlayCtx)>(&self, f: F) {
+        if !self.ensure_begun() {
+            return;
+        }
+        let Some(color) = self.surface.borrow().get_current_color_attachment() else {
+            return;
+        };
+        let depth = self.surface.borrow().get_current_depth_attachment();
+        let mut ctx = OverlayCtx {
+            encoder: self.gpu.access.create_command_encoder(),
+            color: Some(color),
+            depth,
+            pre_pass_cmds: Vec::new(),
+            device: self.gpu.device.clone(),
+            queue: self.gpu.queue.clone(),
+            access: self.gpu.access.clone(),
+        };
+        f(&mut ctx);
+        let mut cmds = std::mem::take(&mut ctx.pre_pass_cmds);
+        cmds.push(ctx.encoder.finish());
+        self.surface.borrow_mut().submit(cmds);
+    }
+}
+
+/// 叠加通道上下文（[`Screen::with_overlay`] 闭包参数）：encoder 与当前帧
+/// 附件/GPU 句柄由引擎收口，调用方按需开通道、写通道前命令——全程只接触
+/// wgpu / starfish-render 公共类型（依赖单向红线的接口面）。
+pub struct OverlayCtx {
+    /// starfish 包装 encoder（`with_pass` 的宿主；收口时 finish 提交）
+    encoder: starfish_render::command_encoder::CommandEncoder,
+    color: Option<ColorAttachment>,
+    depth: Option<DepthAttachment>,
+    pre_pass_cmds: Vec<wgpu::CommandBuffer>,
+    device: Arc<wgpu::Device>,
+    queue: Arc<wgpu::Queue>,
+    access: Arc<RenderResourceAccess>,
+}
+
+impl OverlayCtx {
+    /// 开一条叠加通道执行 `draw`（LoadOp::Load 承接已绘内容；通道借用以
+    /// `&mut RenderPass` 交付调用方直绘）。`depth` = 附加深度附件（3D
+    /// 内容深度测试用；本上下文的深度附件只供一条通道——第二条起为
+    /// None）。**深度契约按自绘管线分支**：管线深度关闭者（如 2D 线
+    /// 管线）必须传 `false`——wgpu 对管线深度目标与通道附件做严格
+    /// 相等校验。
+    pub fn with_pass(
+        &mut self,
+        label: &str,
+        depth: bool,
+        draw: impl FnOnce(&mut SfRenderPass),
+    ) {
+        let depth_att = if depth { self.depth.take() } else { None };
+        let color_refs: [&Option<ColorAttachment>; 1] = [&self.color];
+        let mut pass = self
+            .encoder
+            .begin_render_pass(label, &color_refs, depth_att, None, None, None);
+        draw(&mut pass);
+        pass.end();
+    }
+
+    /// 通道前命令编码器（**原生 wgpu encoder**——绘制通道开始前须完成
+    /// 的命令（资源上传 / 回调 prepare 等）记进它，`finish` 后交
+    /// [`Self::submit_before`]，先于本上下文全部绘制通道执行）
+    pub fn create_command_encoder(&self) -> wgpu::CommandEncoder {
+        self.device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("overlay_pre_pass") })
+    }
+
+    /// 通道前命令提交（须先于本上下文全部绘制通道执行的命令缓冲）
+    pub fn submit_before(&mut self, cmds: Vec<wgpu::CommandBuffer>) {
+        self.pre_pass_cmds.extend(cmds);
+    }
+
+    /// GPU 设备（外接渲染器纹理/缓冲创建用）
+    pub fn device(&self) -> &wgpu::Device {
+        &self.device
+    }
+
+    /// GPU 队列（write_buffer / write_texture 即时上传）
+    pub fn queue(&self) -> &wgpu::Queue {
+        &self.queue
+    }
+
+    /// 资源访问（外接渲染器创建自持管线 / bind group 用）
+    pub fn access(&self) -> &RenderResourceAccess {
+        &self.access
+    }
 }
 
 impl DrawTarget for Screen {
-    fn fill(&self, color: impl Into<Color>) -> Rect {
+    fn fill(&self, color: impl Into<Color>) {
         let (w, h) = self.size();
         self.with_batch(|b| {
             b.push_quad(0.0, 0.0, w as f32, h as f32, rgba(color), None);
         });
-        Rect::new(0, 0, w as i32, h as i32)
     }
 
-    fn blit(&self, src: &Surface, dest: impl Into<Coord>) -> Rect {
+    fn blit(&self, src: &Surface, dest: impl Into<Coord>) {
         let (x, y) = dest.into();
         let (sw, sh) = src.size32();
         src.flush();
         self.with_batch(|b| {
             b.push_quad(x as f32, y as f32, sw, sh, src.blit_tint(), Some(&src.texture));
         });
-        Rect::new(x, y, sw as i32, sh as i32)
     }
 
     fn size(&self) -> (u32, u32) {
@@ -540,9 +680,27 @@ impl<'a> RenderPass<'a> {
         }
     }
 
+    /// 会话级延迟叠加（**通用客人直绘的会话形态**，2026-10-24——"画到
+    /// 哪个目标"由会话对象表达；也是获取原生 RenderPass 的规范路径：
+    /// 闭包经 [`OverlayCtx::with_pass`] 拿 `&mut RenderPass` 直绘）。
+    /// 排程到会话目标的呈现时点——Screen 会话 = present 时本帧全部
+    /// batch pack 之后（恒在游戏内容之上）；Surface/MRT 会话 v1 不支持
+    /// （devlog 提示并忽略）。与 [`Screen::with_overlay`]（立即形态）
+    /// 同源执行体；泛型闭包零第三方感知（依赖单向红线）。
+    pub fn defer_overlay(&self, f: impl FnOnce(&mut OverlayCtx) + 'static) {
+        match &self.kind {
+            PassKind::Screen(s) => s.defer_overlay(f),
+            PassKind::Surface(_) | PassKind::Mrt { .. } => {
+                starfish_std::debug::devlog(
+                    "[session] defer_overlay：Surface/MRT 会话暂不支持客人叠加（v1 仅 Screen）",
+                );
+            }
+        }
+    }
+
     /// 裁剪矩形（会话内后续绘制生效；None = 解除）。
     /// MRT v1 无裁剪面（随 v2 自定义材质开放），静默忽略。
-    pub fn set_clip(&self, clip: Option<Rect>) {
+    pub fn set_clip(&self, clip: Option<IRect>) {
         match &self.kind {
             PassKind::Screen(s) => s.set_clip(clip),
             PassKind::Surface(s) => s.set_clip(clip),
@@ -562,12 +720,12 @@ impl<'a> RenderPass<'a> {
     // ── 固有形态（教程代码免 trait 导入）──
 
     /// 填充（= [`DrawTarget::fill`]）
-    pub fn fill(&self, color: impl Into<Color>) -> Rect {
+    pub fn fill(&self, color: impl Into<Color>) {
         DrawTarget::fill(self, color)
     }
 
     /// blit（= [`DrawTarget::blit`]）
-    pub fn blit(&self, src: &Surface, dest: impl Into<Coord>) -> Rect {
+    pub fn blit(&self, src: &Surface, dest: impl Into<Coord>) {
         DrawTarget::blit(self, src, dest)
     }
 }
@@ -579,7 +737,7 @@ impl Drop for RenderPass<'_> {
 }
 
 impl DrawTarget for RenderPass<'_> {
-    fn fill(&self, color: impl Into<Color>) -> Rect {
+    fn fill(&self, color: impl Into<Color>) {
         match &self.kind {
             PassKind::Screen(s) => s.fill(color),
             PassKind::Surface(s) => s.fill(color),
@@ -589,11 +747,10 @@ impl DrawTarget for RenderPass<'_> {
                 // 自动 flush 二次提交，覆盖 MRT pass 输出，批次十五实测）
                 let (w, h) = (self.size().0 as f32, self.size().1 as f32);
                 self.with_batch(|b| b.push_quad(0.0, 0.0, w, h, rgba(color), None));
-                Rect::new(0, 0, self.size().0 as i32, self.size().1 as i32)
             }
         }
     }
-    fn blit(&self, src: &Surface, dest: impl Into<Coord>) -> Rect {
+    fn blit(&self, src: &Surface, dest: impl Into<Coord>) {
         let d: Coord = dest.into();
         match &self.kind {
             PassKind::Screen(s) => s.blit(src, d),
@@ -604,7 +761,6 @@ impl DrawTarget for RenderPass<'_> {
                 self.with_batch(|b| {
                     b.push_quad(d.0 as f32, d.1 as f32, sw, sh, src.blit_tint(), Some(&src.texture));
                 });
-                Rect::new(d.0, d.1, sw as i32, sh as i32)
             }
         }
     }
@@ -662,7 +818,7 @@ pub struct Surface {
     batch: RefCell<Batch>,
     camera: RefCell<CameraRig>,
     /// 裁剪区（`set_clip`；None = 不裁剪）
-    clip: Cell<Option<Rect>>,
+    clip: Cell<Option<IRect>>,
     /// 表面级 alpha（`set_alpha`；255 = 不透明。blit 时乘进顶点色
     /// alpha——着色器纹理×顶点色按分量相乘，pygame blit 语义）
     alpha: Cell<u8>,
@@ -791,12 +947,12 @@ impl Surface {
     }
 
     /// 裁剪区（scissor；作用于本面全部绘制，None = 不裁剪）
-    pub fn set_clip(&self, clip: Option<Rect>) {
+    pub fn set_clip(&self, clip: Option<IRect>) {
         self.clip.set(clip);
     }
 
     /// 当前裁剪区
-    pub fn get_clip(&self) -> Option<Rect> {
+    pub fn get_clip(&self) -> Option<IRect> {
         self.clip.get()
     }
 
@@ -852,12 +1008,12 @@ impl Surface {
     // ── 固有形态（教程代码免 trait 导入）──
 
     // /// 填充（= [`DrawTarget::fill`]）
-    // pub fn fill(&self, color: impl Into<Color>) -> Rect {
+    // pub fn fill(&self, color: impl Into<Color>) {
     //     DrawTarget::fill(self, color)
     // }
 
     // /// blit（= [`DrawTarget::blit`]）
-    // pub fn blit(&self, src: &Surface, dest: impl Into<Coord>) -> Rect {
+    // pub fn blit(&self, src: &Surface, dest: impl Into<Coord>) {
     //     DrawTarget::blit(self, src, dest)
     // }
 
@@ -873,13 +1029,12 @@ impl Surface {
 }
 
 impl DrawTarget for Surface {
-    fn fill(&self, color: impl Into<Color>) -> Rect {
+    fn fill(&self, color: impl Into<Color>) {
         let (w, h) = self.size32();
         self.with_batch(|b| b.push_quad(0.0, 0.0, w, h, rgba(color), None));
-        Rect::new(0, 0, self.size.0 as i32, self.size.1 as i32)
     }
 
-    fn blit(&self, src: &Surface, dest: impl Into<Coord>) -> Rect {
+    fn blit(&self, src: &Surface, dest: impl Into<Coord>) {
         self.assert_not_self(src);
         let (x, y) = dest.into();
         let (sw, sh) = src.size32();
@@ -887,7 +1042,6 @@ impl DrawTarget for Surface {
         self.with_batch(|b| {
             b.push_quad(x as f32, y as f32, sw, sh, src.blit_tint(), Some(&src.texture));
         });
-        Rect::new(x, y, sw as i32, sh as i32)
     }
 
     fn size(&self) -> (u32, u32) {

@@ -193,6 +193,20 @@ impl<'a> RenderPass<'a> {
     }
 
 
+
+    pub fn into_inner(self)->wgpu::RenderPass<'a>{
+        self.inner
+    }
+
+    pub fn inner(&self)->&wgpu::RenderPass<'a>{
+        &self.inner
+    }
+
+    pub fn inner_mut(&mut self)->&mut wgpu::RenderPass<'a>{
+        &mut self.inner
+    }
+
+    
     /// 结束渲染通道。
     ///
     /// **按值消费 `self` 是刻意设计**（为 Python 绑定的 with 语法预留

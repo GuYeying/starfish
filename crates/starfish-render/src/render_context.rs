@@ -3,18 +3,15 @@ use std::sync::Arc;
 
 
 // ==============================================
-// 渲染器：管理Surface、设备、队列、管线、配置
+// 渲染上下文：instance/adapter/device/queue（设备族，进程一份）
 // ==============================================
-
+// 多窗口形态（2026-10-23 定稿）：上下文不持有表面——表面（RenderSurface）
+// 每窗一份、共享本上下文（见 `RenderEntry::new_context` → `new_surface`）。
 
 pub struct RenderContext {
     //以后提供非常原始的接口能力！！！！！
     instance: wgpu::Instance,
     adapter: wgpu::Adapter,
-    /// 渲染表面（对应窗口）。**Option = 设备/表面生命周期解绑**（wgpu 本形
-    /// 初始化序）：设备资源（纹理等）可在窗口存在前创建（[`Self::new_headless`]），
-    /// 表面由 `RenderEntry::surface_from_context` 后挂。
-    surface: Option<Arc<wgpu::Surface<'static>>>,
     device: Arc<wgpu::Device>,                // GPU逻辑设备（核心）
     queue: Arc<wgpu::Queue>,                  // GPU命令队列
 
@@ -27,10 +24,13 @@ pub struct RenderContext {
 }
 
 impl RenderContext{
+    /// 无窗口独立上下文：instance/adapter/device/queue 就位，表面按窗口
+    /// 另建（`RenderEntry::new_surface`）——纹理/采样器/bind group 等设备
+    /// 资源即刻可建（与格式无关）；**管线须以真实表面格式**的 access 构建
+    /// （颜色目标格式随表面）。
     pub(crate) fn new(
         instance: wgpu::Instance,
         adapter: wgpu::Adapter,
-        surface: &Arc<wgpu::Surface<'static>>,          // 渲染表面（对应窗口）
         device: &Arc<wgpu::Device>,                // GPU逻辑设备（核心）
         queue: &Arc<wgpu::Queue>,                  // GPU命令队列
         features: wgpu::Features,                  // 掩码后实际获得的能力位
@@ -38,48 +38,25 @@ impl RenderContext{
         adapter_info: wgpu::AdapterInfo,           // 适配器信息
     )->Self{
         Self {
-            instance:instance,
-            adapter,
-            surface:Some(surface.clone()),
-            device:device.clone(),
-            queue:queue.clone(),
-            features,
-            limits,
-            adapter_info,
-        }
-
-    }
-
-    /// 无窗口独立上下文（设备先行形态）：instance/adapter/device/queue 就位，
-    /// 表面留空——纹理/采样器/bind group 等设备资源即刻可建（与格式无关），
-    /// 窗口就位后经 `RenderEntry::surface_from_context` 挂表面。
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new_headless(
-        instance: wgpu::Instance,
-        adapter: wgpu::Adapter,
-        device: Arc<wgpu::Device>,
-        queue: Arc<wgpu::Queue>,
-        features: wgpu::Features,
-        limits: wgpu::Limits,
-        adapter_info: wgpu::AdapterInfo,
-    ) -> Self {
-        Self {
             instance,
             adapter,
-            surface: None,
-            device,
-            queue,
+            device: device.clone(),
+            queue: queue.clone(),
             features,
             limits,
             adapter_info,
         }
+
     }
 
     /// 独立资源访问层（本 context 的 device/queue + 指定默认格式）。
     ///
-    /// 设备先行形态用：窗口未挂时以**占位格式**构造（bind group/纹理/采样器
-    /// 与格式无关，照常创建）；**管线必须以真实表面格式**的 access 构建
-    /// （颜色目标格式随表面），表面挂载后由表面格式重建。
+    /// 多窗口共享约定：各窗口 [`crate::settings::SurfaceSettings`] 一致
+    /// （默认即一致）时，一份 access 全窗口共享；颜色格式/MSAA 不同的
+    /// 窗口以本方法按新格式另建。设备先行形态用：窗口未挂时以**占位格式**
+    /// 构造（bind group/纹理/采样器与格式无关，照常创建）；**管线必须以
+    /// 真实表面格式**的 access 构建（颜色目标格式随表面），表面挂载后由
+    /// 表面格式重建。
     pub fn resource_access(
         &self,
         default_color_format: wgpu::TextureFormat,

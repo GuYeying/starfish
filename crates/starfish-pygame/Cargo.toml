@@ -15,7 +15,7 @@ starfish-io = { workspace = true }
 starfish-net = { workspace = true }
 starfish-dialog = { workspace = true }
 starfish-gamepad = { workspace = true }
-starfish-render = { workspace = true }
+starfish-render = { workspace = true, features = ["we"] }
 starfish-gfx = { workspace = true }
 starfish-font = { workspace = true }
 starfish-audio = { workspace = true }

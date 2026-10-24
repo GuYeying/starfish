@@ -7,8 +7,8 @@
 //! ——Rust 形态 = **池化 Group + 世代 id 句柄**，用户在自己的循环里
 //! tick/查询，绘制经会话批量入 batch（按 z,y 排序）。
 //!
-//! 碰撞不内置信号：`rect(id)` / `mask::Mask` 组合由用户判断
-//! （分层：sprite 管组织，Rect/Mask 管判定）。
+//! 碰撞不内置信号：`/ `mask::Mask` 组合由用户判断
+//! （分层：sprite 管组织，Mask 管判定）。
 
 use crate::render::{Texture, DrawTarget, Surface};
 

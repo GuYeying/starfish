@@ -91,23 +91,38 @@ pub(crate) fn release(key: KeyCode) {
     PRESSED.with(|s| s.borrow_mut().remove(&key));
 }
 
+/// 引擎修饰键 → KMOD 位集（`Event::KeyDown.modifiers` 携带、
+/// `key.get_mods()` 同一口径；事件逐条消费者如 egui 重建输入用）
+pub fn mods_to_bits(m: Modifiers) -> u32 {
+    let mut v = 0;
+    if m.shift {
+        v |= KMOD_SHIFT;
+    }
+    if m.ctrl {
+        v |= KMOD_CTRL;
+    }
+    if m.alt {
+        v |= KMOD_ALT;
+    }
+    if m.meta {
+        v |= KMOD_META;
+    }
+    v
+}
+
+/// KMOD 位集 → 引擎修饰键（`e.mod` → 事件重建的反向换算——绑定层
+/// 逐条喂 egui 等完整词汇消费者用）
+pub fn bits_to_mods(bits: u32) -> Modifiers {
+    Modifiers {
+        shift: bits & KMOD_SHIFT != 0,
+        ctrl: bits & KMOD_CTRL != 0,
+        alt: bits & KMOD_ALT != 0,
+        meta: bits & KMOD_META != 0,
+    }
+}
+
 pub(crate) fn set_mods(m: Modifiers) {
-    MODS.with(|s| {
-        let mut v = 0;
-        if m.shift {
-            v |= KMOD_SHIFT;
-        }
-        if m.ctrl {
-            v |= KMOD_CTRL;
-        }
-        if m.alt {
-            v |= KMOD_ALT;
-        }
-        if m.meta {
-            v |= KMOD_META;
-        }
-        s.set(v);
-    });
+    MODS.with(|s| s.set(mods_to_bits(m)));
 }
 
 pub(crate) fn set_focused(v: bool) {

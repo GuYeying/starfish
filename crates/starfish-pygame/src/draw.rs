@@ -1,18 +1,21 @@
 //! pygame.draw 对应物（契约 §七：接受任何绘制终点；即时语义、batch 执行）
 //!
-//! 签名 = `fn(t: &impl DrawTarget, color, …, width: u32) -> Rect`——
-//! `screen`（交换链背板）与 `Surface`（纹理背板）同一签名，教程形态
-//! 保真（`draw.rect(screen, [0,200,90], pos, 0)`）。
+//! 签名 = `fn(t: &impl DrawTarget, color, …, width: u32)`——**无返回值**
+//! （GPU 全帧 present 无脏矩形概念；pygame 的"受影响 Rect"返回随 Rect
+//! 类型一并退役——碰撞/触发器归物理引擎）。`screen`（交换链背板）与
+//! `Surface`（纹理背板）同一签名，教程形态保真
+//! （`draw.rect(screen, [0,200,90], (10, 10, 60, 40), 0)`）。
 //!
 //! 执行 = 图形转图元几何（复用 `base::gfx::geometry::shape2d` 家底）→
 //! 目标 batch → flip/flush 统一提交。全路径零 CPU 逐像素。
 //!
-//! ⚠️ v1 简化（P4 优化位）：`width > 0` 的描边一律 **1px**（LineList）；
-//! pygame 的粗描边（width 2+）暂不做。
+//! ⚠️ v1 简化（P4 优化位）：**线族**（line/lines/arc）的 width > 0 描边
+//! 一律 1px（LineList）；`rect` 的粗描边是四条实心边带（真 pygame 厚度
+//! 向内语义）；pygame 其余形状的粗描边暂不做。
 
 use starfish_gfx::geometry::shape2d;
-use crate::render::{Batch, DrawTarget, GeometryKind};
-use crate::{Color, Rect};
+use crate::render::{Batch, DrawTarget, GeometryKind, IRect};
+use crate::Color;
 
 fn rgba(c: impl Into<Color>) -> [f32; 4] {
     let (r, g, b, a) = c.into().normalize();
@@ -24,13 +27,13 @@ fn line_outline(t: &impl DrawTarget, color: [f32; 4], g: &starfish_gfx::geometry
 }
 
 /// 矩形（width=0 填充，>0 描边）——契约 §七 正典：
-/// `draw.rect(screen, [0, 200, 90], pos, 0)`
+/// `draw.rect(screen, [0, 200, 90], (10, 10, 60, 40), 0)`
 ///
 /// 描边 width>1 = 四条实心边带（真粗边；1px 细边走线流）。
-pub fn rect(t: &impl DrawTarget, color: impl Into<Color>, r: Rect, width: u32) -> Rect {
+pub fn rect(t: &impl DrawTarget, color: impl Into<Color>, r: IRect, width: u32) {
     let c = rgba(color);
-    let (x, y) = (r.left as f32, r.top as f32);
-    let (w, h) = (r.width as f32, r.height as f32);
+    let (x, y) = (r[0] as f32, r[1] as f32);
+    let (w, h) = (r[2] as f32, r[3] as f32);
     if width == 0 {
         t.with_batch(|b| b.push_quad(x, y, w, h, c, None));
     } else if width == 1 {
@@ -47,23 +50,22 @@ pub fn rect(t: &impl DrawTarget, color: impl Into<Color>, r: Rect, width: u32) -
             b.push_quad(x + w - bw, y + bh, bw, h - 2.0 * bh, c, None); // 右
         });
     }
-    r
 }
 
-/// 椭圆弧（对齐 pygame：**角度为弧度**；0 = +x 方向，向正角方向扫到
-/// stop；width>1 恒 1px——v1 描边简化）
+/// 椭圆弧（内切于 rect；对齐 pygame：**角度为弧度**；0 = +x 方向，向正角
+/// 方向扫到 stop；width 恒 1px——v1 描边简化）
 pub fn arc(
     t: &impl DrawTarget,
     color: impl Into<Color>,
-    r: Rect,
+    r: IRect,
     start_angle: f32,
     stop_angle: f32,
     width: u32,
-) -> Rect {
+) {
     let _ = width; // v1 恒 1px
     let c = rgba(color);
-    let (x, y) = (r.left as f32, r.top as f32);
-    let (w, h) = (r.width as f32, r.height as f32);
+    let (x, y) = (r[0] as f32, r[1] as f32);
+    let (w, h) = (r[2] as f32, r[3] as f32);
     let (cx, cy) = (x + w / 2.0, y + h / 2.0);
     // 扫角分段（每 ~10° 一段，最少 4 段）
     let sweep = stop_angle - start_angle;
@@ -76,7 +78,6 @@ pub fn arc(
         .collect();
     let g = shape2d::polyline(&pts, false, c);
     line_outline(t, c, &g);
-    r
 }
 
 /// 线段（1px）
@@ -86,12 +87,11 @@ pub fn line(
     start: (i32, i32),
     end: (i32, i32),
     width: u32,
-) -> Rect {
+) {
     let _ = width; // v1 恒 1px
     let c = rgba(color);
     let g = shape2d::line([start.0 as f32, start.1 as f32].into(), [end.0 as f32, end.1 as f32].into(), c);
     line_outline(t, c, &g);
-    bounds(&[start, end])
 }
 
 /// 折线 / 多边形轮廓（closed 自动闭合；1px）
@@ -101,16 +101,15 @@ pub fn lines(
     closed: bool,
     points: &[(i32, i32)],
     width: u32,
-) -> Rect {
+) {
     let _ = width; // v1 恒 1px
     if points.len() < 2 {
-        return Rect::new(0, 0, 0, 0);
+        return;
     }
     let c = rgba(color);
     let pts: Vec<glam::Vec2> = points.iter().map(|p| [p.0 as f32, p.1 as f32].into()).collect();
     let g = shape2d::polyline(&pts, closed, c);
     line_outline(t, c, &g);
-    bounds(points)
 }
 
 /// 圆（width=0 填充扇形三角化，>0 描边；段数随半径自适应）
@@ -120,7 +119,7 @@ pub fn circle(
     center: (i32, i32),
     radius: u32,
     width: u32,
-) -> Rect {
+) {
     let c = rgba(color);
     let ctr = [center.0 as f32, center.1 as f32].into();
     let segments = (radius.max(12)).clamp(24, 64);
@@ -134,15 +133,13 @@ pub fn circle(
     } else {
         line_outline(t, c, &g);
     }
-    let r = radius as i32;
-    Rect::new(center.0 - r, center.1 - r, radius as i32 * 2, radius as i32 * 2)
 }
 
 /// 椭圆（内切于 rect；width=0 填充，>0 描边）
-pub fn ellipse(t: &impl DrawTarget, color: impl Into<Color>, r: Rect, width: u32) -> Rect {
+pub fn ellipse(t: &impl DrawTarget, color: impl Into<Color>, r: IRect, width: u32) {
     let c = rgba(color);
-    let (x, y) = (r.left as f32, r.top as f32);
-    let (w, h) = (r.width as f32, r.height as f32);
+    let (x, y) = (r[0] as f32, r[1] as f32);
+    let (w, h) = (r[2] as f32, r[3] as f32);
     let center = [x + w / 2.0, y + h / 2.0].into();
     let segments = 48;
     let g = if width == 0 {
@@ -162,13 +159,12 @@ pub fn ellipse(t: &impl DrawTarget, color: impl Into<Color>, r: Rect, width: u32
     } else {
         line_outline(t, c, &g);
     }
-    r
 }
 
 /// 任意简单多边形（耳切三角化，凹多边形支持；width=0 填充，>0 描边）
-pub fn polygon(t: &impl DrawTarget, color: impl Into<Color>, points: &[(i32, i32)], width: u32) -> Rect {
+pub fn polygon(t: &impl DrawTarget, color: impl Into<Color>, points: &[(i32, i32)], width: u32) {
     if points.len() < 3 {
-        return Rect::new(0, 0, 0, 0);
+        return;
     }
     let c = rgba(color);
     let pts: Vec<glam::Vec2> = points.iter().map(|p| [p.0 as f32, p.1 as f32].into()).collect();
@@ -182,17 +178,4 @@ pub fn polygon(t: &impl DrawTarget, color: impl Into<Color>, points: &[(i32, i32
     } else {
         line_outline(t, c, &g);
     }
-    bounds(points)
-}
-
-/// 点集包围盒（pygame draw.* 返回受影响 Rect）
-fn bounds(points: &[(i32, i32)]) -> Rect {
-    let (mut x0, mut y0, mut x1, mut y1) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
-    for (x, y) in points {
-        x0 = x0.min(*x);
-        y0 = y0.min(*y);
-        x1 = x1.max(*x);
-        y1 = y1.max(*y);
-    }
-    Rect::new(x0, y0, x1 - x0, y1 - y0)
 }

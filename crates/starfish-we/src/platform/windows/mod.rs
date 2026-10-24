@@ -898,6 +898,32 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 }
                 0
             }
+            // Client-area cursor reset (2026-10-24 fix): the window class
+            // registers hCursor = NULL, so DefWindowProc's HTCLIENT branch
+            // (`SetCursor(class cursor)`) is a no-op — after a hover over
+            // the non-client border (resize cursors set by the system),
+            // moving into the client area keeps the stale resize cursor.
+            // Explicitly restore the standard arrow for HTCLIENT; every
+            // other hit test falls back to DefWindowProc so border resize
+            // cursors keep their system semantics. (Cursor hiding via
+            // `set_cursor_visible`/ShowCursor is display-level and wins
+            // over SetCursor — no interaction.)
+            // 客户区光标显式重置（2026-10-24 修复）：窗口类注册 hCursor =
+            // NULL，DefWindowProc 的 HTCLIENT 分支（SetCursor(类光标)）
+            // 是空操作——悬停边框（系统设缩放光标）后移入客户区会滞留
+            // 缩放光标。HTCLIENT 显式恢复标准箭头；其余命中测试回落
+            // DefWindowProc（边框缩放光标保持系统语义）。（经
+            // `set_cursor_visible`/ShowCursor 的光标隐藏是显示层计数，
+            // 优先于 SetCursor——互不干扰。）
+            wm::WM_SETCURSOR => {
+                if (lparam as u32) & 0xFFFF == wm::HTCLIENT {
+                    let arrow = wm::LoadCursorW(ptr::null_mut(), wm::IDC_ARROW);
+                    wm::SetCursor(arrow);
+                    1 // TRUE：已处理
+                } else {
+                    wm::DefWindowProcW(hwnd, msg, wparam, lparam)
+                }
+            }
             _ => wm::DefWindowProcW(hwnd, msg, wparam, lparam),
         }
     }

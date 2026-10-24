@@ -1,5 +1,6 @@
 # ── 构建产物 ──
 /target
+/examples/target
 /examples/web
 /examples/jniLibs
 
@@ -13,3 +14,5 @@ _sig_io_tmp.bin
 # ── 系统文件 ──
 .DS_Store
 Thumbs.db
+/crates/demos/target
+/crates/demos/jniLibs
