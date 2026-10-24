@@ -12,8 +12,10 @@ pub enum WindowError {
     /// 平台 API 调用失败，附带底层错误描述。
     OsError(String),
     /// A [`Window`](crate::Window) is already alive in this process
-    /// (single-window invariant).
-    /// 进程内已存在一个存活的 [`Window`](crate::Window)（单窗口约束）。
+    /// (single-window invariant; never produced with the `multi-window`
+    /// feature).
+    /// 进程内已存在一个存活的 [`Window`](crate::Window)（单窗口约束；
+    /// `multi-window` feature 下不会产生）。
     AlreadyExists,
     /// The backend for this platform is not implemented yet (stub).
     /// 该平台的后端尚未实现（占位）。

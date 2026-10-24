@@ -546,6 +546,17 @@ impl WindowInner {
 
     pub(crate) fn set_keyboard_grabbed(&self, _grab: bool) {}
 
+    pub(crate) fn set_text_input_visible(&self, _visible: bool) -> bool {
+        // 桌面/Web/Android：文本随按键事件自动送达，无软键盘可控显隐。
+        // Desktop/Web/Android: text arrives with the key events; no
+        // controllable soft keyboard.
+        false
+    }
+
+    pub(crate) fn is_text_input_visible(&self) -> bool {
+        false
+    }
+
     pub(crate) fn set_position(&self, x: i32, y: i32) {
         // Physical top-left → points bottom-left: y flips around the
         // screen height.

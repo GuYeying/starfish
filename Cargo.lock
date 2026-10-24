@@ -735,6 +735,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c87e182de0887fd5361989c677c4e8f5000cd9491d6d563161a8f3a5519fc7f"
 
 [[package]]
+name = "demos"
+version = "0.9.50"
+dependencies = [
+ "android_logger",
+ "bytemuck",
+ "log",
+ "starfish-gamepad",
+ "starfish-gfx",
+ "starfish-pygame",
+ "starfish-render",
+ "starfish-std",
+ "starfish-time",
+ "starfish-we",
+ "wasm-bindgen",
+ "wgpu",
+]
+
+[[package]]
 name = "dirs-sys"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -904,24 +922,6 @@ checksum = "8be9f3dfaaffdae2972880079a491a1a8bb7cbed0b8dd7a347f668b4150a3b93"
 dependencies = [
  "event-listener",
  "pin-project-lite",
-]
-
-[[package]]
-name = "examples"
-version = "0.9.50"
-dependencies = [
- "android_logger",
- "bytemuck",
- "log",
- "starfish-gamepad",
- "starfish-gfx",
- "starfish-pygame",
- "starfish-render",
- "starfish-std",
- "starfish-time",
- "starfish-we",
- "wasm-bindgen",
- "wgpu",
 ]
 
 [[package]]
@@ -3416,9 +3416,11 @@ dependencies = [
 name = "starfish-dialog"
 version = "0.9.50"
 dependencies = [
+ "jni 0.21.1",
  "js-sys",
  "log",
  "rfd 0.15.4",
+ "robius-android-env",
  "robius-file-picker",
  "starfish-permission",
  "wasm-bindgen",
@@ -3459,10 +3461,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "starfish-gui"
-version = "0.9.50"
-
-[[package]]
 name = "starfish-io"
 version = "0.9.50"
 dependencies = [
@@ -3496,10 +3494,6 @@ dependencies = [
  "wasm-bindgen-futures",
  "web-sys",
 ]
-
-[[package]]
-name = "starfish-physics"
-version = "0.9.50"
 
 [[package]]
 name = "starfish-pygame"
@@ -3560,10 +3554,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "starfish-tilemap"
-version = "0.9.50"
-
-[[package]]
 name = "starfish-time"
 version = "0.9.50"
 dependencies = [
@@ -3599,10 +3589,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "starfish-voxel"
-version = "0.9.50"
-
-[[package]]
 name = "starfish-we"
 version = "0.9.50"
 dependencies = [
@@ -3610,6 +3596,7 @@ dependencies = [
  "js-sys",
  "objc2",
  "objc2-app-kit",
+ "objc2-core-foundation",
  "objc2-foundation",
  "objc2-quartz-core",
  "objc2-ui-kit",

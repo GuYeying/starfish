@@ -1,6 +1,9 @@
-//! starfish-we: a cross-platform **single-window + events** crate
-//! (SDL-style poll model).
-//! starfish-we：跨平台**单窗口 + 事件** crate（SDL 风格 poll 模型）。
+//! starfish-we: a cross-platform **window + events** crate (SDL-style poll
+//! model). Single-window by default; the `multi-window` feature lifts the
+//! invariant on whitelisted platforms (compile-time gate, see below).
+//! starfish-we：跨平台**窗口 + 事件** crate（SDL 风格 poll 模型）。
+//! 默认单窗口；`multi-window` feature 在白名单平台解除单窗约束
+//! （编译期把关，见下）。
 //!
 //! Built to replace winit where the inversion of control hurts: the caller
 //! (e.g. a scripting-language interpreter) owns the main loop and pulls
@@ -47,8 +50,49 @@
 //! interface while the public API stays platform-independent.
 //! 架构：[`platform`] 下各目标平台一个平行模块（横向 cfg），
 //! 各自实现同一套 `WindowInner` 接口，公共 API 平台无关。
+//!
+//! # Multi-window / 多窗口（feature `multi-window`）
+//!
+//! Opens the single-window invariant: any number of `Window`s, each with
+//! its own event queue. The event topology differs from SDL on purpose —
+//! SDL keeps one global queue + `windowID` routing; here an event belongs
+//! to the `Window` it is polled from (no ID indirection, type-safe).
+//! Pump discipline: poll **every** window every frame — an un-polled
+//! window's events stay queued in its own pending buffer (never lost,
+//! but its UI stalls). Keyboard goes to the focused window (per-platform
+//! focus model, same as SDL).
+//! 解除单窗约束：任意个 `Window`，每窗独立事件队列。事件拓扑有意区别于
+//! SDL——SDL 单一全局队列 + `windowID` 路由；本库事件归属**被 poll 的
+//! `Window`**（无 ID 反查，类型安全）。泵纪律：**每帧轮询每个窗口**
+//! （漏 poll 的窗口事件积压在自己 pending 里——不丢失，但该窗界面停摆）。
+//! 键盘进焦点窗（各平台焦点模型，SDL 同款）。
+//!
+//! ```ignore
+//! for w in &windows {
+//!     while let Some(event) = w.poll_event() { /* 归属 = w */ }
+//! }
+//! ```
+//!
+//! Platform support is enforced at compile time: behavioural differences
+//! are too large for a silent runtime degradation (single-Activity /
+//! single-canvas semantics), so an unsupported target fails the build via
+//! `compile_error!` below. Whitelist today: **Windows** (the Win32 message
+//! pump is naturally per-window). Light up Linux/macOS by extending the
+//! whitelist after per-platform verification.
+//! 平台支持编译期把关：行为差异过大（单 Activity / 单 canvas 语义），
+//! 不做运行期静默降级——白名单外直接编译失败（下方 `compile_error!`）。
+//! 当前白名单：**Windows**（Win32 消息泵天然 per-window）。
+//! Linux/macOS 逐平台实测通过后扩白名单即可。
 
 #![deny(missing_docs)]
+
+// 多窗口平台白名单（编译期把关；语义与扩展方式见上方模块文档
+// "Multi-window" 节）。新平台逐个实测通过后向白名单追加 target_os。
+#[cfg(all(feature = "multi-window", not(target_os = "windows")))]
+compile_error!(
+    "starfish-we: feature \"multi-window\" 不支持当前目标平台（白名单：windows）。\
+     多窗口行为平台差异过大，引擎不做运行期降级——请关闭该 feature 或更换目标平台。"
+);
 
 mod error;
 mod event;
@@ -88,10 +132,12 @@ pub use platform::android::android_init;
 pub use android_activity::AndroidApp;
 
 /// (iOS builds only) Test-only event injection: feeds a synthetic event
-/// into the same buffer the OS path uses. Enables deterministic event
-/// testing on the simulator (real touch delivery is a follow-up).
-/// （仅 iOS 构建）测试用事件注入：将合成事件写入与 OS 路径相同的缓冲，
-/// 支撑模拟器上的确定性事件测试（真实触摸投递属后续项）。
+/// into the same buffer the OS path uses. The OS delivery (touches /
+/// keyboard) is implemented; this stays for deterministic event testing
+/// on the simulator.
+/// （仅 iOS 构建）测试用事件注入：将合成事件写入与 OS 路径相同的缓冲。
+/// OS 投递（触摸 / 键盘）已实现；本通道保留用于模拟器上的确定性事件
+/// 测试。
 #[cfg(target_os = "ios")]
 #[doc(hidden)]
 pub use platform::ios::inject_test_event as ios_inject_test_event;

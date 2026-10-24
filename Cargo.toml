@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/*", "examples"]
+members = ["crates/*"]
 
 [workspace.package]
 version = "0.9.50"
@@ -23,10 +23,13 @@ starfish-font = { path = "crates/starfish-font" }
 starfish-audio = { path = "crates/starfish-audio" }
 starfish-video = { path = "crates/starfish-video" }
 starfish-pygame = { path = "crates/starfish-pygame" }
-starfish-gui = { path = "crates/starfish-gui" }
-starfish-physics = { path = "crates/starfish-physics" }
-starfish-tilemap = { path = "crates/starfish-tilemap" }
-starfish-voxel = { path = "crates/starfish-voxel" }
+
+
+# egui-sfwe = { path = "crates/egui-sfwe" }
+# rapier-sf = {}
+# tiled-sf = {}
+# voxelis-sf = {}
+
 
 # Android 示例 log→logcat 桥（examples dev-dep）
 android_logger = "0.15"
@@ -99,10 +102,13 @@ objc2-app-kit = { version = "0.3", features = [
 ] }
 objc2-ui-kit = { version = "0.3", features = [
     "UIApplication", "UIWindow", "UIView", "UIColor", "UIScreen", "UIResponder",
+    # iOS 输入投递（platform/ios）：触摸、软键盘拦截字段、硬件按键
+    "UITouch", "UIEvent", "UITextInputTraits", "UITextField",
+    "UIKey", "UIKeyConstants", "UICommand", "UIPress", "UIPressesEvent",
     "objc2-quartz-core",
 ] }
 objc2-quartz-core = "0.3"
-objc2-foundation = { version = "0.3", features = ["NSString", "NSURL", "NSRunLoop", "NSProcessInfo"] }
+objc2-foundation = { version = "0.3", features = ["NSString", "NSURL", "NSRunLoop", "NSProcessInfo", "NSSet"] }
 objc2-av-foundation = { version = "0.3", features = [
     "AVAsset", "AVAssetTrack", "AVAssetReader", "AVAssetReaderOutput", "AVMediaFormat",
     "objc2-core-media",

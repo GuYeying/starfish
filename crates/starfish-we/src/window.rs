@@ -30,10 +30,15 @@ struct Inbox {
 /// - Events: pull one at a time with [`poll_event`](Window::poll_event)
 ///   (non-blocking) inside your loop.
 ///   事件：循环内调用 [`poll_event`](Window::poll_event) 逐个拉取（非阻塞）。
-/// - Invariant: at most one `Window` per process; a second `new` returns
-///   [`WindowError::AlreadyExists`].
-///   约束：同一时刻最多存在一个 `Window`，第二次 `new` 返回
-///   [`WindowError::AlreadyExists`]。
+/// - Single-window default: at most one `Window` per process; a second
+///   `new` returns [`WindowError::AlreadyExists`]. With the `multi-window`
+///   feature (platform whitelist gate — see the crate docs) this invariant
+///   is lifted: each window keeps its own event queue — poll every window
+///   every frame.
+///   约束：默认单窗口——同一时刻最多存在一个 `Window`，第二次 `new` 返回
+///   [`WindowError::AlreadyExists`]。开启 `multi-window` feature（平台
+///   白名单编译期把关，见 crate 文档）后解除：每窗独立事件队列——每帧
+///   须轮询每个窗口。
 /// - Thread affinity: the window is bound to its creating thread (Win32
 ///   message queue / AppKit main-thread requirement). All methods
 ///   (including `poll_event`) must be called on that thread; cross-thread
@@ -108,6 +113,10 @@ impl Window {
     }
 
     fn build(mut options: WindowOptions) -> Result<Self, WindowError> {
+        // 单窗口不变量（默认形态）：全局占位 swap 检查。multi-window feature
+        // 下窗口可多开（平台白名单经 lib.rs 的 compile_error 把关），检查
+        // 跳过、占位恒 false（Drop 处的写回为无副作用空转）。
+        #[cfg(not(feature = "multi-window"))]
         if WINDOW_ALIVE.swap(true, Ordering::SeqCst) {
             return Err(WindowError::AlreadyExists);
         }
@@ -382,6 +391,26 @@ impl Window {
         self.inner.set_keyboard_grabbed(grab)
     }
 
+    /// Shows / hides the soft (on-screen) keyboard — meaningful on mobile
+    /// (iOS: the hidden field becomes / resigns first responder); a no-op
+    /// on desktop, where text arrives with the key events automatically.
+    /// Final text is delivered as [`Event::TextInput`] either way.
+    /// 显示 / 隐藏软键盘——移动端有意义（iOS：隐藏字段成为 / 辞去第一
+    /// 响应者）；桌面端恒 no-op（文本随按键事件自动送达）。两种路径下
+    /// 最终文本都经 [`Event::TextInput`] 送达。
+    pub fn set_text_input_visible(&self, visible: bool) -> bool {
+        self.inner.set_text_input_visible(visible)
+    }
+
+    /// Whether the soft keyboard was last requested to be visible (the
+    /// request value, not the actual system state — the system may hide
+    /// the keyboard on its own).
+    /// 软键盘最近一次请求的显隐（请求值而非系统实际状态——系统可能自行
+    /// 隐藏键盘）。
+    pub fn is_text_input_visible(&self) -> bool {
+        self.inner.is_text_input_visible()
+    }
+
     /// Sets the top-left corner of the window frame (screen coordinates,
     /// physical pixels).
     /// 设置窗口外框左上角位置（屏幕坐标，物理像素）。
@@ -649,9 +678,10 @@ impl WindowBuilder {
         self
     }
 
-    /// Creates the window. Subject to the single-window constraint (see
-    /// [`Window::new`]).
-    /// 创建窗口。受单窗口约束（见 [`Window::new`]）。
+    /// Creates the window. Subject to the single-window constraint unless
+    /// the `multi-window` feature is on (see [`Window::new`]).
+    /// 创建窗口。受单窗口约束（见 [`Window::new`]）；开启 `multi-window`
+    /// feature 后可多开。
     pub fn build(self) -> Result<Window, WindowError> {
         Window::build(self.options)
     }
