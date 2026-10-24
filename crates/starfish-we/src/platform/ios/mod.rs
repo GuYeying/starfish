@@ -15,6 +15,19 @@
 //! （走已弃用但可用的 `initWithFrame:` 路径），宿主循环每次 poll 时以
 //! 零超时 `runMode:beforeDate:` 泵一次主 runloop，保持系统机制运转。
 //!
+//! Input: a full-screen transparent `StarfishView` takes the touches
+//! (→ `Touch` events, with the primary finger synthesized into mouse
+//! events per SDL convention) and a hidden zero-sized `StarfishField`
+//! (a UITextField subclass) takes the soft keyboard (`insertText:` /
+//! `deleteBackward` → `TextInput` / Backspace key pair) and hardware key
+//! presses. Keyboard visibility is app-controlled via
+//! `Window::set_text_input_visible`.
+//! 输入：全屏透明 `StarfishView` 承接触摸（→ `Touch` 事件，主手指按 SDL
+//! 惯例合成鼠标）；隐藏零尺寸 `StarfishField`（UITextField 子类）承接
+//! 软键盘（`insertText:` / `deleteBackward` → `TextInput` / Backspace 键
+//! 对）与硬件按键。软键盘显隐由应用经 `Window::set_text_input_visible`
+//! 控制。
+//!
 //! Conventions:
 //! 约定：
 //! - iOS windows are inherently full-screen, borderless and
@@ -30,17 +43,20 @@
 //!   事件注入：`ios_inject_test_event`（crate 根，doc-hidden）将合成
 //!   事件写入与 OS 路径相同的缓冲——模拟器上的确定性事件测试通道。
 //!
-//! v0 boundaries (documented, follow-ups): no UIApplicationDelegate
-//! lifecycle (no `Suspended`/`Resumed` yet), real touch delivery requires
-//! a responder subclass (next step), windows use the deprecated
-//! initWithFrame path on purpose (simulator-verified).
-//! v0 边界（已记录，后续项）：尚无 UIApplicationDelegate 生命周期
-//! （`Suspended`/`Resumed` 未接入）、真实触摸投递需 responder 子类
-//! （下一步）、有意使用已弃用的 initWithFrame 路径（模拟器已验证）。
+//! v0 boundaries (documented, follow-ups): windows use the deprecated
+//! initWithFrame path on purpose (simulator-verified); IME composition
+//! (marked-text / candidate window) is not wired — the soft keyboard
+//! delivers final text only.
+//! v0 边界（已记录，后续项）：有意使用已弃用的 initWithFrame 路径
+//! （模拟器已验证）；IME 组合（marked text / 候选窗）未接入——软键盘
+//! 只给最终文本。
 
 pub(crate) mod entry;
+mod translate;
+mod view;
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use objc2::MainThreadMarker;
@@ -65,6 +81,13 @@ static PENDING: Mutex<VecDeque<Event>> = Mutex::new(VecDeque::new());
 /// 最近一次已知客户区尺寸（物理像素），创建时维护。
 static SIZE: Mutex<(u32, u32)> = Mutex::new((0, 0));
 
+/// Requested soft-keyboard visibility (`set_text_input_visible`); the
+/// system may still hide the keyboard on its own (hardware keyboard
+/// attached), this only tracks the request.
+/// 软键盘的请求显隐（`set_text_input_visible`）；系统仍可能自行隐藏
+/// （如外接键盘），这里只记录请求值。
+static TEXT_INPUT_VISIBLE: AtomicBool = AtomicBool::new(false);
+
 /// Pushes an event into the buffer (shared by the test hook).
 /// 将事件写入缓冲（测试钩子共用）。
 fn push_event(event: Event) {
@@ -76,10 +99,10 @@ fn push_event(event: Event) {
 
 /// Test-only event injection: feeds a synthetic event into the same buffer
 /// the OS path uses (the deterministic "simulated event send" on the
-/// simulator — real touch delivery requires a responder subclass, a
-/// follow-up).
+/// simulator; alongside the now-implemented OS delivery it stays useful
+/// for deterministic tests).
 /// 仅测试用事件注入：将合成事件写入与 OS 路径相同的缓冲——模拟器上的
-/// 确定性"模拟发送事件"通道（真实触摸投递需 responder 子类，属后续项）。
+/// 确定性"模拟发送事件"通道（OS 投递现已实现，本通道仍用于确定性测试）。
 pub fn inject_test_event(event: Event) {
     push_event(event);
 }
@@ -95,9 +118,19 @@ pub(crate) struct WindowInner {
     /// 保活 UIApplication 单例于窗口存活期内。
     _app: Retained<UIApplication>,
     window: Retained<UIWindow>,
+    /// The input view (root VC's view): touches land here; the keyboard
+    /// field is its subview.
+    /// 输入视图（root VC 的 view）：触摸落点；键盘字段是它的子视图。
+    input_view: Retained<view::StarfishView>,
+    /// The hidden keyboard field, kept retained for
+    /// `set_text_input_visible`.
+    /// 隐藏键盘字段，`set_text_input_visible` 需要它。
+    input_field: Retained<view::StarfishField>,
 }
 
 impl WindowInner {
+    // initWithFrame 弃用告警见下方注记（v0 有意沿用）。
+    #[allow(deprecated)]
     pub(crate) fn new(options: &WindowOptions) -> Result<Self, WindowError> {
         // The main-thread marker both gates this call and lives in the
         // struct, enforcing affinity for every later call.
@@ -122,29 +155,36 @@ impl WindowInner {
         // 平台优先。
         let _ = options.size;
         let bounds = screen_bounds(mtm);
-        let window = unsafe {
-            // initWithFrame is deprecated in favor of init(windowScene:) but
-            // remains functional — including in the simulator (v0 choice,
-            // see module docs).
-            // initWithFrame 已弃用（推荐 init(windowScene:)）但仍可用——
-            // 模拟器内亦然（v0 选择，见模块文档）。
-            UIWindow::initWithFrame(mtm.alloc::<UIWindow>(), bounds)
-        };
+        // initWithFrame is deprecated in favor of init(windowScene:) but
+        // remains functional — including in the simulator (v0 choice,
+        // see module docs).
+        // initWithFrame 已弃用（推荐 init(windowScene:)）但仍可用——
+        // 模拟器内亦然（v0 选择，见模块文档）。
+        let window = UIWindow::initWithFrame(mtm.alloc::<UIWindow>(), bounds);
         // Per-pixel transparency ready (clear background); off by default.
         // 逐像素透明就绪（清澈背景色）；默认关闭。
         if options.transparent {
             window.setOpaque(false);
-            let clear = unsafe { UIColor::clearColor() };
+            let clear = UIColor::clearColor();
             window.setBackgroundColor(Some(&clear));
         }
 
         // UIKit asserts at the end of application launch that the key
         // window has a root view controller (NSInternalInconsistencyException
-        // otherwise). v0: a bare controller, no view hierarchy of its own.
+        // otherwise). The controller's view is our transparent input view:
+        // it takes the touches (and hosts the hidden keyboard field as a
+        // subview), while rendering keeps targeting `window.layer` (see
+        // `raw_handle`) — the view never draws.
         // UIKit 在应用启动结束时断言 key window 必须有 root view
-        // controller（否则抛 NSInternalInconsistencyException）。
-        // v0：裸控制器，自身无视图层级。
-        let root = unsafe { UIViewController::init(mtm.alloc::<UIViewController>()) };
+        // controller（否则抛 NSInternalInconsistencyException）。控制器的
+        // view 即我们的透明输入视图：承接触摸（并作为隐藏键盘字段的容器
+        // 子视图），渲染仍指向 `window.layer`（见 `raw_handle`）——视图
+        // 自身不绘制。
+        let root = UIViewController::init(mtm.alloc::<UIViewController>());
+        let input_view = view::StarfishView::new(mtm, bounds);
+        let input_field = view::StarfishField::new(mtm);
+        input_view.addSubview(&input_field);
+        root.setView(Some(&input_view));
         window.setRootViewController(Some(&root));
 
         // Physical size cache: bounds (points) × scale.
@@ -159,6 +199,8 @@ impl WindowInner {
             _mtm: mtm,
             _app: app,
             window,
+            input_view,
+            input_field,
         })
     }
 
@@ -188,11 +230,11 @@ impl WindowInner {
     }
 
     pub(crate) fn raw_handle(&self) -> RawWindowHandle {
-        // SAFETY: main thread (contract); the layer is owned by the view
-        // hierarchy, retained by the window.
-        // SAFETY: 主线程（契约）；layer 由视图层级持有，窗口保活。
+        // Main thread (contract); the layer is owned by the view hierarchy,
+        // retained by the window.
+        // 主线程（契约）；layer 由视图层级持有，窗口保活。
         let ui_view = Retained::as_ptr(&self.window) as *mut std::ffi::c_void;
-        let layer = unsafe { self.window.layer() };
+        let layer = self.window.layer();
         let layer_ptr = Retained::as_ptr(&layer) as *mut std::ffi::c_void;
         RawWindowHandle::UiKit {
             ui_view,
@@ -295,6 +337,20 @@ impl WindowInner {
 
     pub(crate) fn set_keyboard_grabbed(&self, _grab: bool) {}
 
+    /// Shows / hides the soft keyboard (the hidden field becomes /
+    /// resigns first responder). Returns whether the request was accepted
+    /// by UIKit (e.g. resigning when not first responder reports `false`).
+    /// 显示 / 隐藏软键盘（隐藏字段成为 / 辞去第一响应者）。返回 UIKit
+    /// 是否接受该请求（如未持焦点时辞去会报 `false`）。
+    pub(crate) fn set_text_input_visible(&self, visible: bool) -> bool {
+        TEXT_INPUT_VISIBLE.store(visible, Ordering::Relaxed);
+        self.input_field.set_visible(visible)
+    }
+
+    pub(crate) fn is_text_input_visible(&self) -> bool {
+        TEXT_INPUT_VISIBLE.load(Ordering::Relaxed)
+    }
+
     pub(crate) fn set_position(&self, _x: i32, _y: i32) {
         // Inherently screen-positioned.
         // 天然随屏。
@@ -319,9 +375,11 @@ impl WindowInner {
     }
 
     pub(crate) fn dpi_scale(&self) -> f32 {
-        // SAFETY: main thread (contract); UIScreen query.
-        // SAFETY: 主线程（契约）；UIScreen 查询。
-        unsafe { UIScreen::mainScreen(self._mtm) }.scale() as f32
+        // Main thread (contract); UIScreen query.
+        // 主线程（契约）；UIScreen 查询。
+        #[allow(deprecated)]
+        let scale = UIScreen::mainScreen(self._mtm).scale();
+        scale as f32
     }
 
     pub(crate) fn high_pixel_density(&self) -> bool {
@@ -349,16 +407,17 @@ impl Drop for WindowInner {
 /// Bounds of the main screen in points (for the window frame).
 /// 主屏 bounds（点），用于窗口 frame。
 fn screen_bounds(mtm: MainThreadMarker) -> CGRect {
-    // SAFETY: main thread (contract); UIScreen query.
-    // SAFETY: 主线程（契约）；UIScreen 查询。
-    unsafe { UIScreen::mainScreen(mtm).bounds() }
+    #[allow(deprecated)]
+    let bounds = UIScreen::mainScreen(mtm).bounds();
+    bounds
 }
 
 /// Physical size of the main screen (bounds × scale).
 /// 主屏物理尺寸（bounds × scale）。
 fn physical_size(mtm: MainThreadMarker) -> (u32, u32) {
     let bounds = screen_bounds(mtm);
-    let scale = unsafe { UIScreen::mainScreen(mtm) }.scale() as f64;
+    #[allow(deprecated)]
+    let scale = UIScreen::mainScreen(mtm).scale() as f64;
     (
         ((bounds.size.width * scale).round() as u32).max(1),
         ((bounds.size.height * scale).round() as u32).max(1),

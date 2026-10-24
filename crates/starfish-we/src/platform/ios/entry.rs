@@ -34,6 +34,7 @@ use objc2_foundation::{NSDictionary, NSString};
 use objc2_quartz_core::CADisplayLink;
 use objc2_ui_kit::{UIApplication, UIApplicationDelegate};
 
+use crate::event::Event;
 use crate::Window;
 
 /// The host tick, stored for the frame driver.
@@ -137,6 +138,21 @@ define_class!(
                     Bool::NO
                 }
             }
+        }
+
+        // 前后台切换 → `Suspended` / `Resumed`：进后台即渲染面失效
+        // （消费方停渲染，surface 在 `Resumed` 后重建）。
+        // Foreground/background transitions → `Suspended` / `Resumed`:
+        // backgrounded = the rendering surface is invalid (consumers stop
+        // rendering and rebuild the surface after `Resumed`).
+        #[unsafe(method(applicationDidEnterBackground:))]
+        unsafe fn did_enter_background(&self, _application: &UIApplication) {
+            super::push_event(Event::Suspended);
+        }
+
+        #[unsafe(method(applicationWillEnterForeground:))]
+        unsafe fn will_enter_foreground(&self, _application: &UIApplication) {
+            super::push_event(Event::Resumed);
         }
     }
 

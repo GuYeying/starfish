@@ -52,29 +52,17 @@ use crate::handle::RawWindowHandle;
 use crate::window::WindowOptions;
 
 thread_local! {
-    /// Single window (wasm is single-threaded): the live window's state.
     /// 单窗口（wasm 单线程）：存活窗口的状态。
     static STATE: RefCell<Option<Rc<WebState>>> = const { RefCell::new(None) };
-    /// The rAF redraw loop's self-reference handle; dropping it stops the
-    /// scheduling.
     /// rAF 重绘循环的自引用句柄；drop 即停止调度。
     static FRAME_LOOP: RefCell<Option<Closure<dyn FnMut()>>> = const { RefCell::new(None) };
-    /// The most recent `requestAnimationFrame` id (for cancellation on
-    /// window drop — an already-queued frame must not fire into a released
-    /// closure, or the browser throws "closure ... after being dropped").
-    /// 最近一次 `requestAnimationFrame` 的 id（窗口 drop 时取消——已排队
-    /// 的帧不得打进已释放的闭包，否则浏览器抛 "closure ... dropped"）。
+    /// 最近一次 rAF 的 id（窗口 drop 时取消——已排队帧不得打进已释放
+    /// 的闭包，否则浏览器抛 "closure ... dropped"）。
     static RAF_HANDLE: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
 }
 
-/// A DOM event listener that **detaches itself on drop**: the browser
-/// keeps the JS function reference alive independently, so releasing the
-/// Rust-side `Closure` without `removeEventListener` leaves a live
-/// listener pointing at freed state — every subsequent DOM event of that
-/// type throws "closure invoked recursively or after being dropped".
-/// DOM 事件监听器，**drop 时自动解除**：浏览器独立持有 JS 函数引用，
-/// 只释放 Rust 侧 `Closure` 而不移除监听，会让存活的监听指向已释放的
-/// 状态——此后该类型的每个 DOM 事件都抛
+/// DOM 事件监听器，**drop 时自动解除**——只释放 `Closure` 而不移除
+/// 监听的话，监听会指向已释放状态，此后每个同类 DOM 事件都抛
 /// "closure invoked recursively or after being dropped"。
 struct Listener {
     target: web_sys::EventTarget,
@@ -91,17 +79,13 @@ impl Drop for Listener {
     }
 }
 
-/// The context shared by DOM closures (canvas + event channel).
-/// Closures capture only this — never `WebState` — avoiding Rc cycles.
-/// DOM 闭包共享的上下文（画布 + 事件通道）。
-/// 闭包只捕获它，不捕获 `WebState`，避免 Rc 循环。
+/// DOM 闭包共享的上下文（画布 + 事件通道；只捕获它不捕获
+/// `WebState`——避免 Rc 循环）。
 #[derive(Clone)]
 struct Ctx {
     canvas: HtmlCanvasElement,
     shared: Rc<RefCell<Shared>>,
-    /// 上次同步时的 CSS 布尔矩形（布局去重键——rect 变 = 页面布局
-    /// 变化；纯 zoom（dpr 变、rect 不变）不动作：CSS/位图恒 = 逻辑
-    /// 尺寸，zoom 是纯视图变换，渲染零扰动）
+    /// 上次同步的 CSS rect（布局去重键；纯 zoom 不动作——渲染零扰动）
     last_css: Rc<std::cell::Cell<(f64, f64)>>,
 }
 
@@ -114,12 +98,8 @@ struct WebState {
     /// DOM (see [`Listener`]).
     /// 存活期内持有监听器；drop 即从 DOM 解除（见 [`Listener`]）。
     _listeners: Vec<Listener>,
-    /// Layout-level size watcher (`ResizeObserver`) — catches flex/grid
-    /// reflow that never fires a window `resize`. Disconnected on drop
-    /// (see [`ResizeWatch`]).
-    /// 布局级尺寸观察者（`ResizeObserver`）——捕捉不触发 window
-    /// `resize` 的 flex/grid 重排。drop 时 disconnect（见
-    /// [`ResizeWatch`]）。
+    /// 布局级尺寸观察者（`ResizeObserver`）——捕捉不经 window
+    /// `resize` 的 flex/grid 重排；drop 时 disconnect。
     _resize_observer: Option<ResizeWatch>,
 }
 
@@ -129,11 +109,7 @@ impl Drop for WebState {
     }
 }
 
-/// The `ResizeObserver` plus its kept-alive callback: the JS observer
-/// holds the function reference, so the Rust-side `Closure` must outlive
-/// it — dropping this struct disconnects first, then releases.
-/// `ResizeObserver` 与其保活回调的打包：JS 观察者持有函数引用，Rust 侧
-/// `Closure` 必须活得更久——drop 时先 disconnect 再释放。
+/// `ResizeObserver` + 保活回调打包：drop 先 disconnect 再释放。
 struct ResizeWatch {
     _callback: Closure<dyn FnMut(js_sys::Array, web_sys::ResizeObserver)>,
     observer: web_sys::ResizeObserver,
@@ -146,11 +122,8 @@ impl Drop for ResizeWatch {
 }
 
 struct Shared {
-    /// Events translated from DOM callbacks, awaiting dispatch.
     /// DOM 回调翻译出的待发事件。
     pending: VecDeque<Event>,
-    /// The redraw request set by rAF and consumed by poll (coalesced /
-    /// deduplicated).
     /// rAF 置位、poll 消费的重绘请求（合并去重）。
     redraw: bool,
 }
@@ -456,6 +429,17 @@ impl WindowInner {
     }
 
     pub(crate) fn set_keyboard_grabbed(&self, _grab: bool) {}
+
+    pub(crate) fn set_text_input_visible(&self, _visible: bool) -> bool {
+        // 桌面/Web/Android：文本随按键事件自动送达，无软键盘可控显隐。
+        // Desktop/Web/Android: text arrives with the key events; no
+        // controllable soft keyboard.
+        false
+    }
+
+    pub(crate) fn is_text_input_visible(&self) -> bool {
+        false
+    }
 
     pub(crate) fn set_position(&self, _x: i32, _y: i32) {
         Self::warn_once(

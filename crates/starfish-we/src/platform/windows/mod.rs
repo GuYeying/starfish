@@ -471,6 +471,17 @@ impl WindowInner {
     /// 键盘抓取：Win32 无窗口级等价（SetFocus 为线程内概念），恒 no-op。
     pub(crate) fn set_keyboard_grabbed(&self, _grab: bool) {}
 
+    pub(crate) fn set_text_input_visible(&self, _visible: bool) -> bool {
+        // 桌面/Web/Android：文本随按键事件自动送达，无软键盘可控显隐。
+        // Desktop/Web/Android: text arrives with the key events; no
+        // controllable soft keyboard.
+        false
+    }
+
+    pub(crate) fn is_text_input_visible(&self) -> bool {
+        false
+    }
+
     pub(crate) fn position(&self) -> (i32, i32) {
         // SAFETY: hwnd 有效；GetWindowRect = 外框左上（屏幕坐标）。
         unsafe {
