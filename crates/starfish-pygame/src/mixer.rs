@@ -119,13 +119,14 @@ impl Sound {
     }
 
     /// sndarray 桥：采样数据 → Sound
-    pub(crate) fn from_data(data: Arc<SoundData>) -> Self {
+    /// 从采样数据构造（绑定层 PySound 桥接用——engine Sound 包装）
+    pub fn from_data(data: Arc<SoundData>) -> Self {
         Self { data }
     }
 
-    /// 数据句柄（sndarray get_array 用）
-    pub(crate) fn data(&self) -> &Arc<SoundData> {
-        &self.data
+    /// 采样数据句柄（绑定层 PySound/桥接用）
+    pub fn data(&self) -> Arc<SoundData> {
+        self.data.clone()
     }
 
     /// get_length() -> float：时长（秒）
@@ -213,8 +214,8 @@ impl Channel {
     pub fn get_busy(&self) -> bool {
         with(|m| m.is_channel_busy(self.idx)).unwrap_or(false)
     }
-
     /// get_sound() -> Option<Sound>：通道当前音源
+
     pub fn get_sound(&self) -> Option<Sound> {
         with(|m| m.get_channel_sound(self.idx))
             .ok()

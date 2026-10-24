@@ -42,6 +42,15 @@ pub fn begin_screen() {
     SCREEN_SESSION.with(|s| *s.borrow_mut() = Some(pass));
 }
 
+/// 开启 Screen **深度会话**（`render_depth`：绘制走深度测试管线，深度
+/// 缓冲随 base 帧清屏清 1.0——3D 内容 / 2.5D 遮挡；相机经
+/// `RenderPass::set_camera` 换透视）。槽位与普通 Screen 会话共用
+/// （同一时间一个活跃 Screen 会话——开深度会话即替换普通会话）。
+pub fn begin_screen_depth() {
+    let pass: RenderPass<'static> = crate::display::get_screen().render_depth();
+    SCREEN_SESSION.with(|s| *s.borrow_mut() = Some(pass));
+}
+
 /// 结束 Screen 会话（finish 幂等打包；Drop 兜底双保险）
 pub fn end_screen() {
     SCREEN_SESSION.with(|s| {
