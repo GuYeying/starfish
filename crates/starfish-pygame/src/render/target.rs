@@ -684,15 +684,17 @@ impl<'a> RenderPass<'a> {
     /// 哪个目标"由会话对象表达；也是获取原生 RenderPass 的规范路径：
     /// 闭包经 [`OverlayCtx::with_pass`] 拿 `&mut RenderPass` 直绘）。
     /// 排程到会话目标的呈现时点——Screen 会话 = present 时本帧全部
-    /// batch pack 之后（恒在游戏内容之上）；Surface/MRT 会话 v1 不支持
-    /// （devlog 提示并忽略）。与 [`Screen::with_overlay`]（立即形态）
-    /// 同源执行体；泛型闭包零第三方感知（依赖单向红线）。
+    /// batch pack 之后（恒在游戏内容之上）；Surface 会话 = [`Surface::
+    /// flush`] 时本面 batch pack 之后（画中画/离屏叠加通道）；MRT 会话
+    /// v1 不支持（devlog 提示并忽略）。与 [`Screen::with_overlay`]
+    /// （立即形态）同源执行体；泛型闭包零第三方感知（依赖单向红线）。
     pub fn defer_overlay(&self, f: impl FnOnce(&mut OverlayCtx) + 'static) {
         match &self.kind {
             PassKind::Screen(s) => s.defer_overlay(f),
-            PassKind::Surface(_) | PassKind::Mrt { .. } => {
+            PassKind::Surface(s) => s.defer_overlay(f),
+            PassKind::Mrt { .. } => {
                 starfish_std::debug::devlog(
-                    "[session] defer_overlay：Surface/MRT 会话暂不支持客人叠加（v1 仅 Screen）",
+                    "[session] defer_overlay：MRT 会话暂不支持客人叠加（v1）",
                 );
             }
         }
@@ -824,6 +826,9 @@ pub struct Surface {
     alpha: Cell<u8>,
     /// CPU alpha 影子（CPU 出生路径留存；GPU 出生面 = None）
     cpu_alpha: Option<CpuAlpha>,
+    /// 延迟叠加排程（`defer_overlay`；flush 在 batch pack 之后统一执行
+    /// ——batch 空也执行，纯 UI/纯调试线的表面由此成立）
+    pending_overlays: RefCell<Vec<Box<dyn FnOnce(&mut OverlayCtx)>>>,
 }
 
 impl Surface {
@@ -862,6 +867,7 @@ impl Surface {
             clip: Cell::new(None),
             alpha: Cell::new(255),
             cpu_alpha: None,
+            pending_overlays: RefCell::new(Vec::new()),
         }
     }
 
@@ -956,9 +962,59 @@ impl Surface {
         self.clip.get()
     }
 
-    /// 显式提交点（ADR-5；通常无需调用——blit 源自动触发）
+    /// 显式提交点（ADR-5；通常无需调用——blit 源自动触发）。
+    /// **延迟叠加收口**：batch pack 之后统一执行 `defer_overlay` 排程
+    /// （登记序即画家序，恒在本面游戏内容之上；batch 空/帧无绘制也执行
+    /// ——纯 UI / 纯调试线表面由此成立）。
     pub fn flush(&self) {
         self.pack(self.has_depth());
+        let deferred: Vec<_> = self.pending_overlays.borrow_mut().drain(..).collect();
+        for f in deferred {
+            self.run_overlay(f);
+        }
+    }
+
+    /// 叠加渲染通道——**延迟形态**（Surface 版，镜像 [`Screen::defer_overlay`]）：
+    /// 任意时点调用（含绘制会话内），[`Self::flush`]（含 blit 源自动触发）
+    /// 在 batch pack 之后统一执行。颜色附件 = 本面纹理（Rgba8Unorm 离屏，
+    /// Load 承接已绘内容）；深度附件 = `with_depth` 表面自持深度（Load 承接
+    /// 本面 pack 清后的深度——3D 客人管线 depth=true 用）。
+    pub fn defer_overlay(&self, f: impl FnOnce(&mut OverlayCtx) + 'static) {
+        self.pending_overlays.borrow_mut().push(Box::new(f));
+    }
+
+    /// 叠加执行体（镜像 [`Screen::run_overlay`]；无 begin/present 概念
+    /// ——encoder finish 后直接 queue 提交）
+    fn run_overlay(&self, f: impl FnOnce(&mut OverlayCtx)) {
+        let color = Some(ColorAttachment {
+            view: self.view.clone(),
+            resolve_target: None,
+            load: wgpu::LoadOp::Load,
+            store: wgpu::StoreOp::Store,
+            depth_slice: None,
+        });
+        let depth = self.depth.as_ref().map(|(_, view)| {
+            starfish_render::render_pass::attachments::DepthAttachment {
+                view: view.clone(),
+                load: wgpu::LoadOp::Load, // Load 承接本面 pack 清后的深度
+                store: wgpu::StoreOp::Store,
+                stencil_ops: None,
+                depth_slice: None,
+            }
+        });
+        let mut ctx = OverlayCtx {
+            encoder: self.gpu.access.create_command_encoder(),
+            color,
+            depth,
+            pre_pass_cmds: Vec::new(),
+            device: self.gpu.device.clone(),
+            queue: self.gpu.queue.clone(),
+            access: self.gpu.access.clone(),
+        };
+        f(&mut ctx);
+        let mut cmds = std::mem::take(&mut ctx.pre_pass_cmds);
+        cmds.push(ctx.encoder.finish());
+        self.gpu.queue.submit(cmds);
     }
 
     /// 指令打包（depth = 本批按深度测试管线编码，pass 附深度附件并清深度）

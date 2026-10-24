@@ -134,3 +134,21 @@
 `HTCLIENT` 显式 `LoadCursorW(NULL, IDC_ARROW)` + `SetCursor` 并返回
 TRUE；其余命中测试回落 DefWindowProc（边框缩放光标保持系统语义）。
 与 `set_cursor_visible`/ShowCursor 无交互（显示层计数优先于 SetCursor）。
+
+## 追加批次：Surface 会话客人叠加通道（2026-10-24，画中画立项）
+
+`defer_overlay` 的 Surface 会话落地（v1 仅 Screen 的边界拆除）：
+- `Surface::defer_overlay` + `pending_overlays`（镜像 Screen 形态）；
+  执行体收口在 **flush**——batch pack 之后统一执行，**batch 空也执行**
+  （纯 UI / 纯调试线表面由此成立）；
+- 颜色附件 = 本面纹理（Rgba8Unorm 离屏，LoadOp::Load 承接已绘内容）；
+  深度附件 = `with_depth` 表面自持深度（Load 承接 pack 清后深度——
+  3D 客人管线 depth=true 契约）；
+- `RenderPass::defer_overlay` 的 Surface 分支接通（Rust 版 Surface::
+  render() 会话同享；MRT 仍 v1 不支持）。
+下游 pygame-rs 据此落地画中画（离屏 Surface 画 3D 物理调试动画 +
+egui 内嵌面板 → blit 合成上屏，pip_test 5/5 PASS——下游批次 48）。
+
+下游追加（pygame-rs 批次 48 修订）：egui 画中画目标尺寸覆盖——egui 的
+screen_rect 与 ScreenDescriptor 按渲染目标取（Surface = 表面尺寸），
+消除剪裁矩形越界 wgpu 校验 panic（绑定层问题，引擎侧无改动）。
