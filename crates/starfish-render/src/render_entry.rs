@@ -1,15 +1,20 @@
 //! 渲染入口（RenderEntry）
 //!
-//! **单窗口模型**（2026-09-14 定稿，多窗口剔除）：引擎持一个主窗口，
-//! [`RenderEntry::new`] / [`RenderEntry::async_new`] 建立其 wgpu 上下文
-//! 与渲染表面。
+//! **上下文/表面分离模型**（2026-10-23 多窗口定稿）：[`RenderContext`] 持
+//! instance/adapter/device/queue（设备族，进程一份）；[`RenderSurface`]
+//! 对应一个窗口的交换链（每窗一份，共享设备族）——多窗口 = 一个上下文
+//! + N 个表面，surface 之外一切不重建。
 //!
-//! `surface_from_context` / `async_surface_from_context`（共享设备/队列的
-//! 附加表面能力）作为渲染层基础能力保留，引擎侧不再使用。
+//! 三条入口路径：
+//! - 单窗口一步到位：[`RenderEntry::new`] / [`RenderEntry::async_new`]；
+//! - 设备先行 + 挂表面（多窗口核心）：[`RenderEntry::new_context`] →
+//!   [`RenderEntry::new_surface`]；
+//! - 第三方框架/外部设备：raw handles 族与 `surface_from_foreign_device`。
 
 use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use pollster::block_on;
+#[cfg(feature = "we")]
 use starfish_we::Window;
 use raw_window_handle::{HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
 use crate::RenderContext;
@@ -57,6 +62,7 @@ impl RenderEntry{
 
     /// 阻塞式创建（桌面与 Emscripten 便利层；裸 wasm 无阻塞模型，不参与编译）
     #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(feature = "we")]
     pub fn new(
         window: &Window,
         surface_settings: Option<SurfaceSettings>,
@@ -117,11 +123,11 @@ impl RenderEntry{
             panic!("{msg}");
         }));
 
-        Ok(RenderContext::new_headless(
+        Ok(RenderContext::new(
             instance,
             adapter,
-            device,
-            queue,
+            &device,
+            &queue,
             granted_features,
             granted_limits,
             adapter_info,
@@ -177,7 +183,6 @@ impl RenderEntry{
         let render_context = RenderContext::new(
             instance,
             adapter,
-            &surface,
             &device,
             &queue,
             granted_features,
@@ -208,6 +213,7 @@ impl RenderEntry{
     }
 
     // 异步创建渲染器 + 三角形网格
+    #[cfg(feature = "we")]
     pub async fn async_new(
         window: &Window,
         surface_settings: SurfaceSettings,
@@ -285,7 +291,6 @@ impl RenderEntry{
         let render_context = RenderContext::new(
             instance,
             adapter,
-            &surface,
             &device,
             &queue,
             granted_features,
@@ -318,77 +323,92 @@ impl RenderEntry{
         Ok((render_context,render_resource_access,render_frame))
     }
 
-    /// ⚠️【多窗口接口 · 仅开放，不具备开箱即用能力】
+    // =========================================================
+    // 多窗口核心：设备先行 → 每窗挂表面（上下文/表面分离模型）
+    // =========================================================
+
+    /// 从已有上下文为窗口挂渲染表面（**多窗口核心入口**，阻塞桌面版）。
     ///
-    /// 复用已有渲染上下文的 GPU 资源，为另一个窗口创建渲染表面（多窗口共享设备）
+    /// 复用 `context` 的 instance/adapter/device/queue，仅新建该窗口的
+    /// 交换链——多窗口 = 一个 [`RenderContext`] + N 个 [`RenderSurface`]，
+    /// surface 之外一切不重建。调用方须保证 `window` 比回出的表面晚销毁
+    /// （表面持 'static 句柄，契约同 [`Self::async_new`]）。
     ///
-    /// **定位：桌面平台进阶用法，非跨平台承诺。** 本引擎官方支持形态是单窗口；
-    /// 移动端/鸿蒙的表面语义不同（单 Activity/单 Surface），此入口在这些平台
-    /// 上未经验证。单窗口开发请直接使用 [`RenderEntry::new`](Self::new)。
-    ///
-    /// 返回共享同一 instance/adapter/device/queue 的新 `(RenderContext, RenderSurface)`。
-    /// `RenderResourceAccess` 与设备绑定，可直接复用已有的；若新表面颜色格式
-    /// 与首窗口不同，再以新格式创建一份即可。
+    /// 多窗口共享约定：各窗口 [`SurfaceSettings`] 一致（默认即一致）时，
+    /// 一份 `RenderResourceAccess` + 同参数管线全窗口共享；颜色格式或
+    /// MSAA 不同的窗口以 `ctx.resource_access(颜色格式, 深度格式)` 另建
+    /// access，管线按 `(color_format, sample_count)` 分套（wgpu 硬约束，
+    /// 不得跨键复用）。
     ///
     /// ```ignore
-    /// let (ctx, access, surface1) = RenderEntry::new(&window1, None, None)?;
-    /// let (ctx2, surface2) = RenderEntry::surface_from_context(&ctx, &window2, SurfaceSettings::default())?;
+    /// let ctx = RenderEntry::new_context(GpuSettings::default())?;
+    /// let s1 = RenderEntry::new_surface(&ctx, &window1, SurfaceSettings::default())?;
+    /// let s2 = RenderEntry::new_surface(&ctx, &window2, SurfaceSettings::default())?;
     /// ```
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn surface_from_context(
+    #[cfg(feature = "we")]
+    pub fn new_surface(
         context: &RenderContext,
         window: &Window,
         surface_settings: SurfaceSettings,
-    ) -> Result<(RenderContext, RenderSurface), RenderContextError> {
-        starfish_std::debug::assert_main_thread("RenderEntry::surface_from_context");
-        block_on(Self::async_surface_from_context(context, window, surface_settings))
+    ) -> Result<RenderSurface, RenderContextError> {
+        starfish_std::debug::assert_main_thread("RenderEntry::new_surface");
+        block_on(Self::async_new_surface(context, window, surface_settings))
     }
 
-    /// ⚠️【多窗口接口 · 仅开放，不具备开箱即用能力】
-    ///
-    /// [`surface_from_context`](Self::surface_from_context) 的异步版本。
-    /// 定位与限制同上：桌面平台进阶用法，非跨平台承诺。
-    pub async fn async_surface_from_context(
+    /// [`new_surface`](Self::new_surface) 的异步版（Web/异步宿主用）。
+    #[cfg(feature = "we")]
+    pub async fn async_new_surface(
         context: &RenderContext,
         window: &Window,
         surface_settings: SurfaceSettings,
-    ) -> Result<(RenderContext, RenderSurface), RenderContextError> {
-        let instance = context.instance().clone();
-        let device = context.device().clone();
-        let queue = context.queue().clone();
-        let features = context.features();
-        let limits = context.limits();
-        let adapter_info = context.adapter_info().clone();
-
-        // 与首窗口一致的 surface 创建路径：raw 句柄 + 'static surface
+    ) -> Result<RenderSurface, RenderContextError> {
+        // 与首窗口同款路径：raw 句柄 + 'static surface（契约见 async_new）
         let raw_display = window.display_handle()?.as_raw();
         let raw_window = window.window_handle()?.as_raw();
-        let surface = Arc::new(unsafe {
-            instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
-                raw_display_handle: Some(raw_display),
-                raw_window_handle: raw_window,
-            })
-        }?);
+        unsafe {
+            Self::async_surface_from_raw_handles(
+                context,
+                raw_window,
+                Some(raw_display),
+                window.size(),
+                surface_settings,
+            )
+        }
+        .await
+    }
 
+    /// Web：从已有上下文为 `<canvas>` 挂表面（`SurfaceTarget::Canvas`
+    /// 直连，无需窗口层句柄；多 canvas 预留入口）。
+    #[cfg(target_arch = "wasm32")]
+    pub async fn async_new_surface_from_canvas(
+        context: &RenderContext,
+        canvas: web_sys::HtmlCanvasElement,
+        surface_settings: SurfaceSettings,
+    ) -> Result<RenderSurface, RenderContextError> {
+        let instance = context.instance().clone();
         let adapter = context.adapter();
+        let device = context.device().clone();
+        let queue = context.queue().clone();
+
+        // 安全 API：SurfaceTarget::Canvas（wasm32 + web feature 即存在）
+        let surface = Arc::new(instance.create_surface(
+            wgpu::SurfaceTarget::Canvas(canvas.clone()),
+        )?);
+
         let caps = surface.get_capabilities(adapter);
         let downlevel_caps = adapter.get_downlevel_capabilities();
-        let size: (u32, u32) = window.size();
+        let size = (canvas.width(), canvas.height());
 
-        let render_frame = RenderSurface::new(&surface, &device, &queue, &size, surface_settings, &caps, &downlevel_caps);
-
-        let render_context = RenderContext::new(
-            instance,
-            adapter.clone(),
+        Ok(RenderSurface::new(
             &surface,
             &device,
             &queue,
-            features,
-            limits,
-            adapter_info,
-        );
-
-        Ok((render_context, render_frame))
+            &size,
+            surface_settings,
+            &caps,
+            &downlevel_caps,
+        ))
     }
 
 
@@ -603,7 +623,6 @@ impl RenderEntry{
         let render_context = RenderContext::new(
             instance,
             adapter,
-            &surface,
             &device,
             &queue,
             granted_features,

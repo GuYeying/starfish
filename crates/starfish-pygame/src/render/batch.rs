@@ -378,14 +378,14 @@ pub(crate) struct EncodeCtx<'a> {
 }
 
 /// clip Rect → 合法 scissor（钳入目标界内；零面积 → None）
-pub(crate) fn scissor_from(clip: crate::Rect, size: (u32, u32)) -> Option<[u32; 4]> {
-    let x0 = clip.left.max(0) as u32;
-    let y0 = clip.top.max(0) as u32;
-    if x0 >= size.0 || y0 >= size.1 || clip.width <= 0 || clip.height <= 0 {
+pub(crate) fn scissor_from(clip: crate::IRect, size: (u32, u32)) -> Option<[u32; 4]> {
+    let x0 = clip[0].max(0) as u32;
+    let y0 = clip[1].max(0) as u32;
+    if x0 >= size.0 || y0 >= size.1 || clip[2] <= 0 || clip[3] <= 0 {
         return None;
     }
-    let w = (clip.width as u32).min(size.0 - x0);
-    let h = (clip.height as u32).min(size.1 - y0);
+    let w = (clip[2] as u32).min(size.0 - x0);
+    let h = (clip[3] as u32).min(size.1 - y0);
     Some([x0, y0, w, h])
 }
 

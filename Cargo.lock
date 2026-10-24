@@ -736,7 +736,7 @@ checksum = "0c87e182de0887fd5361989c677c4e8f5000cd9491d6d563161a8f3a5519fc7f"
 
 [[package]]
 name = "demos"
-version = "0.9.50"
+version = "0.9.55"
 dependencies = [
  "android_logger",
  "bytemuck",
@@ -3399,7 +3399,7 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
 name = "starfish-audio"
-version = "0.9.50"
+version = "0.9.55"
 dependencies = [
  "bytemuck",
  "cpal",
@@ -3414,7 +3414,7 @@ dependencies = [
 
 [[package]]
 name = "starfish-dialog"
-version = "0.9.50"
+version = "0.9.55"
 dependencies = [
  "jni 0.21.1",
  "js-sys",
@@ -3430,7 +3430,7 @@ dependencies = [
 
 [[package]]
 name = "starfish-font"
-version = "0.9.50"
+version = "0.9.55"
 dependencies = [
  "bytemuck",
  "glam",
@@ -3442,7 +3442,7 @@ dependencies = [
 
 [[package]]
 name = "starfish-gamepad"
-version = "0.9.50"
+version = "0.9.55"
 dependencies = [
  "gilrs",
  "js-sys",
@@ -3452,7 +3452,7 @@ dependencies = [
 
 [[package]]
 name = "starfish-gfx"
-version = "0.9.50"
+version = "0.9.55"
 dependencies = [
  "bytemuck",
  "glam",
@@ -3462,7 +3462,7 @@ dependencies = [
 
 [[package]]
 name = "starfish-io"
-version = "0.9.50"
+version = "0.9.55"
 dependencies = [
  "js-sys",
  "pollster",
@@ -3473,7 +3473,7 @@ dependencies = [
 
 [[package]]
 name = "starfish-net"
-version = "0.9.50"
+version = "0.9.55"
 dependencies = [
  "js-sys",
  "starfish-permission",
@@ -3483,7 +3483,7 @@ dependencies = [
 
 [[package]]
 name = "starfish-permission"
-version = "0.9.50"
+version = "0.9.55"
 dependencies = [
  "jni 0.21.1",
  "js-sys",
@@ -3497,7 +3497,7 @@ dependencies = [
 
 [[package]]
 name = "starfish-pygame"
-version = "0.9.50"
+version = "0.9.55"
 dependencies = [
  "bytemuck",
  "glam",
@@ -3528,7 +3528,7 @@ dependencies = [
 
 [[package]]
 name = "starfish-render"
-version = "0.9.50"
+version = "0.9.55"
 dependencies = [
  "bytemuck",
  "glam",
@@ -3544,7 +3544,7 @@ dependencies = [
 
 [[package]]
 name = "starfish-std"
-version = "0.9.50"
+version = "0.9.55"
 dependencies = [
  "console_error_panic_hook",
  "pollster",
@@ -3555,14 +3555,14 @@ dependencies = [
 
 [[package]]
 name = "starfish-time"
-version = "0.9.50"
+version = "0.9.55"
 dependencies = [
  "web-sys",
 ]
 
 [[package]]
 name = "starfish-video"
-version = "0.9.50"
+version = "0.9.55"
 dependencies = [
  "gstreamer",
  "gstreamer-app",
@@ -3590,7 +3590,7 @@ dependencies = [
 
 [[package]]
 name = "starfish-we"
-version = "0.9.50"
+version = "0.9.55"
 dependencies = [
  "android-activity",
  "js-sys",

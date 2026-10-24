@@ -3,10 +3,10 @@
 //! 接口形态 1:1 对齐 pygame，执行 GPU 化（管线见 [`render`]）。
 //! 依赖双向规则：本层可直用 starfish 类型；starfish 永不感知本层。
 //!
-//! P1 已落地：[`Color`] / [`Rect`]（回收旧实现）/ [`locals`] 常量枢纽 /
+//! P1 已落地：[`Color`] / [`locals`] 常量枢纽 /
 //! [`math`] 薄封装（Vector2/3/4 + Quaternion/Mat 扩展）。
 //! P2 已落地：[`render`] 底座（Texture/Screen/Surface/DrawTarget/Batch/
-//! Camera/Material/BufferProxy）+ [`font`]（资源制备路线）。
+//! Camera/Material）+ [`font`]（资源制备路线）。
 //! P3 已落地：[`display`] / [`event`] / [`key`] / [`mouse`] / [`time`] /
 //! [`draw`] / [`version`] API 面（pygame hello = `examples/pygame_hello.rs`）。
 //! P4 已落地：[`image`]（load/load_from_bytes → Surface；save = v2 回读）。
@@ -35,7 +35,6 @@ pub mod mixer;
 pub mod mouse;
 pub mod net;
 pub mod permission;
-pub mod rect;
 pub mod render;
 pub mod effects;
 pub mod sndarray;
@@ -51,4 +50,4 @@ pub mod video;
 
 pub use color::Color;
 pub use event::Event;
-pub use rect::Rect;
+pub use render::IRect;

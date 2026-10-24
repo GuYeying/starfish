@@ -25,9 +25,11 @@ pub enum Event {
     Resized { width: u32, height: u32 },
     FocusGained,
     FocusLost,
-    /// 按键按下（`key` = [`KeyCode`]，与 [`crate::locals`] 常量同型）
-    KeyDown { key: KeyCode, repeat: bool },
-    KeyUp { key: KeyCode },
+    /// 按键按下（`key` = [`KeyCode`]，与 [`crate::locals`] 常量同型；
+    /// `modifiers` = KMOD_* 位集——真 pygame `e.mod` parity，事件逐条
+    /// 消费者如 egui 重建完整输入词汇用）
+    KeyDown { key: KeyCode, modifiers: u32, repeat: bool },
+    KeyUp { key: KeyCode, modifiers: u32 },
     /// 键盘最终文本输入（与 KeyDown 相互独立）
     TextInput { text: String },
     /// 鼠标移动（客户区物理像素）
@@ -53,16 +55,61 @@ pub enum Event {
 }
 
 thread_local! {
-    /// 待派发事件队列（pump 灌入，get/poll/clear 消费——SDL 模型）
+    /// 待派发事件队列（pump 灌入，get/poll/clear 消费——SDL 模型）。
+    /// **帧尾清空定约**：pump 起点排空上帧未消费事件——不管宿主用没用
+    /// （不消费积压只会让陈旧 QUIT/键事件延迟爆发）。
     static QUEUE: RefCell<VecDeque<Event>> = RefCell::new(VecDeque::new());
+    /// user-posted 待发放列表（[`post_user`] 只入此列，pump 时补进
+    /// QUEUE——**保一帧**：post 后下一帧 get/poll 可见；再不消费随
+    /// 下一帧 pump 丢弃，与引擎事件同寿命）。
+    static USER_PENDING: RefCell<VecDeque<Event>> = const { RefCell::new(VecDeque::new()) };
+    /// 原始引擎事件监听器表（翻译前镜像——外接输入消费者的通用挂接点；
+    /// 多消费者并存，注册序即通知序）
+    static RAW_LISTENERS: RefCell<Vec<(usize, RawListener)>> = const { RefCell::new(Vec::new()) };
 }
 
-/// 事件泵（宿主帧循环每帧一次）：把引擎事件全部翻译灌入队列（翻译时
-/// 照常喂 key/mouse/touch 状态表）；窗口关闭请求返回 true。手柄每帧
-/// 排水（gilrs/Web 轮询型后端，just_pressed 是帧间边沿——一帧恰好
-/// 一次，归宿主帧管线）。
+/// 原始引擎事件监听器（`&Window` 一并交付——需要窗口 API 的消费者直用；
+/// 引用与 pump 的借用同源，监听器内**不得**再走 `display::with_window`，
+/// 否则 `WINDOW` 槽嵌套 borrow_mut panic）
+pub type RawListener = Box<dyn FnMut(&starfish_we::Window, &WindowEvent)>;
+
+/// 监听器 id（[`add_raw_listener`] 返回；[`remove_raw_listener`] 凭此撤除）
+pub type RawListenerId = usize;
+
+/// 登记原始事件监听器（通用多消费者：每条泵到的事件**先喂全部监听器、
+/// 再走 pygame 翻译**——翻译有损（如 `KeyDown` 不带修饰键），需要完整
+/// 事件词汇的消费者走这里；监听与队列两条通路互不干扰，监听器的存在
+/// 不改变 pygame 面既有行为）。返回 id 供撤除。
+pub fn add_raw_listener(listener: RawListener) -> RawListenerId {
+    static NEXT_ID: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
+    let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    RAW_LISTENERS.with(|l| l.borrow_mut().push((id, listener)));
+    id
+}
+
+/// 撤除监听器（返回是否存在并已移除）
+pub fn remove_raw_listener(id: RawListenerId) -> bool {
+    RAW_LISTENERS.with(|l| {
+        let mut l = l.borrow_mut();
+        let before = l.len();
+        l.retain(|(i, _)| *i != id);
+        l.len() != before
+    })
+}
+
+/// 事件泵（宿主帧循环每帧一次）：**起点排空上帧未消费事件**（帧尾
+/// 清空定约——不管宿主用没用；user-posted 经 pending 补发保一帧），
+/// 再把本帧引擎事件全部翻译灌入队列（翻译时照常喂 key/mouse/touch
+/// 状态表）；窗口关闭请求返回 true。手柄每帧排水（gilrs/Web 轮询型
+/// 后端，just_pressed 是帧间边沿——一帧恰好一次，归宿主帧管线）。
 pub fn pump() -> bool {
     let mut quit = false;
+    let pending: Vec<Event> = USER_PENDING.with(|p| p.borrow_mut().drain(..).collect());
+    QUEUE.with(|q| {
+        let mut q = q.borrow_mut();
+        q.clear();
+        q.extend(pending);
+    });
     crate::gamepad::poll();
     while let Some(ev) = poll_engine() {
         if matches!(ev, Event::Quit) {
@@ -83,9 +130,11 @@ pub fn poll() -> Option<Event> {
     QUEUE.with(|q| q.borrow_mut().pop_front())
 }
 
-/// 清空队列（状态表已随 pump 喂过——按键抬起不丢，pygame clear 同语义）
+/// 清空队列（状态表已随 pump 喂过——按键抬起不丢，pygame clear 同语义；
+/// user-posted pending 一并清）
 pub fn clear() {
     QUEUE.with(|q| q.borrow_mut().clear());
+    USER_PENDING.with(|p| p.borrow_mut().clear());
 }
 
 // ── 自定义事件（starfish-window UserEvent 透传）──────────────────
@@ -99,15 +148,31 @@ pub fn custom_code() -> u32 {
     NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
-/// post_user(code)：注入一条自定义事件入队（下一次 get/poll 即可取到
-/// ——同帧内 post 先于 get 亦可见；载荷由 pygame-rs 包裹层附加）。
+/// post_user(code)：注入一条自定义事件（入 pending 列，**下一次 pump
+/// 补进队列**——post 后下一帧 get/poll 可见；再不消费随下一帧 pump
+/// 丢弃。载荷由 pygame-rs 包裹层附加）。
 pub fn post_user(code: u32) {
-    QUEUE.with(|q| q.borrow_mut().push_back(Event::User { code }));
+    USER_PENDING
+        .with(|p| p.borrow_mut().push_back(Event::User { code }));
 }
 
-/// 引擎窗口事件直取（仅 pump 使用——翻译 + 状态表喂入的唯一入口）
+/// 引擎窗口事件直取（仅 pump 使用——翻译 + 状态表喂入的唯一入口）。
+/// 原始事件顺带镜像给全部监听器——须在 `with_window` 借用内喂（消费者
+/// 拿到的 `&Window` 与泵同源）；translate 在借用内调用与既有行为一致
+/// （其内部只触 Screen/状态表，不回借 WINDOW）。
 fn poll_engine() -> Option<Event> {
-    crate::display::with_window(|w| w.poll_event().and_then(translate)).flatten()
+    crate::display::with_window(|w| {
+        let raw = w.poll_event();
+        if let Some(ref ev) = raw {
+            RAW_LISTENERS.with(|l| {
+                for (_, f) in l.borrow_mut().iter_mut() {
+                    f(w, ev);
+                }
+            });
+        }
+        raw.and_then(translate)
+    })
+    .flatten()
 }
 
 /// 引擎事件 → pygame 事件（返回 None = 不上报给用户）。
@@ -133,12 +198,21 @@ fn translate(e: WindowEvent) -> Option<Event> {
         WindowEvent::KeyDown { key, modifiers, repeat } => {
             key::press(key);
             key::set_mods(modifiers);
-            Some(Event::KeyDown { key, repeat })
+            Some(Event::KeyDown {
+                key,
+                // KMOD 位集随事件携带（真 pygame `e.mod` parity——事件
+                // 逐条消费者如 egui 重建完整输入词汇）
+                modifiers: key::mods_to_bits(modifiers),
+                repeat,
+            })
         }
         WindowEvent::KeyUp { key, modifiers } => {
             key::release(key);
             key::set_mods(modifiers);
-            Some(Event::KeyUp { key })
+            Some(Event::KeyUp {
+                key,
+                modifiers: key::mods_to_bits(modifiers),
+            })
         }
         WindowEvent::TextInput { text } => Some(Event::TextInput { text }),
         WindowEvent::MouseMoved { x, y } => {
@@ -206,7 +280,7 @@ mod tests {
             modifiers: Default::default(),
             repeat: false,
         });
-        assert!(matches!(ev, Some(Event::KeyDown { key: KeyCode::ArrowLeft, repeat: false })));
+        assert!(matches!(ev, Some(Event::KeyDown { key: KeyCode::ArrowLeft, repeat: false, .. })));
         assert!(key::get_pressed().left(), "KeyDown 应喂进状态表");
         key::release(KeyCode::ArrowLeft);
 
@@ -234,9 +308,19 @@ mod tests {
         )));
         assert!(matches!(ev, Some(Event::User { code: 7 })));
 
-        // post_user 入队 → poll 立即可取（同帧语义）
+        // post_user 入 pending 列 → 下一帧 pump 补进队列（保一帧语义；
+        // 同帧 get/poll 不可见——帧尾清空定约的代价，见 post_user 文档）
         crate::event::post_user(42);
+        assert!(crate::event::poll().is_none(), "post 同帧不可见");
+        crate::event::pump();
         assert!(matches!(crate::event::poll(), Some(Event::User { code: 42 })));
+
+        // 帧尾清空定约：pump 起点排空上帧未消费事件（user-posted 同寿命）
+        crate::event::post_user(7);
+        crate::event::pump();
+        assert!(matches!(crate::event::poll(), Some(Event::User { code: 7 })));
+        crate::event::pump();
+        assert!(crate::event::poll().is_none(), "未消费事件随帧尾清空");
 
         // 分配器：单调递增、从 1 起
         let a = crate::event::custom_code();

@@ -255,8 +255,11 @@ pub(crate) fn handle_resized(width: u32, height: u32) {
     }
 }
 
-/// 事件模块的窗口访问缝（排空事件队列）；display 未就绪 → None
-pub(crate) fn with_window<R>(f: impl FnOnce(&mut Window) -> R) -> Option<R> {
+/// 窗口访问缝（原事件模块专用，2026-10-24 起公开——外接输入消费者如
+/// egui 适配层需要 `&Window`）；display 未就绪 → `None`。
+/// ⚠️ 借用即 `WINDOW` 槽 `borrow_mut`——嵌套调用会 panic（排队到外层
+/// 闭包外再做）。
+pub fn with_window<R>(f: impl FnOnce(&mut Window) -> R) -> Option<R> {
     WINDOW.with(|w| {
         let mut w = w.borrow_mut();
         w.as_mut().map(f)

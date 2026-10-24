@@ -11,14 +11,13 @@
 //! - [`Camera`]：MVP 组装（ortho/perspective 同型，唯一上传变换量）
 //! - [`Batch`]：批处理执行体（纹理切换即段边界；即时 API × 延迟提交）
 //! - [`Material`]：默认带纹理 alpha 混合材质（管线变体矩阵惰性缓存）
-//! - [`BufferProxy`]：通用数据桥（ADR-10；v1 = Texture↔CPU 最小路径）
+
 //!
 //! GPU 槽（ADR-6 display 全局槽的前置形态）：[`Screen::new`] 建立
 //! 进程级 Gpu 句柄，[`Surface`]/[`Texture`]/pygame::font 等经 [`gpu`]
 //! 取用——pygame 签名不带 GPU 参数的依托。
 
 pub mod batch;
-pub mod buffer_proxy;
 pub mod camera;
 pub mod material;
 pub mod session;
@@ -26,12 +25,12 @@ pub mod target;
 pub mod texture;
 
 pub use batch::{Batch, BatchTopology, GeometryKind, SpriteVertex};
-// pub use buffer_proxy::{BufferProxy, Layout, PixelFormat};
 pub use camera::Camera;
 pub use material::{Material, SPRITE_MRT_WGSL, SPRITE_WGSL};
 pub use session::{begin_screen, begin_targets, end_screen, end_targets, with_screen,
     with_targets, NoActiveSession};
-pub use target::{render_targets, render_targets_arc, DrawTarget, RenderPass, Screen, Surface};
+pub use target::{render_targets, render_targets_arc, DrawTarget, OverlayCtx, RenderPass, Screen,
+    Surface};
 pub(crate) use target::CpuAlpha;
 pub use texture::Texture;
 
@@ -46,6 +45,12 @@ use starfish_render::sampler_desc::SamplerDescriptor;
 
 /// blit 目标坐标（像素，y 向下；左上角为原点）
 pub type Coord = (i32, i32);
+
+/// 整型矩形 `[x, y, w, h]`（GPU 几何管线内部用：clip/scissor/blit_area
+/// ——**纯数组别名，无 pygame.Rect 的方法面**）。GPU 全帧 present 下
+/// "描述 surface 信息"的 Rect 门面已退役（2026-10-24 定约：碰撞/触发器
+/// 归物理引擎）；本别名只承载裁剪/区域搬运的必要几何。
+pub type IRect = [i32; 4];
 
 /// 进程级 GPU 句柄：设备/队列 + 资源访问 + 材质 + 默认采样器 + 白纹理
 pub(crate) struct Gpu {
@@ -93,6 +98,27 @@ pub(crate) fn gpu() -> Arc<Gpu> {
         slot.borrow().as_ref().cloned().expect(
             "pygame 渲染未初始化：须先建立 GPU 槽（P2 = Screen::new；P3 = display.set_mode）",
         )
+    })
+}
+
+/// 外接渲染器创建期所需的 GPU 句柄快照（**接口核心 = 通用能力**：
+/// 任何自持管线的直绘消费者——UI 库、物理调试线等——的初始化依赖；
+/// 全程只暴露 wgpu / starfish-render 公共类型，依赖单向红线的接口面）
+pub struct GpuInfo {
+    pub device: Arc<wgpu::Device>,
+    pub queue: Arc<wgpu::Queue>,
+    pub access: Arc<RenderResourceAccess>,
+}
+
+/// GPU 句柄快照（[`Screen::new`] 建立槽之后可用；未建立 = `None`——
+/// 绑定层映射为"须先 set_mode"的用法错误，引擎侧不 panic）
+pub fn gpu_info() -> Option<GpuInfo> {
+    GPU_SLOT.with(|slot| {
+        slot.borrow().as_ref().map(|g| GpuInfo {
+            device: g.device.clone(),
+            queue: g.queue.clone(),
+            access: g.access.clone(),
+        })
     })
 }
 

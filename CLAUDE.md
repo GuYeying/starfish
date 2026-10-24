@@ -52,11 +52,15 @@ cargo run -p examples --example pygame_test_rect   # pygame 自检案例（横�
 # Web（wasm-bindgen-cli 版本必须与依赖树严格一致，当前 0.2.127，
 #  不一致会报 "not compatible with version of the wasm-bindgen in the dependency tree"）：
 cargo build --release --target wasm32-unknown-unknown -p examples --example hello
-wasm-bindgen --out-dir examples/web --target web target/wasm32-unknown-unknown/release/examples/hello.wasm
-python -m http.server 8000 --directory examples/web   # → http://localhost:8000/hello.html
+wasm-bindgen --out-dir target/web --target web target/wasm32-unknown-unknown/release/examples/hello.wasm
+python -m http.server 8000 --directory target/web   # → http://localhost:8000/hello.html
+# （产物入 target/web——构建产物不进源码树；pygame 23 案例批量产物在
+#  target/web-pygame-test/，索引页 pygame_test_index.html）
 
 # Android APK：统一打包脚本随 pygame-rs 仓库（D:/Projects/Rust/pygame-rs/scripts/
 # build_apk.py，本仓库未随迁）；模拟器冒烟必须 x86_64 包，渲染验收只能真机。
+# 产物统一入 target/android-apk（--out 指定）；classes.dex 复用件在
+# target/classes.dex（历史 APK 兜底提取，robius 胶水与示例无关）。
 
 # 本机注意：链接类操作（cargo build/run/test）须在 VS 开发者环境中执行——
 # 裸 bash 下 link.exe 会误解析到 Git 自带 GNU link。助手脚本：
@@ -79,6 +83,11 @@ python -m http.server 8000 --directory examples/web   # → http://localhost:800
   wasm-bindgen（examples 的 dev-deps 提供）。
 - **循环模型**：调用方持 while 循环 + `Window::poll_event()` 拉事件；无控制
   反转、无回调；运行循环归调用方（pygame/RustPython 的 `while True` 世界观）。
+- **多窗口**（feature `multi-window`，2026-10-23 定稿）：编译期平台白名单
+  （当前仅 Windows，白名单外 `compile_error!`，不做运行期降级）；形态 =
+  一个 `RenderContext` + N 个 `RenderSurface`（`RenderEntry::new_context` →
+  `new_surface`，surface 之外一切不重建）；事件归属**被 poll 的窗口**
+  （无 ID 路由），每帧须轮询每个窗口；surface 必须先于其窗口 drop。
 - **依赖双向红线（硬性）**：pygame 层可直用各引擎 crate 类型；引擎 crate
   永不引用 pygame 层。
 
@@ -113,3 +122,61 @@ python -m http.server 8000 --directory examples/web   # → http://localhost:800
   指针；接手工作先读它。
 - `doc/CLAUDE-engine.md`：拆分前的单 crate 工作指南（完整坑位速查、批次
   历史说明），仍具参考价值。
+
+---
+
+## 主线迁移与承接记忆（自 D:/Projects/Rust/starfish 合并，2026-10-22 由 Claude 同步）
+
+- **仓库关系**：本仓库 = 原 `D:/Projects/Rust/starfish`（单 crate 主线，
+  **已退役不再维护**，v0.9.10/v0.9.20 tag 与全部批次日志归档在其
+  `doc/log/`）+ `D:/Projects/Rust/starfish-we`（窗口 crate 上游，随
+  本仓库 crates/starfish-we 继续演进）合并而成。上游旧目录已删。
+- **下游**：`D:/Projects/Rust/pygame-rs`（RustPython 绑定层，Claude
+  接手；其批次 34 记录见该仓库 CLAUDE.md 批次 34 段）。
+- **近期批次（合并前完成，随迁）**：
+  - 批次二十六：pygame 自检套件 23 案例（基线 129 项自检三端）；
+  - 批次三十四：pygame-rs 全体系对接（绑定面 26 模块全覆盖：mask/
+    permission/video/time.Clock/深度面/Session 相机裁剪/pygame.targets
+    MRT 会话/sprite pyclass 桥/with_batch 直通口 blit_area·quad/
+    event poll·clear/KMOD 常量），探针 selftest **24 项桌面全绿**；
+  - 批次三十五：pygame::mixer 模块化（Sound/Channel/主控面/内置特效
+    Gain·Echo·Distortion·LowPass/Effect 句柄，单测 6 项）；
+  - 批次三十六：CustomEvent 透传（`Event::User { code }` +
+    `custom_code()` 分配器 + `post_user`；**载荷不上浮**——Any 留
+    窗口层，PyObject 由 pygame-rs 包裹层自理）；
+  - 引擎增补：`render_targets_arc`（MRT 'static 收口）、统一
+    `RenderPass::set_clip` 委托、Batch API 基层化
+    （`BatchTopology` + `push_vertices`，quad 族/geometry 降为展开糖）。
+
+## 跨平台行为定约（像素级一致性的既定决策）
+
+- **色彩 = linear 直通**（创作值即显示值；桌面交换链已钉 linear 格式，
+  web canvas 天然 linear——web 偏"深"是正确的，勿再"修"）；
+- **web 窗口 = set_mode 尺寸权威**（2026-10-20 二次回退定案）：canvas
+  位图+内联 CSS 创建时一次钉死，引擎无 resize 机器（ResizeObserver/
+  window-resize 监听已回退移除）；浏览器缩放/窗口变化 = 对固定画布
+  做视图缩放或裁切（Windows 桌面同语义）。勿重新引入自动 rescale；
+- **`time::Clock::tick` 返回秒**（pygame 为毫秒——绑定位换算）；
+- **video 验收降级**：三端能播 + pygame 接口可调即达标（不追样本
+  覆盖率，缺样本的 5 个 video 测试失败为已豁免存量）。
+
+## 坑位增补（承接自主线批次二十六/三十四/三十五，与前文 8 条并列）
+
+9. **并行 rustc 大目标集 = 页面文件耗尽**（os error 1455）→
+   E0786/E0463/"no_std" 幻觉错误全是连锁症状，`-j 4` 限流即愈——
+   见"invalid metadata"先疑内存再疑缓存；
+10. **`cargo build … | grep -c` 零匹配退出码非零** → `&&` 链静默断裂
+    （wasm-bindgen 绑到旧产物）——产物链验证看**产物时间戳**；
+11. **绑定面铁律（pygame-rs）**：①同类型仅一个 `#[pyclass]` impl 块
+    （跨文件第二个 E0119）；②pymethod 直写 `Option<T>` 形参不做
+    缺省（可省参须 FromArgs 结构体 `#[pyarg(optional)]`）；③
+    **pymethod panic 穿透 Python 异常层带崩进程**（绑定面禁 panic）；
+    ④Constructor tuple Args 无法变参（缺省形态须 derive struct）；
+12. **音频 RT 线程铁律**：`AudioEffect::process` 在音频回调线程——
+    禁分配/禁锁/禁 Python（特效参数走 `Arc<AtomicU32>` f32 bits，
+    句柄 set 实时生效）；**Python 代码永远不进音频线程**；
+13. `examples/web/resize_probe.html` 已随旧目录丢失（CLAUDE.md 坑 2
+    引用的回归探针）——**待重建**；
+14. 引擎 crate 内测试引用 crate 自身路径用 `crate::`（`starfish::`
+    只在跨 crate 场景）。
+
