@@ -136,3 +136,18 @@ binding_probe 46/46 验证）：
   blit_fullscreen(_with) / camera_mvp_for / RenderWish / store_wish /
   follow_global_camera / set_camera_mvp）doc 核对齐全——含"何时调 /
   定约 / 坑位"三层信息。
+
+## 追加批次：RustPython 行为优化一期 + 打包体系 toml 化（下游 pygame-rs 批次 56/57）
+
+- **经典 traceback**（用户定夺"这个很重要"）：三异常出口统一走
+  RustPython 现成 `vm.write_exception`（完整栈 + cause/context 链）；
+  语法错误经 `VmCompileError::into_pyexception` 转 SyntaxError 同
+  格式（源码行 + ^ 列指示，CPython 一致）；三层 NameError 实测过。
+- **打包体系**（用户定夺：三平台独立脚本 + 各自 toml + init 模板，
+  buildozer 风格更细粒度）：桌面 python.exe 形态 = `pygame-runner`
+  通用运行器（一个 exe 跑任意 main.py 游戏目录，dist 实跑验证）；
+  build_web REGISTRY 退役 → pack/*.web.toml（14 案例迁移）；
+  build_apk android.toml 驱动（命令行覆盖）；pack_common 零依赖
+  toml 读取（tomllib → tomli → mini 解析 fallback）。
+- 资源打包定约（用户定夺）：打包脚本控制资源列表（跨平台 io 已备，
+  路径对齐即可——不做 asset:// 协议层）。
