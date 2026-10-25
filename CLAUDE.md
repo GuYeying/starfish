@@ -190,7 +190,7 @@ python -m http.server 8000 --directory target/web   # → http://localhost:8000/
     屏外）；EncodeCtx 附件直用 starfish ColorAttachment/DepthAttachment
     （PassColor/PassDepth 已删）。Material 已正名 SpriteMaterial
     （pub(crate) 内部设施，cull/blend 创建期愿望定型）。
-16. **中间面合成定约（2026-10-24 渲染架构批次 B）**：自带管线的客人
+16. **中间面合成定约（2026-10-25 渲染架构批次 B）**：自带管线的客人
     （egui_wgpu 等——与引擎相机定约不同构者）走**中间面**：客人画进
     持久 Surface（`OverlayCtx::pass_on_surface`），引擎 sprite 管线
     `OverlayCtx::blit_fullscreen` 合成回目标（MVP = `camera_mvp_for`，
