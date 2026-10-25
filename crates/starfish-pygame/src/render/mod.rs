@@ -17,7 +17,7 @@
 //!
 //! **全局相机定约**：相机 uniform（`@group(0)@binding(0) 64B mat4x4
 //! MVP`）全局唯一——pack 时按 [`CameraState`] 解出（Auto = 按目标尺寸
-//! 隐式；Manual = [`set_camera`] override）。sprite/调试线/font 管线
+//! 隐式；Manual = [`set_default_camera`] override）。sprite/调试线/font 管线
 //! 同构共享；egui 客人经适配层跟随。一处设置、全体生效。
 //!
 //! GPU 槽（ADR-6 display 全局槽的前置形态）：[`Screen::new`] 建立
@@ -217,8 +217,8 @@ pub fn gpu_info() -> Option<GpuInfo> {
 
 /// 全局相机 override（→ Manual：所有后续渲染生效——本帧剩余批次、其它
 /// Surface、后续帧；直到 [`reset_camera`]）。会话形态
-/// `RenderPass::set_camera` 同语义转发。
-pub fn set_camera(camera: &Camera) {
+/// `RenderPass::set_default_camera` 同语义转发。
+pub fn set_default_camera(camera: &Camera) {
     let g = gpu();
     *g.camera_state.borrow_mut() = CameraState::Manual(*camera);
 }
