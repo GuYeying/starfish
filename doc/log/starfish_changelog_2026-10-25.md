@@ -113,3 +113,26 @@
 - rapier-starfish-debug：5c913e7（set_camera_mvp 原语）
 - pygame-rs：b131e95（阶段 A 绑定层 + pygame.render 模块）→ a4bf8f9
   （阶段 B 绑定层）→ 06b4e11（egui 快照）
+
+## 追加批次：注释整理与架构可读性（2026-10-25 收官清扫）
+
+渲染架构 A/B/C/D 落地后的代码整理（零行为变更——编译 + 回归
+custom_pipeline_demo/blit_transform_demo SUMMARY PASS +
+binding_probe 46/46 验证）：
+
+- **API 正名收官**（用户四轮定夺）：`set_camera` → `set_default_camera`
+  （全链路：引擎 render::set_default_camera + RenderPass 同名 +
+  pygame.render.set_default_camera + 三会话 t.set_default_camera——
+  语义钉死 = `with render()` 批绘制的**隐式默认相机**，raw_render 自管
+  不参与）；`reset_camera` Python 面删除（引擎内部 render.init 愿望
+  切换保留）；raw_render 相机彻底自管（camera= 托管撤销；
+  `access.write_buffer(buf, mat4)` 特判 Mat4 直写自有 bind group）。
+- **绑定层 render.rs 分区**：工具区（Debug 兜底宏/kwargs 解析）/
+  Camera / 全局相机 / 愿望 init / 资源两入口（ResourceAccess +
+  FromArgs 收参 + 资源句柄）/ 主屏查询 / raw_render 各段段头横线
+  与导航注释补齐；kw_int/kw_f64/kw_str 等工具函数 doc 补全。
+- **引擎侧 doc 补全**：CameraRig::raw 关联 Gpu::camera_for 现写
+  语义；新增公开接口（with_surface / texture_view / pass_on_surface /
+  blit_fullscreen(_with) / camera_mvp_for / RenderWish / store_wish /
+  follow_global_camera / set_camera_mvp）doc 核对齐全——含"何时调 /
+  定约 / 坑位"三层信息。

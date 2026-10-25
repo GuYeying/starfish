@@ -191,7 +191,8 @@ pub(crate) struct CameraRig {
 }
 
 impl CameraRig {
-    /// 裸构造（uniform + bind；mvp 占位 identity——pack 时按状态现写）
+    /// 裸构造（uniform + bind；mvp 占位 identity——pack 时经
+    /// [`Gpu::camera_for`] 按全局 CameraState 现写）
     pub fn raw(device: &Arc<wgpu::Device>, access: &RenderResourceAccess) -> Self {
         let buf = access.create_raw_buffer(
             Some("pygame_camera"),
