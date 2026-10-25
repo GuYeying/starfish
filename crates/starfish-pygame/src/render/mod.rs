@@ -7,11 +7,18 @@
 //! 模块面（契约 §六 签名级契约的实现落位）：
 //! - [`Texture`]：GPU 纹理（Rgba8Unorm，上传/采样/离屏三位一体）
 //! - [`Screen`] / [`Surface`] / [`DrawTarget`]：绘制终点统一抽象
-//!   （Screen = 交换链背板进程唯一；Surface = 纹理背板用户自由创建）
-//! - [`Camera`]：MVP 组装（ortho/perspective 同型，唯一上传变换量）
+//!   （Screen = 交换链背板进程唯一；Surface = 离屏画布 + 空间可放置
+//!   纹理对象——无相机字段，全局相机隐式）
+//! - [`Camera`] / [`CameraState`]：MVP 组装（ortho/perspective 同型，
+//!   唯一上传变换量）+ 全局相机状态机（Auto2d/Auto3d/Manual）
 //! - [`Batch`]：批处理执行体（纹理切换即段边界；即时 API × 延迟提交）
-//! - [`Material`]：默认带纹理 alpha 混合材质（管线变体矩阵惰性缓存）
-
+//! - [`SpriteMaterial`]（内部）：pygame 固定渲染管线的状态材质（管线
+//!   变体矩阵惰性缓存；不对外暴露——定制管线走 RenderResourceAccess）
+//!
+//! **全局相机定约**：相机 uniform（`@group(0)@binding(0) 64B mat4x4
+//! MVP`）全局唯一——pack 时按 [`CameraState`] 解出（Auto = 按目标尺寸
+//! 隐式；Manual = [`set_camera`] override）。sprite/调试线/font 管线
+//! 同构共享；egui 客人经适配层跟随。一处设置、全体生效。
 //!
 //! GPU 槽（ADR-6 display 全局槽的前置形态）：[`Screen::new`] 建立
 //! 进程级 Gpu 句柄，[`Surface`]/[`Texture`]/pygame::font 等经 [`gpu`]
@@ -25,8 +32,8 @@ pub mod target;
 pub mod texture;
 
 pub use batch::{Batch, BatchTopology, GeometryKind, SpriteVertex};
-pub use camera::Camera;
-pub use material::{Material, SPRITE_MRT_WGSL, SPRITE_WGSL};
+pub use camera::{Camera, CameraState};
+pub use material::{SpriteBlend, SPRITE_MRT_WGSL, SPRITE_WGSL};
 pub use session::{begin_screen, begin_targets, end_screen, end_targets, with_screen,
     with_targets, NoActiveSession};
 pub use target::{render_targets, render_targets_arc, DrawTarget, OverlayCtx, RenderPass, Screen,
@@ -39,9 +46,13 @@ use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::sync::Arc;
 
+use glam::Mat4;
 use starfish_render::bind_group::bind_group::BindGroup;
+use starfish_render::pipeline::CullMode;
 use starfish_render::render_resource_access::RenderResourceAccess;
 use starfish_render::sampler_desc::SamplerDescriptor;
+
+use material::SpriteMaterial;
 
 /// blit 目标坐标（像素，y 向下；左上角为原点）
 pub type Coord = (i32, i32);
@@ -53,6 +64,8 @@ pub type Coord = (i32, i32);
 pub type IRect = [i32; 4];
 
 /// 进程级 GPU 句柄：设备/队列 + 资源访问 + 材质 + 默认采样器 + 白纹理
+/// + **全局相机 rig**（全局相机定约：全局唯一 uniform/bind，pack 时按
+/// CameraState 解 MVP——Screen/Surface 无相机字段）
 pub(crate) struct Gpu {
     pub device: Arc<wgpu::Device>,
     pub queue: Arc<wgpu::Queue>,
@@ -65,7 +78,12 @@ pub(crate) struct Gpu {
     /// Rgba8——"管线按 (color_format, sample_count) 分套"多窗口定约的
     /// 叠加目标版。
     pub offscreen_access: Arc<RenderResourceAccess>,
-    pub material: Material,
+    /// 固定管线状态材质（cull/blend 创建期愿望定型）
+    pub material: SpriteMaterial,
+    /// 全局相机 rig（uniform + bind；mvp 由 pack 按状态现写）
+    pub camera: RefCell<target::CameraRig>,
+    /// 全局相机状态机（Auto2d / Auto3d / Manual）
+    pub camera_state: RefCell<CameraState>,
     /// 默认采样器（linear clamp——pygame 贴图平滑语义）
     pub sampler: Arc<wgpu::Sampler>,
     /// 1×1 白纹理（纯色路径：fill/draw::* 的纹理入端）
@@ -83,9 +101,59 @@ pub(crate) struct Gpu {
 // 挡在编译期。
 thread_local! {
     static GPU_SLOT: RefCell<Option<Arc<Gpu>>> = const { RefCell::new(None) };
+    /// 渲染愿望槽（pygame.render.init / pygame.init(dim)——set_mode 前
+    /// 配置，Gpu 装配时消费一次；后设优先）
+    static WISH_SLOT: RefCell<RenderWish> = RefCell::new(RenderWish::DEFAULT);
 }
 
-/// 建立（或复用）GPU 槽（`Screen::new` 调用；首次为准）
+/// 渲染愿望（创建期细粒度控制——剔除/混合/相机维；Gpu 装配消费一次）
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RenderWish {
+    /// dim=3（透视默认相机）；false = 2D 正交（默认）
+    pub dim3d: bool,
+    /// Auto3d 透视参数（fov 度数制）
+    pub fov_deg: f32,
+    pub near: f32,
+    pub far: f32,
+    /// 剔除（默认 None——镜像矩阵绕序天然安全；开 back/front 后镜像
+    /// quad 背面消失属物理正确）
+    pub cull: CullMode,
+    /// 混合（默认 Alpha）
+    pub blend: SpriteBlend,
+}
+
+impl RenderWish {
+    pub const DEFAULT: Self = Self {
+        dim3d: false,
+        fov_deg: 60.0,
+        near: 0.1,
+        far: 100.0,
+        cull: CullMode::None,
+        blend: SpriteBlend::Alpha,
+    };
+
+    /// 相机状态初值（Gpu 装配时定型）
+    fn camera_state(&self) -> CameraState {
+        if self.dim3d {
+            CameraState::Auto3d { fov_deg: self.fov_deg, near: self.near, far: self.far }
+        } else {
+            CameraState::Auto2d
+        }
+    }
+}
+
+/// 渲染愿望写入（pygame.render.init——set_mode 前配置；整只覆盖）
+pub fn store_wish(wish: RenderWish) {
+    WISH_SLOT.with(|w| *w.borrow_mut() = wish);
+}
+
+/// 当前渲染愿望（含未配置的默认值）
+pub fn current_wish() -> RenderWish {
+    WISH_SLOT.with(|w| *w.borrow())
+}
+
+/// 建立（或复用）GPU 槽（`Screen::new` 调用；首次为准——愿望随首次
+/// 装配消费定型）
 pub(crate) fn init_gpu(
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
@@ -134,6 +202,36 @@ pub fn gpu_info() -> Option<GpuInfo> {
     })
 }
 
+// ── 全局相机 API（一处设置、全体生效）──────────────────────────────
+
+/// 全局相机 override（→ Manual：所有后续渲染生效——本帧剩余批次、其它
+/// Surface、后续帧；直到 [`reset_camera`]）。会话形态
+/// `RenderPass::set_camera` 同语义转发。
+pub fn set_camera(camera: &Camera) {
+    let g = gpu();
+    *g.camera_state.borrow_mut() = CameraState::Manual(*camera);
+}
+
+/// 回自动相机（Auto2d / Auto3d——按创建期愿望）
+pub fn reset_camera() {
+    let g = gpu();
+    *g.camera_state.borrow_mut() = current_wish().camera_state();
+}
+
+/// 当前全局相机状态
+pub fn camera_state() -> CameraState {
+    *gpu().camera_state.borrow()
+}
+
+/// 当前全局 MVP（Auto 状态按主屏尺寸现算——resize 天然跟随；
+/// Manual = 用户相机）
+pub fn camera_mvp() -> Mat4 {
+    let g = gpu();
+    let state = *g.camera_state.borrow();
+    let size = crate::display::get_screen().size();
+    state.resolve_mvp((size.0 as f32, size.1 as f32))
+}
+
 impl Gpu {
     fn new(
         device: Arc<wgpu::Device>,
@@ -141,7 +239,10 @@ impl Gpu {
         access: Arc<RenderResourceAccess>,
         offscreen_access: Arc<RenderResourceAccess>,
     ) -> Self {
-        let material = Material::new(&access);
+        // 愿望消费（一次定型：剔除/混合进材质，相机维进状态机初值）
+        let wish = current_wish();
+        let material = SpriteMaterial::new(&access, wish.cull, wish.blend);
+        let camera_state = RefCell::new(wish.camera_state());
         let sampler = Arc::new(
             access.create_sampler("pygame_sampler", &SamplerDescriptor::linear_clamp()),
         );
@@ -152,19 +253,39 @@ impl Gpu {
             .texture_view(0, white.view())
             .sampler(1, sampler.clone())
             .build(Some("pygame_white_bind"));
-        let gpu = Self {
-            device,
-            queue,
-            access,
+        // 全局相机 rig：uniform/bind 全局唯一；mvp 由 pack 按 CameraState
+        // 现写（初始 ortho(1,1) 仅占位）
+        let gpu0 = Self {
+            device: device.clone(),
+            queue: queue.clone(),
+            access: access.clone(),
             offscreen_access,
             material,
+            camera: RefCell::new(target::CameraRig::raw(
+                &device,
+                &access,
+            )),
+            camera_state,
             sampler,
             white,
             white_bind,
             binds: RefCell::new(HashMap::new()),
             white_key,
         };
-        gpu
+        gpu0
+    }
+
+    /// pack 期相机解算：按当前状态解出目标尺寸的 MVP 写入全局 rig
+    ///（Auto 状态随目标隐式；Manual 与尺寸无关）——返回 rig 的借用
+    /// 供 EncodeCtx 消费。
+    pub(crate) fn camera_for(
+        &self,
+        size: (u32, u32),
+    ) -> std::cell::RefMut<'_, target::CameraRig> {
+        let mut rig = self.camera.borrow_mut();
+        let state = *self.camera_state.borrow();
+        rig.mvp = state.resolve_mvp((size.0.max(1) as f32, size.1.max(1) as f32));
+        rig
     }
 
     /// 纹理 bind group 缓存（texture 0 + sampler 1；按纹理指针键控。
