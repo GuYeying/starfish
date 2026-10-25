@@ -226,10 +226,17 @@ pub fn camera_state() -> CameraState {
 /// 当前全局 MVP（Auto 状态按主屏尺寸现算——resize 天然跟随；
 /// Manual = 用户相机）
 pub fn camera_mvp() -> Mat4 {
+    let size = crate::display::get_screen().size();
+    camera_mvp_for(size)
+}
+
+/// 按目标尺寸解全局 MVP（客人合成用——Auto 状态按给定尺寸隐式、
+/// Manual = 用户 override 与尺寸无关：与目标层 pack 同一解算，
+/// "一处设置、全体生效"定约的客人侧入口）
+pub fn camera_mvp_for(size: (u32, u32)) -> Mat4 {
     let g = gpu();
     let state = *g.camera_state.borrow();
-    let size = crate::display::get_screen().size();
-    state.resolve_mvp((size.0 as f32, size.1 as f32))
+    state.resolve_mvp((size.0.max(1) as f32, size.1.max(1) as f32))
 }
 
 impl Gpu {
