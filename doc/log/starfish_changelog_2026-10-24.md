@@ -177,3 +177,13 @@ screen_rect 与 ScreenDescriptor 按渲染目标取（Surface = 表面尺寸）�
 - 下游侧（本仓无关）：egui Renderer 槽化（格式+样本数键）、rapier
   2D/3D 调试线槽键扩 (样本数, 目标系)、Surface 变体 ppp 恒 1.0
   （离屏无 DPI——窗口 175% 缩放渗入导致 egui 布局/剪裁错位内容裁空）。
+
+## 追加批次：客人叠加深度自清（pygame-rs 批次 51 对应）
+
+- `OverlayCtx::with_pass(depth=true)` 的深度附件 **load 恒 Clear(1.0)**
+  （原 Load 承接宿主深度）：宿主深度存在"从不清理"的常态（主屏
+  present 走 pack(false) 不带 PassDepth），Load 承接 = wgpu 对未初始
+  化纹理的零初始化跟踪（清 0.0 = 最近平面）→ 3D 客人全被深度测试
+  无声剔除——**主屏与 Surface 的 3D 调试线自此从未显示过**（surf_probe
+  五象限盲验 + 用户 A/B 实验定位）。定约：客人叠加语义 = 恒在游戏
+  内容之上，3D 客人自管遮挡（LessEqual），不承接宿主深度。
