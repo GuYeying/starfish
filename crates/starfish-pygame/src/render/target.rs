@@ -228,7 +228,17 @@ impl Screen {
         let format = surface.color_format();
         let samples = surface.sample_count();
         let size = surface.size();
-        let gpu = init_gpu(context.device().clone(), context.queue().clone(), Arc::new(access));
+        // 离屏 access：Rgba8Unorm（Surface/Texture 恒此格式——客人渲染
+        // 器按目标选 access，见 Gpu::offscreen_access）
+        let offscreen_access = Arc::new(
+            context.resource_access(wgpu::TextureFormat::Rgba8Unorm, super::material::DEPTH_FORMAT),
+        );
+        let gpu = init_gpu(
+            context.device().clone(),
+            context.queue().clone(),
+            Arc::new(access),
+            offscreen_access,
+        );
         let camera = CameraRig::ortho(&gpu, size);
         Ok(Self {
             gpu,

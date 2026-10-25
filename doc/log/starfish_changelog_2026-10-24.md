@@ -162,3 +162,18 @@ screen_rect 与 ScreenDescriptor 按渲染目标取（Surface = 表面尺寸）�
   engine Sound 包装）；
 - 下游侧（本仓无关）：color init_colors 颜色表装载接入 install、
   Channel/Effect/parity 绑定面、parity_test 案例。
+
+## 追加批次：叠加目标管线分套（pygame-rs 批次 50 对应）
+
+- `Gpu` / `GpuInfo` 增 `offscreen_access`：default 颜色格式 = Rgba8Unorm
+  的第二 RenderResourceAccess（`Screen::new` 装配期经
+  `context.resource_access(Rgba8Unorm, DEPTH_FORMAT)` 建好）。客人
+  渲染器（egui / rapier 调试线等自持管线者）按**渲染目标**选 access：
+  wgpu 附件格式严格相等校验，交换链格式随平台漂移（Web/macOS =
+  Bgra8、Windows = Rgba8）而离屏 Surface 恒 Rgba8——跨目标复用管线
+  = 附件校验 panic（Web pip_test 实测：egui_pipeline BGRA8 vs Surface
+  RGBA8）。"管线按 (color_format, sample_count) 分套"多窗口定约的
+  叠加目标版；
+- 下游侧（本仓无关）：egui Renderer 槽化（格式+样本数键）、rapier
+  2D/3D 调试线槽键扩 (样本数, 目标系)、Surface 变体 ppp 恒 1.0
+  （离屏无 DPI——窗口 175% 缩放渗入导致 egui 布局/剪裁错位内容裁空）。
