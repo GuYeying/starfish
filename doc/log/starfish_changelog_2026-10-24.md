@@ -152,3 +152,13 @@ egui 内嵌面板 → blit 合成上屏，pip_test 5/5 PASS——下游批次 48
 下游追加（pygame-rs 批次 48 修订）：egui 画中画目标尺寸覆盖——egui 的
 screen_rect 与 ScreenDescriptor 按渲染目标取（Surface = 表面尺寸），
 消除剪裁矩形越界 wgpu 校验 panic（绑定层问题，引擎侧无改动）。
+
+## 追加批次：绑定收官支撑（pygame-rs 批次 49 对应）
+
+- `session::begin_screen_depth`：Screen **深度会话**入口（与普通会话
+  共用槽位——开启即替换；深度管线打包 + base 帧清屏清深度 1.0），
+  下游 `screen.render_depth()` 真绑定撤桩；
+- mixer `Sound` 增 pub `from_data` / `data` 桥（绑定层 PySound ↔
+  engine Sound 包装）；
+- 下游侧（本仓无关）：color init_colors 颜色表装载接入 install、
+  Channel/Effect/parity 绑定面、parity_test 案例。
