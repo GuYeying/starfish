@@ -56,7 +56,15 @@ pub type IRect = [i32; 4];
 pub(crate) struct Gpu {
     pub device: Arc<wgpu::Device>,
     pub queue: Arc<wgpu::Queue>,
+    /// 主屏 access（默认颜色格式 = 交换链格式）
     pub access: Arc<RenderResourceAccess>,
+    /// 离屏 access（默认颜色格式 = Rgba8Unorm——Surface/Texture 离屏
+    /// 目标恒此格式）。客人渲染器（UI 库/物理调试线等自持管线者）按
+    /// **渲染目标**选 access 建管线：wgpu 附件格式严格相等校验，交换链
+    /// 格式随平台漂移（Web/macOS = Bgra8、Windows = Rgba8）而离屏恒
+    /// Rgba8——"管线按 (color_format, sample_count) 分套"多窗口定约的
+    /// 叠加目标版。
+    pub offscreen_access: Arc<RenderResourceAccess>,
     pub material: Material,
     /// 默认采样器（linear clamp——pygame 贴图平滑语义）
     pub sampler: Arc<wgpu::Sampler>,
@@ -82,11 +90,12 @@ pub(crate) fn init_gpu(
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
     access: Arc<RenderResourceAccess>,
+    offscreen_access: Arc<RenderResourceAccess>,
 ) -> Arc<Gpu> {
     GPU_SLOT.with(|slot| {
         let mut slot = slot.borrow_mut();
         if slot.is_none() {
-            *slot = Some(Arc::new(Gpu::new(device, queue, access)));
+            *slot = Some(Arc::new(Gpu::new(device, queue, access, offscreen_access)));
         }
         slot.as_ref().expect("GPU 槽刚写入").clone()
     })
@@ -108,6 +117,8 @@ pub struct GpuInfo {
     pub device: Arc<wgpu::Device>,
     pub queue: Arc<wgpu::Queue>,
     pub access: Arc<RenderResourceAccess>,
+    /// 离屏目标 access（Rgba8Unorm；见 [`Gpu::offscreen_access`]）
+    pub offscreen_access: Arc<RenderResourceAccess>,
 }
 
 /// GPU 句柄快照（[`Screen::new`] 建立槽之后可用；未建立 = `None`——
@@ -118,6 +129,7 @@ pub fn gpu_info() -> Option<GpuInfo> {
             device: g.device.clone(),
             queue: g.queue.clone(),
             access: g.access.clone(),
+            offscreen_access: g.offscreen_access.clone(),
         })
     })
 }
@@ -127,6 +139,7 @@ impl Gpu {
         device: Arc<wgpu::Device>,
         queue: Arc<wgpu::Queue>,
         access: Arc<RenderResourceAccess>,
+        offscreen_access: Arc<RenderResourceAccess>,
     ) -> Self {
         let material = Material::new(&access);
         let sampler = Arc::new(
@@ -143,6 +156,7 @@ impl Gpu {
             device,
             queue,
             access,
+            offscreen_access,
             material,
             sampler,
             white,
