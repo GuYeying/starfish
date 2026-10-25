@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use starfish_gfx::geometry::Geometry;
 use starfish_render::bind_group::bind_group::BindGroup;
-use starfish_render::render_pass::attachments::{ColorAttachment, LoadOp, StoreOp};
+use starfish_render::render_pass::attachments::{ColorAttachment, DepthAttachment};
 use starfish_render::render_pass::render_pass::RenderPass;
 use wgpu::util::DeviceExt;
 
@@ -269,6 +269,36 @@ impl Batch {
         );
     }
 
+    /// 任意四角 quad（**3D 形态**——角带 z；blit_transform 模型矩阵
+    /// 空间放置的执行原语；角序 TL/TR/BR/BL，两三角 (0,1,2)(0,2,3)）
+    pub fn push_quad_corners_3d(
+        &mut self,
+        corners: [[f32; 3]; 4],
+        uvs: [[f32; 2]; 4],
+        color: [f32; 4],
+        texture: Option<&Texture>,
+    ) {
+        let v = |p: [f32; 3], t: [f32; 2]| SpriteVertex {
+            pos: p,
+            uv: t,
+            color,
+        };
+        let [c0, c1, c2, c3] = corners;
+        let [u0, u1, u2, u3] = uvs;
+        self.push_vertices(
+            BatchTopology::Triangles,
+            texture,
+            &[
+                v(c0, u0),
+                v(c1, u1),
+                v(c2, u2),
+                v(c0, u0),
+                v(c2, u2),
+                v(c3, u3),
+            ],
+        );
+    }
+
     /// base 图元几何入批（`shape2d` 家族产出；z 透传、颜色烘焙为调用色）
     ///
     /// **GLES 兼容（批次二十四）**：三角形以“退化四边形”入队——每三角形
@@ -351,25 +381,17 @@ impl Batch {
 
 // ── 提交（目标层调用；pub(crate) 面）─────────────────────────────
 
-/// 颜色附件规格（1 个 = 普通 pass；N 个 = MRT）
-pub(crate) struct PassColor {
-    pub view: Arc<wgpu::TextureView>,
-    pub format: wgpu::TextureFormat,
-}
-
-/// 深度附件规格
-pub(crate) struct PassDepth {
-    pub view: Arc<wgpu::TextureView>,
-    /// true = 本 pass 清深度（LoadOp::Clear(1.0)），false = 承接已有深度
-    pub clear: bool,
-}
-
-/// 编码上下文（目标层拼装）
+/// 编码上下文（目标层拼装；附件直用 starfish-render 类型——与
+/// OverlayCtx 同轨，无中间转换层。`formats` 平行携带颜色格式供管线
+/// 变体选取：附件本体无格式字段）
 pub(crate) struct EncodeCtx<'a> {
     pub gpu: &'a Gpu,
     pub camera: &'a super::target::CameraRig,
-    pub colors: Vec<PassColor>,
-    pub depth: Option<PassDepth>,
+    /// 颜色附件（1 个 = 普通 pass；N 个 = MRT）
+    pub colors: Vec<ColorAttachment>,
+    /// 颜色附件格式（平行数组——管线选取用）
+    pub formats: Vec<wgpu::TextureFormat>,
+    pub depth: Option<DepthAttachment>,
     pub samples: u32,
     /// 裁剪矩形（scissor；`set_clip` 的执行形态）
     pub scissor: Option<[u32; 4]>,
@@ -397,12 +419,26 @@ pub(crate) fn encode(batch: &Batch, ctx: &mut EncodeCtx) -> Option<wgpu::Command
     if batch.is_empty() {
         return None;
     }
-    // 相机 MVP 写入（queue.write_buffer：本命令提交前生效）
-    ctx.gpu.queue.write_buffer(
-        &ctx.camera.buf,
-        0,
-        bytemuck::bytes_of(&ctx.camera.mvp.to_cols_array_2d()),
+    // 相机 MVP = **每 pack 一次性 uniform buffer + bind**（与下方 vbo
+    // 同一定约，批次九坑的相机版修复：主屏多次 pack 挂 pending 统一
+    // 提交，而 write_buffer 即時——共享 buffer 时正交/透视交替 pack
+    // 互相覆盖，后写者对全部 pass 生效[3D 卡片飞出屏]。一次性副本
+    // 使各 pass 命令引用各自独立数据，天然免疫）。
+    let cam_buf = Arc::new(
+        ctx.gpu
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("pygame_camera_mvp"),
+                contents: bytemuck::bytes_of(&ctx.camera.mvp.to_cols_array_2d()),
+                usage: wgpu::BufferUsages::UNIFORM,
+            }),
     );
+    let cam_bind = ctx
+        .gpu
+        .access
+        .bind_group_builder()
+        .uniform_raw(0, cam_buf, 64)
+        .build(Some("pygame_camera_bind_pack"));
 
     // 纹理 bind group 预建（段级，按纹理指针缓存；纯色段 = 白纹理本体直引）
     for seg in batch.tris.segments.iter().chain(&batch.lines.segments) {
@@ -412,32 +448,9 @@ pub(crate) fn encode(batch: &Batch, ctx: &mut EncodeCtx) -> Option<wgpu::Command
     }
 
     let mrt = ctx.colors.len() > 1;
-    let color_attachments: Vec<Option<ColorAttachment>> = ctx
-        .colors
-        .iter()
-        .map(|c| {
-            Some(ColorAttachment {
-                view: c.view.clone(),
-                load: LoadOp::Load, // 清屏由目标层负责（begin_frame / 透明底纹理）
-                store: StoreOp::Store,
-                resolve_target: None,
-                depth_slice: None,
-            })
-        })
-        .collect();
-    let depth_attachment = ctx.depth.as_ref().map(|d| {
-        starfish_render::render_pass::attachments::DepthAttachment {
-            view: d.view.clone(),
-            load: if d.clear {
-                LoadOp::Clear(1.0)
-            } else {
-                LoadOp::Load
-            },
-            store: StoreOp::Store,
-            stencil_ops: None,
-            depth_slice: None,
-        }
-    });
+    let color_attachments: Vec<Option<ColorAttachment>> =
+        ctx.colors.iter().map(|c| Some(c.clone())).collect();
+    let depth_attachment = ctx.depth.clone();
     let color_refs: Vec<&Option<ColorAttachment>> = color_attachments.iter().collect();
 
     let mut encoder = ctx.gpu.access.create_command_encoder();
@@ -455,35 +468,41 @@ pub(crate) fn encode(batch: &Batch, ctx: &mut EncodeCtx) -> Option<wgpu::Command
         pass.set_scissor_rect(x, y, w, h);
     }
     if !batch.tris.is_empty() {
-        draw_stream(&mut pass, &batch.tris, false, ctx);
+        draw_stream(&mut pass, &batch.tris, false, ctx, &cam_bind);
     }
     if !batch.lines.is_empty() {
-        draw_stream(&mut pass, &batch.lines, true, ctx);
+        draw_stream(&mut pass, &batch.lines, true, ctx, &cam_bind);
     }
     pass.end();
     Some(encoder.finish())
 }
 
-fn draw_stream(pass: &mut RenderPass, stream: &Stream, lines: bool, ctx: &EncodeCtx) {
+fn draw_stream(
+    pass: &mut RenderPass,
+    stream: &Stream,
+    lines: bool,
+    ctx: &EncodeCtx,
+    cam_bind: &BindGroup,
+) {
     let depth = ctx.depth.is_some();
     let pipeline = if ctx.colors.len() > 1 {
-        let formats: Vec<wgpu::TextureFormat> =
-            ctx.colors.iter().map(|c| c.format).collect();
         ctx.gpu
             .material
-            .pipeline_mrt(ctx.gpu, &ctx.camera.bind, &formats, ctx.samples, lines)
+            .pipeline_mrt(ctx.gpu, &ctx.camera.bind, &ctx.formats, ctx.samples, lines)
     } else {
         ctx.gpu.material.pipeline(
             ctx.gpu,
             &ctx.camera.bind,
-            ctx.colors[0].format,
+            ctx.formats[0],
             ctx.samples,
             lines,
             depth,
         )
     };
     pass.set_pipeline(&pipeline);
-    pass.set_bind_group(0, &ctx.camera.bind);
+    // 本 pack 的相机 MVP（一次性 bind——见 encode 头注释；布局与
+    // rig 常驻 bind 同构）
+    pass.set_bind_group(0, cam_bind);
     // 顶点数据内联一次性 buffer：命令缓冲引用各自独立的数据，天然免疫
     // "同帧多次 pack 的 write_buffer 互相覆盖"（批次九实测坑）。
     // P3 优化位：append-only arena + slice 偏移（需 base RenderPass 支持）。

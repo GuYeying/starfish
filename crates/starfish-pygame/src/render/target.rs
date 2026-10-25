@@ -33,11 +33,10 @@ use starfish_render::settings::{GpuSettings, SurfaceSettings};
 use starfish_we::Window;
 use crate::{Color, IRect};
 
-use super::batch::{encode, Batch, BatchTopology, EncodeCtx, GeometryKind, PassColor, PassDepth,
-    SpriteVertex};
+use super::batch::{encode, Batch, BatchTopology, EncodeCtx, GeometryKind, SpriteVertex};
 use super::camera::Camera;
 use super::texture::Texture;
-use super::{init_gpu, gpu, Coord, Gpu};
+use super::{init_gpu, gpu, set_camera, Coord, Gpu};
 use starfish_gfx::{Geometry, ShapeVertex};
 
 /// 纯色路径的顶点色（白纹理 × 白色 = 原色）
@@ -70,6 +69,40 @@ pub trait DrawTarget {
     fn blit_centered(&self, src: &Surface, center: (i32, i32)) {
         let (w, h) = src.size();
         self.blit(src, (center.0 - w as i32 / 2, center.1 - h as i32 / 2))
+    }
+    /// 变换 blit（**单接口收拢——Mat4 承载一切变换**）：源面四角
+    /// (0,0,0)(w,0,0)(w,h,0)(0,h,0) 统一 `transform_point3`——
+    /// 2D 用法 = 矩阵只含 xy 仿射（z 恒 0，零拷贝旋转/缩放/镜像，
+    /// 替代 transform 烘焙）；3D 空间放置 = 模型矩阵（四角带 z，
+    /// `render_depth` 会话下与 3D 场景正确遮挡）。源自动 flush。
+    ///
+    /// 默认管线 cull=none——镜像矩阵（det<0）绕序天然安全；用户经
+    /// `render.init(cull=...)` 开剔除后镜像 quad 背面消失属物理正确。
+    fn blit_transform(&self, src: &Surface, mat: Mat4, tint: Option<impl Into<Color>>) {
+        src.flush();
+        let (sw, sh) = (src.size().0 as f32, src.size().1 as f32);
+        let mut color = src.blit_tint();
+        if let Some(t) = tint {
+            let t = rgba(t);
+            color = [color[0] * t[0], color[1] * t[1], color[2] * t[2], color[3] * t[3]];
+        }
+        let corner = |x: f32, y: f32| mat.transform_point3(glam::Vec3::new(x, y, 0.0));
+        let c = [
+            corner(0.0, 0.0),
+            corner(sw, 0.0),
+            corner(sw, sh),
+            corner(0.0, sh),
+        ];
+        let corners = [
+            [c[0].x, c[0].y, c[0].z],
+            [c[1].x, c[1].y, c[1].z],
+            [c[2].x, c[2].y, c[2].z],
+            [c[3].x, c[3].y, c[3].z],
+        ];
+        let uvs = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+        self.with_batch(|b| {
+            b.push_quad_corners_3d(corners, uvs, color, Some(&src.texture))
+        });
     }
     /// area blit（pygame blit 的 area 语义）：src 的像素子区域一次
     /// 四边形贴入 dest，绘制尺寸 = area 尺寸。
@@ -149,7 +182,8 @@ pub trait DrawTarget {
     fn with_batch(&self, f: impl FnOnce(&mut Batch));
 }
 
-/// 相机 rig：uniform 缓冲 + bind group + 当前 MVP（每目标一套）
+/// 相机 rig：uniform 缓冲 + bind group + 当前 MVP（**全局唯一**——
+/// 挂 Gpu 槽；mvp 由 pack 按全局 CameraState 现写）
 pub(crate) struct CameraRig {
     pub buf: Arc<wgpu::Buffer>,
     pub bind: BindGroup,
@@ -157,33 +191,22 @@ pub(crate) struct CameraRig {
 }
 
 impl CameraRig {
-    pub fn ortho(gpu: &Gpu, size: (u32, u32)) -> Self {
-        let buf = gpu.access.create_raw_buffer(
+    /// 裸构造（uniform + bind；mvp 占位 identity——pack 时按状态现写）
+    pub fn raw(device: &Arc<wgpu::Device>, access: &RenderResourceAccess) -> Self {
+        let buf = access.create_raw_buffer(
             Some("pygame_camera"),
             64,
             wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         );
-        let bind = gpu
-            .access
+        let bind = access
             .bind_group_builder()
             .uniform_raw(0, buf.clone(), 64)
             .build(Some("pygame_camera_bind"));
-        let mut rig = Self {
+        Self {
             buf,
             bind,
             mvp: Mat4::IDENTITY,
-        };
-        rig.set_ortho(size);
-        rig
-    }
-
-    pub fn set_ortho(&mut self, size: (u32, u32)) {
-        self.mvp = Camera::ortho(size.0.max(1) as f32, size.1.max(1) as f32).mvp();
-    }
-
-    /// 替换为自定义相机（透视 / 位姿——深度会话与 3D 内容用）
-    pub fn set(&mut self, camera: &Camera) {
-        self.mvp = camera.mvp();
+        }
     }
 }
 
@@ -199,7 +222,6 @@ pub struct Screen {
     /// "深度新/颜色旧"附件尺寸不匹配导致命令缓冲无效，批次二十三实测）
     pending_resize: Cell<Option<(u32, u32)>>,
     batch: RefCell<Batch>,
-    camera: RefCell<CameraRig>,
     /// 裁剪区（`set_clip`；None = 不裁剪）
     clip: Cell<Option<IRect>>,
     format: wgpu::TextureFormat,
@@ -227,7 +249,6 @@ impl Screen {
             RenderEntry::async_new(window, surface_settings, gpu_settings).await?;
         let format = surface.color_format();
         let samples = surface.sample_count();
-        let size = surface.size();
         // 离屏 access：Rgba8Unorm（Surface/Texture 恒此格式——客人渲染
         // 器按目标选 access，见 Gpu::offscreen_access）
         let offscreen_access = Arc::new(
@@ -239,14 +260,12 @@ impl Screen {
             Arc::new(access),
             offscreen_access,
         );
-        let camera = CameraRig::ortho(&gpu, size);
         Ok(Self {
             gpu,
             surface: RefCell::new(surface),
             begun: Cell::new(false),
             pending_resize: Cell::new(None),
             batch: RefCell::new(Batch::new()),
-            camera: RefCell::new(camera),
             clip: Cell::new(None),
             format,
             samples,
@@ -261,10 +280,10 @@ impl Screen {
         self.transparent_bg.set(true);
     }
 
-    /// 窗口尺寸变化（交换链 + 深度重建 + 相机正交跟随）
+    /// 窗口尺寸变化（交换链 + 深度重建；相机无需跟随——全局相机
+    /// Auto 状态 pack 时按目标尺寸现算，resize 天然生效）
     pub fn resize(&self, width: u32, height: u32) {
         self.surface.borrow_mut().resize(width, height);
-        self.camera.borrow_mut().set_ortho((width, height));
     }
 
     /// 帧边界安全的 resize 请求（批次二十三）：帧进行中（begun）时挂起，
@@ -325,15 +344,10 @@ impl Screen {
 
     /// 深度会话：绘制走深度测试管线（Standard + 写入），深度缓冲由
     /// base 帧清屏（每帧 begin 清 1.0）。3D 内容 / 2.5D 遮挡用；
-    /// 相机经 [`Self::set_camera`] 换透视。
+    /// 相机经 [`super::set_camera`]（全局）换透视。
     pub fn render_depth(&self) -> RenderPass<'_> {
         self.ensure_begun();
         RenderPass::screen(self, true)
-    }
-
-    /// 替换相机（正交默认；`Camera::perspective` + 位姿供深度会话）
-    pub fn set_camera(&self, camera: &Camera) {
-        self.camera.borrow_mut().set(camera);
     }
 
     /// 裁剪区（scissor；作用于本目标全部绘制，None = 不裁剪）
@@ -402,7 +416,13 @@ impl Screen {
             self.surface
                 .borrow()
                 .get_current_depth_texture_view()
-                .map(|view| PassDepth { view, clear: false })
+                .map(|view| DepthAttachment {
+                    view,
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                    stencil_ops: None,
+                    depth_slice: None,
+                })
         } else {
             None
         };
@@ -411,14 +431,18 @@ impl Screen {
         });
         let cmd = {
             let batch = self.batch.borrow();
-            let camera = self.camera.borrow();
+            let camera = self.gpu.camera_for(self.size());
             let mut ctx = EncodeCtx {
                 gpu: &self.gpu,
                 camera: &camera,
-                colors: vec![PassColor {
+                colors: vec![ColorAttachment {
                     view,
-                    format: self.format,
+                    load: wgpu::LoadOp::Load, // 清屏由目标层负责（begin_frame）
+                    store: wgpu::StoreOp::Store,
+                    resolve_target: None,
+                    depth_slice: None,
                 }],
+                formats: vec![self.format],
                 depth: depth_att,
                 samples: self.samples,
                 scissor,
@@ -628,7 +652,6 @@ enum PassKind<'a> {
     Mrt {
         gpu: Arc<Gpu>,
         targets: Vec<&'a Surface>,
-        camera: RefCell<CameraRig>,
         batch: RefCell<Batch>,
     },
 }
@@ -657,7 +680,7 @@ impl<'a> RenderPass<'a> {
     }
 
     fn pack_mrt(&self) {
-        let PassKind::Mrt { gpu, targets, camera, batch } = &self.kind else {
+        let PassKind::Mrt { gpu, targets, batch } = &self.kind else {
             return;
         };
         let cmd = {
@@ -665,17 +688,21 @@ impl<'a> RenderPass<'a> {
             if b.is_empty() {
                 return;
             }
-            let cam = camera.borrow();
+            let camera = gpu.camera_for(self.size());
             let mut ctx = EncodeCtx {
                 gpu,
-                camera: &cam,
+                camera: &camera,
                 colors: targets
                     .iter()
-                    .map(|t| PassColor {
+                    .map(|t| ColorAttachment {
                         view: t.view.clone(),
-                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                        resolve_target: None,
+                        depth_slice: None,
                     })
                     .collect(),
+                formats: vec![wgpu::TextureFormat::Rgba8Unorm; targets.len()],
                 depth: None,
                 samples: 1,
                 scissor: None,
@@ -689,13 +716,10 @@ impl<'a> RenderPass<'a> {
         batch.borrow_mut().clear();
     }
 
-    /// 替换相机（会话内后续绘制生效）
+    /// 替换相机（**全局语义**——转发 [`super::set_camera`]：所有后续
+    /// 渲染生效直到 `reset_camera`；三形态（Screen/Surface/MRT）无差别）
     pub fn set_camera(&self, camera: &Camera) {
-        match &self.kind {
-            PassKind::Screen(s) => s.set_camera(camera),
-            PassKind::Surface(s) => s.set_camera(camera),
-            PassKind::Mrt { camera: rig, .. } => rig.borrow_mut().set(camera),
-        }
+        set_camera(camera);
     }
 
     /// 会话级延迟叠加（**通用客人直绘的会话形态**，2026-10-24——"画到
@@ -836,7 +860,6 @@ pub struct Surface {
     depth: Option<(Arc<wgpu::Texture>, Arc<wgpu::TextureView>)>,
     size: (u32, u32),
     batch: RefCell<Batch>,
-    camera: RefCell<CameraRig>,
     /// 裁剪区（`set_clip`；None = 不裁剪）
     clip: Cell<Option<IRect>>,
     /// 表面级 alpha（`set_alpha`；255 = 不透明。blit 时乘进顶点色
@@ -873,7 +896,6 @@ impl Surface {
         let gpu = gpu().clone();
         let size = texture.size();
         let view = texture.view();
-        let camera = RefCell::new(CameraRig::ortho(&gpu, size));
         Self {
             gpu,
             texture,
@@ -881,7 +903,6 @@ impl Surface {
             depth: None,
             size,
             batch: RefCell::new(Batch::new()),
-            camera,
             clip: Cell::new(None),
             alpha: Cell::new(255),
             cpu_alpha: None,
@@ -965,11 +986,6 @@ impl Surface {
         RenderPass::surface(self, true)
     }
 
-    /// 替换相机（正交默认；透视/位姿供深度会话与 3D 内容）
-    pub fn set_camera(&self, camera: &Camera) {
-        self.camera.borrow_mut().set(camera);
-    }
-
     /// 裁剪区（scissor；作用于本面全部绘制，None = 不裁剪）
     pub fn set_clip(&self, clip: Option<IRect>) {
         self.clip.set(clip);
@@ -1042,11 +1058,14 @@ impl Surface {
             if batch.is_empty() {
                 return;
             }
-            let camera = self.camera.borrow();
+            let camera = self.gpu.camera_for(self.size);
             let depth_att = if depth {
-                self.depth.as_ref().map(|(_, view)| PassDepth {
+                self.depth.as_ref().map(|(_, view)| DepthAttachment {
                     view: view.clone(),
-                    clear: true, // 每次提交独立：深度随本 pass 清 1.0
+                    load: wgpu::LoadOp::Clear(1.0), // 每次提交独立：深度随本 pass 清 1.0
+                    store: wgpu::StoreOp::Store,
+                    stencil_ops: None,
+                    depth_slice: None,
                 })
             } else {
                 None
@@ -1054,10 +1073,14 @@ impl Surface {
             let mut ctx = EncodeCtx {
                 gpu: &self.gpu,
                 camera: &camera,
-                colors: vec![PassColor {
+                colors: vec![ColorAttachment {
                     view: self.view.clone(),
-                    format: wgpu::TextureFormat::Rgba8Unorm, // ADR-3 离屏格式
+                    load: wgpu::LoadOp::Load, // 承接已绘内容（透明底画布）
+                    store: wgpu::StoreOp::Store,
+                    resolve_target: None,
+                    depth_slice: None,
                 }],
+                formats: vec![wgpu::TextureFormat::Rgba8Unorm], // ADR-3 离屏格式
                 depth: depth_att,
                 samples: 1,
                 scissor: self
@@ -1152,13 +1175,11 @@ pub fn render_targets<'a>(targets: &[&'a Surface]) -> RenderPass<'a> {
         "render_targets: 全部目标尺寸须一致"
     );
     let gpu = gpu().clone();
-    let camera = RefCell::new(CameraRig::ortho(&gpu, size));
     RenderPass {
         depth: false,
         kind: PassKind::Mrt {
             gpu,
             targets: targets.to_vec(),
-            camera,
             batch: RefCell::new(Batch::new()),
         },
     }

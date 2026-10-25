@@ -180,3 +180,13 @@ python -m http.server 8000 --directory target/web   # → http://localhost:8000/
 14. 引擎 crate 内测试引用 crate 自身路径用 `crate::`（`starfish::`
     只在跨 crate 场景）。
 
+15. **全局相机定约（2026-10-24 渲染架构批次 A）**：相机 uniform
+    （`@group(0)@binding(0) 64B mat4x4 MVP`）**全局唯一**（Gpu 挂
+    CameraRig + `CameraState = Auto2d | Auto3d | Manual`；pack 按状态
+    现算，Auto 随目标尺寸隐式）；Screen/Surface/MRT 无相机字段。
+    **相机 MVP 每 pack 一次性 uniform buffer + bind**（与批 vbo 同款
+    定约）——主屏多次 pack 挂 pending 统一提交而 write_buffer 即时，
+    共享 buffer 时同帧正交/透视交替 pack 互相覆盖（实测 3D 内容飞出
+    屏外）；EncodeCtx 附件直用 starfish ColorAttachment/DepthAttachment
+    （PassColor/PassDepth 已删）。Material 已正名 SpriteMaterial
+    （pub(crate) 内部设施，cull/blend 创建期愿望定型）。
