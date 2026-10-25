@@ -519,7 +519,12 @@ impl OverlayCtx {
     /// 开一条叠加通道执行 `draw`（LoadOp::Load 承接已绘内容；通道借用以
     /// `&mut RenderPass` 交付调用方直绘）。`depth` = 附加深度附件（3D
     /// 内容深度测试用；本上下文的深度附件只供一条通道——第二条起为
-    /// None）。**深度契约按自绘管线分支**：管线深度关闭者（如 2D 线
+    /// None）。**深度恒清 1.0**（不承接宿主深度）：客人叠加语义 = 恒在
+    /// 游戏内容之上，3D 客人自管遮挡（LessEqual）——宿主深度恒不清的
+    /// 场景（主屏 present 走 pack(false)）若 Load 承接 = wgpu 零初始化
+    /// 0.0（最近平面）→ 3D 客人全被无声剔除（2026-10-24 实测：主屏 +
+    /// Surface 的 3D 调试线从未显示的根因）。
+    /// **深度契约按自绘管线分支**：管线深度关闭者（如 2D 线
     /// 管线）必须传 `false`——wgpu 对管线深度目标与通道附件做严格
     /// 相等校验。
     pub fn with_pass(
@@ -528,7 +533,10 @@ impl OverlayCtx {
         depth: bool,
         draw: impl FnOnce(&mut SfRenderPass),
     ) {
-        let depth_att = if depth { self.depth.take() } else { None };
+        let mut depth_att = if depth { self.depth.take() } else { None };
+        if let Some(d) = &mut depth_att {
+            d.load = wgpu::LoadOp::Clear(1.0);
+        }
         let color_refs: [&Option<ColorAttachment>; 1] = [&self.color];
         let mut pass = self
             .encoder
