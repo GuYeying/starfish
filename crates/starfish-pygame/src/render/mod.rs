@@ -41,15 +41,26 @@ pub use target::{render_targets, render_targets_arc, DrawTarget, OverlayCtx, Ren
 pub(crate) use target::CpuAlpha;
 pub use texture::Texture;
 
+// ── starfish-render 资源门面（重导出——绑定层包装与客人自建管线用）──
+// 与 pygame 同名类型（starfish Texture / RenderPass 包装）冲突者不入
+// 本层；wgpu 裸对象（Device/Queue/Buffer）不出 Python 界（暴露面收缩
+// 定约：ResourceAccess + 主屏 RenderSurface 两入口）。
+pub use starfish_render::bind_group::bind_group::BindGroup;
+pub use starfish_render::bind_group::builder::BindGroupBuilder;
+pub use starfish_render::mesh::mesh::Mesh;
+pub use starfish_render::pipeline::RenderPipeline;
+pub use starfish_render::render_pass::attachments::{ColorAttachment, DepthAttachment};
+pub use starfish_render::render_resource_access::RenderResourceAccess;
+pub use starfish_render::render_surface::RenderSurface;
+pub use starfish_render::shader_module::shader_module::ShaderModule;
+
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::sync::Arc;
 
 use glam::Mat4;
-use starfish_render::bind_group::bind_group::BindGroup;
 use starfish_render::pipeline::CullMode;
-use starfish_render::render_resource_access::RenderResourceAccess;
 use starfish_render::sampler_desc::SamplerDescriptor;
 
 use material::SpriteMaterial;

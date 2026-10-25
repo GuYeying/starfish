@@ -280,6 +280,13 @@ impl Screen {
         self.transparent_bg.set(true);
     }
 
+    /// 主屏 RenderSurface 访问缝（绑定层"主屏 attachment"入口——
+    /// 当前帧颜色/深度附件、格式与样本数查询经此触达；借用窗口内完成，
+    /// 不得跨帧持有附件）
+    pub fn with_surface<R>(&self, f: impl FnOnce(&RenderSurface) -> R) -> R {
+        f(&self.surface.borrow())
+    }
+
     /// 窗口尺寸变化（交换链 + 深度重建；相机无需跟随——全局相机
     /// Auto 状态 pack 时按目标尺寸现算，resize 天然生效）
     pub fn resize(&self, width: u32, height: u32) {
@@ -1082,6 +1089,12 @@ impl Surface {
     /// 背板纹理（blit 源的本体；可继续 `from_texture` 回环）
     pub fn texture(&self) -> &Texture {
         &self.texture
+    }
+
+    /// 背板纹理视图（**Rust 内部缝**——绑定层 ResourceAccess.bind_group
+    /// 的 "texture" 绑定取样用；wgpu 裸对象不出 Python 界）
+    pub fn texture_view(&self) -> Arc<wgpu::TextureView> {
+        self.view.clone()
     }
 
     /// 是否带深度缓冲
