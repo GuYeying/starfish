@@ -608,17 +608,28 @@ impl OverlayCtx {
     /// 经引擎 sprite 管线画到本上下文目标——MVP = [`super::camera_mvp_for`]
     ///（Auto = 按目标尺寸正交 → 像素级 1:1 全屏；`set_camera` 后全体
     /// 跟随）。中间面方案（egui 等自带管线客人）的合成段。
+    /// **注意**：MVP 在**调用时点**现算——排程类客人（defer_overlay 到
+    /// 收口才执行）若帧内多次 set_camera，收口时的全局相机可能已非排
+    /// 程时的值；精确时序用 [`Self::blit_fullscreen_with`]（排程时快照）。
     pub fn blit_fullscreen(&mut self, src: &Surface) {
+        let mvp = super::camera_mvp_for(self.size);
+        self.blit_fullscreen_with(src, mvp.to_cols_array_2d());
+    }
+
+    /// 全屏纹理合成（**快照 MVP 形态**）：矩阵由调用方在排程时点解算
+    /// 快照（如 `camera_mvp_for(目标尺寸)` 的产出），执行时点原样使用
+    ///——"draw 时相机"的精确语义（同帧 A 相机画主屏、B 相机画离屏
+    /// 各得其所）。
+    pub fn blit_fullscreen_with(&mut self, src: &Surface, mvp: [[f32; 4]; 4]) {
         use wgpu::util::DeviceExt;
         let (sw, sh) = src.size32();
         let tint = src.blit_tint();
         // 与 encode() 同款一次性资源：相机 MVP / 顶点各一次内联 buffer
         //（多 pass 多 pack 互不覆盖——批次九定约）
-        let mvp = super::camera_mvp_for(self.size);
         let cam_buf = self.gpu.device.create_buffer_init(
             &wgpu::util::BufferInitDescriptor {
                 label: Some("overlay_camera_mvp"),
-                contents: bytemuck::bytes_of(&mvp.to_cols_array_2d()),
+                contents: bytemuck::bytes_of(&mvp),
                 usage: wgpu::BufferUsages::UNIFORM,
             },
         );
