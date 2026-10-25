@@ -517,6 +517,10 @@ impl Screen {
             device: self.gpu.device.clone(),
             queue: self.gpu.queue.clone(),
             access: self.gpu.access.clone(),
+            gpu: self.gpu.clone(),
+            size: self.size(),
+            format: self.format,
+            samples: self.samples,
         };
         f(&mut ctx);
         let mut cmds = std::mem::take(&mut ctx.pre_pass_cmds);
@@ -537,6 +541,11 @@ pub struct OverlayCtx {
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
     access: Arc<RenderResourceAccess>,
+    /// 目标规格（`blit_fullscreen` 合成用；内部字段——构造处引擎填）
+    gpu: Arc<Gpu>,
+    size: (u32, u32),
+    format: wgpu::TextureFormat,
+    samples: u32,
 }
 
 impl OverlayCtx {
@@ -567,6 +576,103 @@ impl OverlayCtx {
             .begin_render_pass(label, &color_refs, depth_att, None, None, None);
         draw(&mut pass);
         pass.end();
+    }
+
+    /// 在任意离屏面上开一条通道（**中间面客人通道**——自带管线的绘制
+    /// 端（如 egui_wgpu）先画进面、再经 [`Self::blit_fullscreen`] 用引擎
+    /// sprite 管线合成回目标：客人零改其管线即可吃全局相机定约）。
+    /// 面恒 Rgba8 无深度（离屏画布定约）；`clear` = 本通道颜色清屏值。
+    pub fn pass_on_surface(
+        &mut self,
+        label: &str,
+        target: &Surface,
+        clear: wgpu::Color,
+        draw: impl FnOnce(&mut SfRenderPass),
+    ) {
+        let color = Some(ColorAttachment {
+            view: target.view.clone(),
+            load: wgpu::LoadOp::Clear(clear),
+            store: wgpu::StoreOp::Store,
+            resolve_target: None,
+            depth_slice: None,
+        });
+        let color_refs: [&Option<ColorAttachment>; 1] = [&color];
+        let mut pass = self
+            .encoder
+            .begin_render_pass(label, &color_refs, None, None, None, None);
+        draw(&mut pass);
+        pass.end();
+    }
+
+    /// 全屏纹理合成（**全局相机定约的客人侧落点**）：`src` 以整面 quad
+    /// 经引擎 sprite 管线画到本上下文目标——MVP = [`super::camera_mvp_for`]
+    ///（Auto = 按目标尺寸正交 → 像素级 1:1 全屏；`set_camera` 后全体
+    /// 跟随）。中间面方案（egui 等自带管线客人）的合成段。
+    pub fn blit_fullscreen(&mut self, src: &Surface) {
+        use wgpu::util::DeviceExt;
+        let (sw, sh) = src.size32();
+        let tint = src.blit_tint();
+        // 与 encode() 同款一次性资源：相机 MVP / 顶点各一次内联 buffer
+        //（多 pass 多 pack 互不覆盖——批次九定约）
+        let mvp = super::camera_mvp_for(self.size);
+        let cam_buf = self.gpu.device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("overlay_camera_mvp"),
+                contents: bytemuck::bytes_of(&mvp.to_cols_array_2d()),
+                usage: wgpu::BufferUsages::UNIFORM,
+            },
+        );
+        let cam_bind = self
+            .gpu
+            .access
+            .bind_group_builder()
+            .uniform_raw(0, Arc::new(cam_buf), 64)
+            .build(Some("overlay_camera_bind"));
+        let v = |x: f32, y: f32, u: f32, t: f32| SpriteVertex {
+            pos: [x, y, 0.0],
+            uv: [u, t],
+            color: tint,
+        };
+        let verts = [
+            v(0.0, 0.0, 0.0, 0.0),
+            v(sw, 0.0, 1.0, 0.0),
+            v(sw, sh, 1.0, 1.0),
+            v(0.0, 0.0, 0.0, 0.0),
+            v(sw, sh, 1.0, 1.0),
+            v(0.0, sh, 0.0, 1.0),
+        ];
+        let vbo = self.gpu.device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("overlay_compose_vbo"),
+                contents: bytemuck::cast_slice(&verts),
+                usage: wgpu::BufferUsages::VERTEX,
+            },
+        );
+        // 纹理 bind（缓存表 + 源面 flush 保险）
+        src.flush();
+        let tex_key = src.texture.cache_key();
+        self.gpu.ensure_bind_view(tex_key, src.texture.view());
+        // with_pass 借走 &mut self——闭包所需句柄先解构（借用纪律）
+        let gpu = self.gpu.clone();
+        let (format, samples) = (self.format, self.samples);
+        let vbo = Arc::new(vbo);
+        self.with_pass("overlay_compose", false, |pass| {
+            let pipeline =
+                gpu.material.pipeline(&gpu, &cam_bind, format, samples, false, false);
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &cam_bind);
+            let binds = gpu.binds.borrow();
+            if let Some(b) = binds.get(&tex_key) {
+                pass.set_bind_group(1, b);
+            }
+            pass.set_vertex_buffer(0, &vbo);
+            pass.draw(0..6, 0..1);
+        });
+    }
+
+    /// 本上下文目标尺寸（中间面尺寸跟随用）
+    pub fn size(&self) -> (u32, u32) {
+        self.size
     }
 
     /// 通道前命令编码器（**原生 wgpu encoder**——绘制通道开始前须完成
@@ -1044,6 +1150,10 @@ impl Surface {
             device: self.gpu.device.clone(),
             queue: self.gpu.queue.clone(),
             access: self.gpu.access.clone(),
+            gpu: self.gpu.clone(),
+            size: self.size,
+            format: wgpu::TextureFormat::Rgba8Unorm, // ADR-3 离屏格式
+            samples: 1,
         };
         f(&mut ctx);
         let mut cmds = std::mem::take(&mut ctx.pre_pass_cmds);
