@@ -47,20 +47,20 @@ impl Camera {
 }
 
 /// 全局相机状态机（相机全局化定约：Screen/Surface 无相机字段，
-/// 全局唯一 rig 按状态解 MVP——`set_camera` 进 Manual，`reset_camera`
+/// 全局唯一 rig 按状态解 MVP——`set_default_camera` 进 Manual，`reset_camera`
 /// 回 Auto；Auto 状态随目标尺寸隐式跟随，零配置）
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CameraState {
     /// 自动 2D（默认）：按各目标自身尺寸正交——像素坐标直入
     Auto2d,
     /// 自动 3D（`init(dim=3)` 定型）：按目标宽高比透视 × identity 视图
-    ///（fov 度数制；位姿经 `set_camera` 手动接管）
+    ///（fov 度数制；位姿经 `set_default_camera` 手动接管）
     Auto3d {
         fov_deg: f32,
         near: f32,
         far: f32,
     },
-    /// 手动：`set_camera` 全局 override（与目标尺寸无关）
+    /// 手动：`set_default_camera` 全局 override（与目标尺寸无关）
     Manual(Camera),
 }
 

@@ -36,7 +36,7 @@ use crate::{Color, IRect};
 use super::batch::{encode, Batch, BatchTopology, EncodeCtx, GeometryKind, SpriteVertex};
 use super::camera::Camera;
 use super::texture::Texture;
-use super::{init_gpu, gpu, set_camera, Coord, Gpu};
+use super::{init_gpu, gpu, set_default_camera, Coord, Gpu};
 use starfish_gfx::{Geometry, ShapeVertex};
 
 /// 纯色路径的顶点色（白纹理 × 白色 = 原色）
@@ -351,7 +351,7 @@ impl Screen {
 
     /// 深度会话：绘制走深度测试管线（Standard + 写入），深度缓冲由
     /// base 帧清屏（每帧 begin 清 1.0）。3D 内容 / 2.5D 遮挡用；
-    /// 相机经 [`super::set_camera`]（全局）换透视。
+    /// 相机经 [`super::set_default_camera`]（全局）换透视。
     pub fn render_depth(&self) -> RenderPass<'_> {
         self.ensure_begun();
         RenderPass::screen(self, true)
@@ -840,10 +840,10 @@ impl<'a> RenderPass<'a> {
         batch.borrow_mut().clear();
     }
 
-    /// 替换相机（**全局语义**——转发 [`super::set_camera`]：所有后续
+    /// 替换相机（**全局语义**——转发 [`super::set_default_camera`]：所有后续
     /// 渲染生效直到 `reset_camera`；三形态（Screen/Surface/MRT）无差别）
-    pub fn set_camera(&self, camera: &Camera) {
-        set_camera(camera);
+    pub fn set_default_camera(&self, camera: &Camera) {
+        set_default_camera(camera);
     }
 
     /// 会话级延迟叠加（**通用客人直绘的会话形态**，2026-10-24——"画到
