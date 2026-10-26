@@ -20,6 +20,37 @@ mod web;
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
 
+// ── 跨平台毫秒停表（诊断打点用）────────────────────────────────────
+
+/// 桌面 = Instant 真计时；wasm = 恒 0（std::time 在 wasm32-unknown-unknown
+/// 未实现——`Instant::now` 直接 panic "time not implemented"，2026-10-26
+/// web 宿主实测）。打点保留、耗时位归零；将来接 performance.now 补真值。
+pub struct Stopwatch {
+    #[cfg(not(target_arch = "wasm32"))]
+    start: std::time::Instant,
+}
+
+impl Stopwatch {
+    pub fn now() -> Self {
+        Self {
+            #[cfg(not(target_arch = "wasm32"))]
+            start: std::time::Instant::now(),
+        }
+    }
+
+    /// 自 [`Stopwatch::now`] 起的毫秒数
+    pub fn ms(&self) -> u128 {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.start.elapsed().as_millis()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            0
+        }
+    }
+}
+
 // ── 日志输出（统一入口；平台实现在子模块）───────────────────────────
 
 /// 跨平台日志：wasm → 浏览器控制台（console.log）；桌面 → stdout。

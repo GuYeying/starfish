@@ -112,7 +112,7 @@ pub fn pump() -> bool {
     });
     crate::gamepad::poll();
     // 慢排水哨兵（>50ms 才打点——逐帧噪声抑制；启动期归因用）
-    let t_drain = std::time::Instant::now();
+    let t_drain = starfish_std::debug::Stopwatch::now();
     let mut n_events = 0usize;
     while let Some(ev) = poll_engine() {
         n_events += 1;
@@ -121,7 +121,7 @@ pub fn pump() -> bool {
         }
         QUEUE.with(|q| q.borrow_mut().push_back(ev));
     }
-    let ms_drain = t_drain.elapsed().as_millis();
+    let ms_drain = t_drain.ms();
     if ms_drain > 50 {
         starfish_std::debug::devlog(&format!(
             "[event] pump 排水 {n_events} 条事件耗时 {ms_drain}ms"
