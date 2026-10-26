@@ -64,10 +64,14 @@ pub fn console_log(msg: &str) {
     native::log(msg);
 }
 
-/// 诊断落盘通道（批次二十四临时，随诊断批撤除）：println + Android 追加
-/// `/sdcard/Download/bp_log.txt`。渲染链路排障共用（begin_frame/present/
-/// resize 各环节打点）——非 wasm 无文件系统时仅 println。
+/// 诊断落盘通道（批次二十四临时，随诊断批撤除）：wasm → console_log
+///（println 于 wasm 不可见——web 渲染链路排障的唯一出口，2026-10-26）；
+/// 桌面 println；Android 追加 `/sdcard/Download/bp_log.txt`。
+/// 渲染链路排障共用（begin_frame/present/resize 各环节打点）。
 pub fn devlog(msg: &str) {
+    #[cfg(target_arch = "wasm32")]
+    console_log(msg);
+    #[cfg(not(target_arch = "wasm32"))]
     println!("{msg}");
     #[cfg(target_os = "android")]
     {
