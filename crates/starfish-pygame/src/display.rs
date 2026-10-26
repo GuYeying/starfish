@@ -219,11 +219,14 @@ pub fn apply_window_request(size: (u32, u32), flags: u32) {
             w.set_always_on_top(true);
         }
     });
-    let ms = t.ms();
-    if ms > 200 {
-        starfish_std::debug::devlog(&format!(
-            "[display] apply_window_request 慢调用哨兵 {ms}ms"
-        ));
+    // 尺寸变更同步落地（2026-10-26 web 黑屏根因修复）：set_mode 本是
+    // 同步语义（真 pygame 同）——画布位图在 set_size 处已即时变化，
+    // 引擎侧 surface/depth 若等异步事件下一帧才重配置，脚本 set_mode
+    // 返回后立即绘制即撞"深度 800×600 vs 颜色 400×300"校验失败 →
+    // CommandBuffer 永久失效。此处同步补发引擎 resize；同尺寸由
+    // RenderSurface::resize 短路（重复事件零成本）
+    if get_init() {
+        handle_resized(size.0, size.1);
     }
 }
 
