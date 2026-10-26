@@ -371,6 +371,11 @@ impl RenderSurface{
         // 0. 防 0 尺寸
         let width = width.max(1);
         let height = height.max(1);
+        // 同尺寸短路（2026-10-26）：set_mode 同步落地 + 事件重放/观察者
+        // 会产生重复同尺寸 resize——重配置 + 纹理重建纯浪费，跳过
+        if self.config.width == width && self.config.height == height {
+            return;
+        }
 
         // 2. 直接修改你原来存的 config
         self.config.width = width;
