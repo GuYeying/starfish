@@ -204,6 +204,8 @@ pub fn apply_window_request(size: (u32, u32), flags: u32) {
     if flags & OPENGL != 0 {
         starfish_std::debug::console_log("[display] OPENGL 旗标垫底（引擎恒 wgpu）");
     }
+    // 落地耗时打点（慢调用哨兵——启动诊断用）
+    let t = std::time::Instant::now();
     with_window(|w| {
         w.set_size(size);
         w.set_resizable(flags & RESIZABLE != 0);
@@ -217,6 +219,12 @@ pub fn apply_window_request(size: (u32, u32), flags: u32) {
             w.set_always_on_top(true);
         }
     });
+    let ms = t.elapsed().as_millis();
+    if ms > 200 {
+        starfish_std::debug::devlog(&format!(
+            "[display] apply_window_request 慢调用哨兵 {ms}ms"
+        ));
+    }
 }
 
 /// 窗口整体不透明度（0.0 透明 .. 1.0 不透明；桌面窗口合成——
