@@ -229,7 +229,14 @@ pub struct GpuSettings {
 impl Default for GpuSettings {
     fn default() -> Self {
         Self {
-            backends: Backends::all(),
+            // Android 默认 GLES（部分设备 Vulkan 驱动不兼容——选了坏适配器
+            // 静默黑屏；GL 后端设备兼容性远高于 Vulkan；需要 Vulkan 的项目
+            // 通过 GpuSettings::with_backends 显式覆盖）
+            backends: if cfg!(target_os = "android") {
+                wgpu::Backends::GL
+            } else {
+                Backends::all()
+            },
             flags: if cfg!(debug_assertions) {
                 InstanceFlags::DEBUG | InstanceFlags::VALIDATION
             } else {
