@@ -53,11 +53,33 @@ impl Stopwatch {
 
 // ── 日志输出（统一入口；平台实现在子模块）───────────────────────────
 
-/// 跨平台日志：wasm → 浏览器控制台（console.log）；桌面 → stdout。
+/// 诊断落盘 sink（壳按需注入一次；console_log 每条同步转发）。
+///
+/// 动机：Android stdout = logcat 转发线程的管道——**块缓冲**，进程被
+/// 杀时未冲刷的面包屑全部丢失。壳注入"追加写 dev_log.txt"的 sink 后，
+/// 全部诊断输出（runtime 阶段打点 / testhost 首帧分段 / panic 短讯）
+/// 同步落盘，崩溃后 USB 直拉定位最后一条。
+static DIAG_SINK: std::sync::Mutex<Option<Box<dyn Fn(&str) + Send + Sync>>> =
+    std::sync::Mutex::new(None);
+
+/// 注入诊断落盘 sink（壳启动早期调用一次；未注入 = 零开销跳过）
+pub fn set_diag_sink(f: Box<dyn Fn(&str) + Send + Sync>) {
+    if let Ok(mut g) = DIAG_SINK.lock() {
+        *g = Some(f);
+    }
+}
+
+/// 跨平台日志：wasm → 浏览器控制台（console.log）；桌面 → stdout；
+/// 已注入 sink 时同步转发落盘（见 [`set_diag_sink`]）。
 ///
 /// wasm 没有 stdout/stderr，`println!` 在浏览器无处可去——Web 应用的
 /// 诊断输出一律走本函数。
 pub fn console_log(msg: &str) {
+    if let Ok(g) = DIAG_SINK.lock() {
+        if let Some(f) = g.as_ref() {
+            f(msg);
+        }
+    }
     #[cfg(target_arch = "wasm32")]
     web::log(msg);
     #[cfg(not(target_arch = "wasm32"))]
