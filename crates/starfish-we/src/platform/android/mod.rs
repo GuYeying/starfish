@@ -660,9 +660,9 @@ pub(crate) unsafe fn attach_surface_impl(
     env: *mut std::ffi::c_void,
     surface: *mut std::ffi::c_void,
 ) -> (u32, u32) {
-    let ptr = ANativeWindow_fromSurface(env, surface);
-    let width = ANativeWindow_getWidth(ptr).max(0) as u32;
-    let height = ANativeWindow_getHeight(ptr).max(0) as u32;
+    let ptr = unsafe { ANativeWindow_fromSurface(env, surface) };
+    let width = unsafe { ANativeWindow_getWidth(ptr).max(0) } as u32;
+    let height = unsafe { ANativeWindow_getHeight(ptr).max(0) } as u32;
     attach_external_window(ptr, width, height);
     (width, height)
 }
