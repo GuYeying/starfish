@@ -32,10 +32,22 @@ pub fn surface_resized(width: u32, height: u32) {
     crate::platform::android::surface_resized_impl(width, height);
 }
 
-/// SurfaceView 销毁（destroyed 回调转发；push CloseRequested → 引擎
-/// 帧循环自然收口——与 NativeActivity 模式的 Destroy 语义一致）
-pub fn detach_surface() {
-    crate::platform::android::detach_surface_impl();
+/// SurfaceView 销毁（destroyed 回调转发；**比对清除**——`surface` 与
+/// 当前槽位一致才清槽 + push CloseRequested → 引擎帧循环自然收口，
+/// 与 NativeActivity 模式的 Destroy 语义一致；换场竞态里的陈旧
+/// detach 被忽略，不连坐新场窗口）。
+///
+/// # Safety
+/// - `env`：有效的 JNIEnv 指针（调用线程已 attach JVM）；
+/// - `surface`：本次销毁回调对应的 `android.view.Surface` jobject。
+pub unsafe fn detach_surface(env: *mut std::ffi::c_void, surface: *mut std::ffi::c_void) {
+    crate::platform::android::detach_surface_impl(env, surface);
+}
+
+/// 引擎完全停止后的窗口引用物理释放（壳收尾调用一次；精确释放 detach
+/// 暂存的指针——不碰当前窗口，换场重叠期安全）
+pub fn release_surface() {
+    crate::platform::android::release_pending_external();
 }
 
 /// 触摸注入（action：0 = down，1 = move，2 = up；坐标 = 位图像素）

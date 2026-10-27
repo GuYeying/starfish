@@ -139,6 +139,16 @@ pub fn external_active() -> bool {
 /// # Safety
 /// `ptr` å¿é¡»æ¯ææç `ANativeWindow*`ï¼fromSurface è¿åå¼ï¼ã
 pub unsafe fn attach_external_window(ptr: *mut std::ffi::c_void, width: u32, height: u32) {
+    // attach 即新场开演（进程一次契约下，每次 attach = 一轮新运行）：
+    // 清上一场残留事件（detach 落下的 CloseRequested / 旧 Resized / 触摸
+    // ——否则新场首泵吃到旧场 CloseRequested 立即收口，"第二次运行黑屏"
+    // 真机实证）；释放单窗槽位（窗口生命周期按"运行"而非"进程"计，
+    // 镜像 android_init 的每场重置）
+    {
+        let mut queue = PENDING.lock().unwrap_or_else(|p| p.into_inner());
+        queue.clear();
+    }
+    crate::window::reset_single_window_slot();
     *EXTERNAL.lock().unwrap_or_else(|p| p.into_inner()) =
         Some(ExternalWindow { ptr, width, height });
     PENDING
@@ -149,12 +159,42 @@ pub unsafe fn attach_external_window(ptr: *mut std::ffi::c_void, width: u32, hei
 
 /// åµå¥å®¿ä¸»è§£é¤çªå£ï¼SurfaceView éæ¯ï¼push CloseRequested â å¼æ
 /// å¸§å¾ªç¯èªç¶æ¶å£ââä¸ NativeActivity æ¨¡å¼ç Destroy è¯­ä¹ä¸è´ï¼
-pub fn detach_external_window() {
+pub fn detach_external_window(env: *mut std::ffi::c_void, surface: *mut std::ffi::c_void) {
+    // 无条件清槽 + push CloseRequested（引擎帧循环自然收口，与
+    // NativeActivity 的 Destroy 语义一致）。陈旧 detach（换场重叠期旧
+    // 场销毁晚于新场 attach）由 **Java 层代数守卫**拦截——ANCO 实证：
+    // fromSurface 的指针比对不可靠（同 Surface 未必返回同一
+    // ANativeWindow，比对失败 = 合法 detach 被误忽略 = 引擎永不收口，
+    // 声音不停 + 新场黑屏）。
+    let query = unsafe { ANativeWindow_fromSurface(env, surface) };
+    if query.is_null() {
+        return;
+    }
     *EXTERNAL.lock().unwrap_or_else(|p| p.into_inner()) = None;
+    // 槽位引用（attach 时 +1）的对消延迟到引擎完全停止（防
+    // present-after-release）：暂存指针，壳收尾经
+    // release_pending_external 归还
+    *PENDING_RELEASE.lock().unwrap_or_else(|p| p.into_inner()) = Some(query as usize);
+    unsafe { ANativeWindow_release(query) };
     PENDING
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .push_back(Event::CloseRequested);
+}
+
+/// 待物理释放的窗口引用（detach 暂存；引擎完全停止后由壳经
+/// [`release_pending_external`] 精确取走——usize 存裸指针绕开
+/// static Send 约束）
+static PENDING_RELEASE: std::sync::Mutex<Option<usize>> = std::sync::Mutex::new(None);
+
+/// 物理释放 detach 暂存的窗口引用（引擎完全停止后由壳调用一次；
+/// 空 = no-op。只动暂存槽，不碰当前窗口——换场安全）
+pub fn release_pending_external() {
+    if let Ok(mut pending) = PENDING_RELEASE.lock() {
+        if let Some(ptr) = pending.take() {
+            unsafe { ANativeWindow_release(ptr as *mut std::ffi::c_void) };
+        }
+    }
 }
 
 /// åµå¥å®¿ä¸»æ³¨å¥è§¦æ¸ï¼ä¸»ææ â é¼ æ äºä»¶åæï¼SDL æ¯ä¾ââä¸ glue è¾å¥
@@ -272,7 +312,15 @@ impl WindowInner {
     pub(crate) fn is_resizable(&self) -> bool {
         false
     }
-    pub(crate) fn set_size(&self, _width: u32, _height: u32) {}
+    pub(crate) fn set_size(&self, _width: u32, _height: u32) {
+        // ⚠️ 有意 no-op（2026-10-27 真机实验结论）：曾尝试接通
+        // ANativeWindow_setBuffersGeometry（脚本 set_mode → buffer 几何
+        // 对齐 → SurfaceFlinger 缩放铺满 SurfaceView）——几何本身生效，
+        // 但先于几何变更创建的 EGLSurface 在部分驱动（ColorOS 实测）不
+        // 跟随重建，此后 eglSwapBuffers 恒失败 → 全黑（帧循环健康、无
+        // panic、present 静默丢帧）。正解属 wgpu/EGL 层（surface 重建）
+        // 或引擎 letterbox MVP（缩放内容而非改几何），不在壳层做。
+    }
     pub(crate) fn set_fullscreen(&self, _fullscreen: bool) {}
     pub(crate) fn is_fullscreen(&self) -> bool {
         true
@@ -672,16 +720,18 @@ pub(crate) fn surface_resized_impl(width: u32, height: u32) {
     inject_external_resized(width, height);
 }
 
-/// [`crate::embedded::detach_surface`] 的委托目标：push CloseRequested
-///（引擎帧循环收口）。ANativeWindow 引用的 release 由调用方在引擎收口
-/// 后回调 [`release_external_window`]（防 present-after-release OOB）。
-pub(crate) fn detach_surface_impl() {
-    detach_external_window();
-}
-
-/// 嵌入宿主收口后的引用释放（引擎完全停止后调用一次）
-pub fn release_external_window(ptr: *mut std::ffi::c_void) {
-    unsafe { ANativeWindow_release(ptr) };
+/// [`crate::embedded::detach_surface`] 的委托目标：比对清除 + push
+/// CloseRequested（引擎帧循环收口）。ANativeWindow 引用的物理释放由壳
+/// 在引擎收口后回调 [`release_external_window`]（防 present-after-release
+/// OOB）。
+///
+/// # Safety
+/// `env`/`surface` 必须是有效的 JNI 环境/Surface 句柄。
+pub(crate) unsafe fn detach_surface_impl(
+    env: *mut std::ffi::c_void,
+    surface: *mut std::ffi::c_void,
+) {
+    unsafe { detach_external_window(env, surface) };
 }
 
 /// [`crate::embedded::inject_touch`] 的委托目标（action：0 down / 1 move / 2 up）
