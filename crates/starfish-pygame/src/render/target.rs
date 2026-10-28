@@ -310,16 +310,17 @@ impl Screen {
     pub fn present_mvp(&self) -> Mat4 {
         let (pw, ph) = self.surface.borrow().size();
         let (lw, lh) = self.logical.get();
-        let s = (pw as f32 / lw.max(1) as f32).min(ph as f32 / lh.max(1) as f32);
-        let ox = (pw as f32 - lw as f32 * s) / 2.0;
-        let oy = (ph as f32 - lh as f32 * s) / 2.0;
+        let fit = starfish_std::letterbox::Fit::fit(
+            pw as f64, ph as f64, lw as f64, lh as f64,
+        );
         let mut mvp = crate::render::camera_mvp_for((pw, ph));
-        if s != 1.0 {
-            mvp = mvp * glam::Mat4::from_scale(glam::Vec3::new(s, s, 1.0));
-        }
-        if ox != 0.0 || oy != 0.0 {
-            mvp = mvp * glam::Mat4::from_translation(glam::Vec3::new(ox, oy, 0.0));
-        }
+        mvp = mvp
+            * glam::Mat4::from_translation(glam::Vec3::new(
+                fit.offset_x as f32,
+                fit.offset_y as f32,
+                0.0,
+            ))
+            * glam::Mat4::from_scale(glam::Vec3::new(fit.scale as f32, fit.scale as f32, 1.0));
         mvp
     }
 
@@ -328,13 +329,10 @@ impl Screen {
     pub(crate) fn map_point_to_logical(&self, x: f64, y: f64) -> (f64, f64) {
         let (pw, ph) = self.surface.borrow().size();
         let (lw, lh) = self.logical.get();
-        if pw == 0 || ph == 0 || lw == 0 || lh == 0 {
-            return (x, y);
-        }
-        let scale = (pw as f64 / lw as f64).min(ph as f64 / lh as f64);
-        let ox = (pw as f64 - lw as f64 * scale) / 2.0;
-        let oy = (ph as f64 - lh as f64 * scale) / 2.0;
-        ((x - ox) / scale, (y - oy) / scale)
+        let fit = starfish_std::letterbox::Fit::fit(
+            pw as f64, ph as f64, lw as f64, lh as f64,
+        );
+        fit.physical_to_logical(x, y)
     }
 
     /// 窗口尺寸变化（交换链 + 深度重建；相机无需跟随——全局相机
@@ -487,17 +485,18 @@ impl Screen {
         let scissor = self.clip.get().and_then(|r| {
             let (pw, ph) = self.surface.borrow().size();
             let (lw, lh) = self.logical.get();
-            let s = (pw as f32 / lw.max(1) as f32).min(ph as f32 / lh.max(1) as f32);
-            let ox = (pw as f32 - lw as f32 * s) / 2.0;
-            let oy = (ph as f32 - lh as f32 * s) / 2.0;
+            let fit = starfish_std::letterbox::Fit::fit(
+                pw as f64, ph as f64, lw as f64, lh as f64,
+            );
             let mapped: [i32; 4] = if lw == 0 || lh == 0 {
                 r
             } else {
+                let (mx, my) = fit.logical_to_physical(r[0] as f64, r[1] as f64);
                 [
-                    (r[0] as f32 * s + ox) as i32,
-                    (r[1] as f32 * s + oy) as i32,
-                    (r[2] as f32 * s) as i32,
-                    (r[3] as f32 * s) as i32,
+                    mx as i32,
+                    my as i32,
+                    (r[2] as f32 * fit.scale as f32) as i32,
+                    (r[3] as f32 * fit.scale as f32) as i32,
                 ]
             };
             super::batch::scissor_from(mapped, self.surface.borrow().size())
@@ -509,9 +508,10 @@ impl Screen {
             // (set_mode) < 物理(原生窗口) → 短轴铺满长轴留黑边，零变形
             let (pw, ph) = self.surface.borrow().size();
             let (lw, lh) = self.logical.get();
-            let s = (pw as f32 / lw.max(1) as f32).min(ph as f32 / lh.max(1) as f32);
-            let ox = (pw as f32 - lw as f32 * s) / 2.0;
-            let oy = (ph as f32 - lh as f32 * s) / 2.0;
+            let fit = starfish_std::letterbox::Fit::fit(
+                pw as f64, ph as f64, lw as f64, lh as f64,
+            );
+            let (s, ox, oy) = (fit.scale as f32, fit.offset_x as f32, fit.offset_y as f32);
             let mut camera = self.gpu.camera_for((pw, ph));
             camera.mvp = camera.mvp
                 * glam::Mat4::from_translation(glam::Vec3::new(ox, oy, 0.0))
