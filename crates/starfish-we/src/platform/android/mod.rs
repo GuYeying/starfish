@@ -734,6 +734,20 @@ pub(crate) unsafe fn detach_surface_impl(
     unsafe { detach_external_window(env, surface) };
 }
 
+/// 嵌入窗口当前尺寸（None = 未 attach）。宿主壳建窗前的尺寸自查用
+///（引擎表面初始尺寸跟随原生窗口实测值——满屏 1:1 的确定性来源）
+pub fn external_size() -> Option<(u32, u32)> {
+    crate::platform::android::external_size_impl()
+}
+
+/// 嵌入窗口当前尺寸（None = 未 attach）。宿主壳建窗前的尺寸自查用
+///（引擎表面初始尺寸跟随原生窗口实测值——满屏 1:1 的确定性来源）
+pub(crate) fn external_size_impl() -> Option<(u32, u32)> {
+    let slot = EXTERNAL.lock().unwrap_or_else(|p| p.into_inner());
+    let ext = slot.as_ref()?;
+    Some((ext.width, ext.height))
+}
+
 /// [`crate::embedded::inject_touch`] 的委托目标（action：0 down / 1 move / 2 up）
 pub(crate) fn inject_touch_impl(action: u8, x: f64, y: f64) {
     inject_external_touch(action, x, y);
