@@ -233,6 +233,8 @@ pub struct Screen {
     /// 逻辑画布尺寸（脚本 set_mode 语义尺寸——Android 嵌入下物理表面
     /// 恒原生窗口、逻辑独立；呈现 = 等比缩放居中）
     logical: Cell<(u32, u32)>,
+    /// 首包映射参数打点哨兵（呈现排障；一次性）
+    pack_logged: Cell<bool>,
     /// 延迟叠加队列（[`Screen::defer_overlay`] 的排程；present 时统一执行）
     pending_overlays: RefCell<Vec<Box<dyn FnOnce(&mut OverlayCtx)>>>,
 }
@@ -276,6 +278,7 @@ impl Screen {
             samples,
             transparent_bg: Cell::new(false),
             logical: Cell::new(physical),
+            pack_logged: Cell::new(false),
             pending_overlays: RefCell::new(Vec::new()),
         })
     }
@@ -512,6 +515,12 @@ impl Screen {
                 pw as f64, ph as f64, lw as f64, lh as f64,
             );
             let (s, ox, oy) = (fit.scale as f32, fit.offset_x as f32, fit.offset_y as f32);
+            if !self.pack_logged.get() {
+                self.pack_logged.set(true);
+                starfish_std::debug::console_log(&format!(
+                    "[present] 物理={pw}x{ph} 逻辑={lw}x{lh} scale={s:.3} ox={ox:.1} oy={oy:.1}"
+                ));
+            }
             let mut camera = self.gpu.camera_for((pw, ph));
             camera.mvp = camera.mvp
                 * glam::Mat4::from_translation(glam::Vec3::new(ox, oy, 0.0))
