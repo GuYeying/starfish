@@ -13,6 +13,10 @@ description = "跨平台窗口 + 事件 crate（SDL 风格 poll 模型）：调�
 #   compile_error 把关——行为差异过大，不做运行期静默降级）。
 [features]
 default = []
+# 嵌入模式（Android 外部 Surface 注入门面）：防止不经意外用——
+# 开启后 starfish_we::embedded 门面才存在；窗口层对嵌入状态的钩子
+# 常驻（未 attach 时零成本休眠，行为同 glue）
+embedded = []
 we-wgpu = ["dep:raw-window-handle"]
 wgpu-auto = ["we-wgpu", "dep:wgpu"]
 multi-window = []

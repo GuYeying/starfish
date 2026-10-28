@@ -101,7 +101,7 @@ mod handle;
 mod platform;
 
 // 嵌入式宿主门面（2026-10-26）：外部 Surface 注入/事件注入/解除——嵌入式运行时（ pygame-rs-dev 的 Android 売）的小暴露面
-#[cfg(target_os = "android")]
+#[cfg(all(target_os = "android", feature = "embedded"))]
 pub mod embedded;
 // 平台后端（控不变）
 #[cfg(feature = "we-wgpu")]
