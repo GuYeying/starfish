@@ -44,6 +44,12 @@ pub unsafe fn detach_surface(env: *mut std::ffi::c_void, surface: *mut std::ffi:
     crate::platform::android::detach_surface_impl(env, surface);
 }
 
+/// 嵌入窗口当前尺寸（None = 未 attach）。宿主壳建窗前的尺寸自查用
+///（引擎表面初始尺寸跟随原生窗口实测值——满屏 1:1 的确定性来源）
+pub fn external_size() -> Option<(u32, u32)> {
+    crate::platform::android::external_size_impl()
+}
+
 /// 引擎完全停止后的窗口引用物理释放（壳收尾调用一次；精确释放 detach
 /// 暂存的指针——不碰当前窗口，换场重叠期安全）
 pub fn release_surface() {

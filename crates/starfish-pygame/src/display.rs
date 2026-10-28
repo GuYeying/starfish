@@ -219,6 +219,21 @@ pub fn apply_window_request(size: (u32, u32), flags: u32) {
             w.set_always_on_top(true);
         }
     });
+    // FULLSCREEN 旗标：尺寸请求作废——画布改取原生窗口实测尺寸
+    // （Android 嵌入 = 外部窗口实测值，满屏 1:1 零变形零映射；桌面 =
+    // 全屏后的窗口实测值）。非全屏 = 请求尺寸原样（GLES 缩放铺满，
+    // 既定语义）。"set_mode 与 fullscreen 处理"的语义修正定案
+    let effective = if flags & FULLSCREEN != 0 {
+        #[cfg(target_os = "android")]
+        match with_window(|w| w.size()) {
+            Some(native) if native.0 > 0 && native.1 > 0 => native,
+            _ => size,
+        }
+        #[cfg(not(target_os = "android"))]
+        size
+    } else {
+        size
+    };
     // 尺寸变更同步落地（2026-10-26 web 黑屏根因修复）：set_mode 本是
     // 同步语义（真 pygame 同）——画布位图在 set_size 处已即时变化，
     // 引擎侧 surface/depth 若等异步事件下一帧才重配置，脚本 set_mode
@@ -226,7 +241,7 @@ pub fn apply_window_request(size: (u32, u32), flags: u32) {
     // CommandBuffer 永久失效。此处同步补发引擎 resize；同尺寸由
     // RenderSurface::resize 短路（重复事件零成本）
     if get_init() {
-        handle_resized(size.0, size.1);
+        handle_resized(effective.0, effective.1);
     }
 }
 
