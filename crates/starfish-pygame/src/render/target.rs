@@ -575,7 +575,8 @@ impl Screen {
             if !self.pack_logged.get() {
                 self.pack_logged.set(true);
                 starfish_std::debug::console_log(&format!(
-                    "[present] 物理={pw}x{ph} 逻辑={lw}x{lh} scale={s:.3} ox={ox:.1} oy={oy:.1}"
+                    "[present] 物理={pw}x{ph} 逻辑={lw}x{lh} scale={s:.3} ox={ox:.1} oy={oy:.1} scissor={:?}",
+                    scissor,
                 ));
             }
             // 呈现映射（等比 letterbox，NDC 域统一组合）：相机一律解算
