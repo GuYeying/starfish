@@ -44,6 +44,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 pub(crate) mod entry;
+pub(crate) mod embedded;
+
+pub(crate) use embedded::{
+    attach_surface_impl, detach_surface_impl, external_active, external_size_impl,
+    inject_touch_impl, release_pending_external, surface_resized_impl, EXTERNAL,
+};
 
 use android_activity::input::{InputEvent, KeyAction, Keycode, MotionAction};
 use android_activity::{AndroidApp, InputStatus, MainEvent, PollEvent};
@@ -106,119 +112,6 @@ pub fn android_init(app: AndroidApp) {
         PENDING.lock().expect("PENDING éä¸­æ¯").clear();
         WINDOW_READY.store(false, Ordering::Release);
     }
-}
-
-// ââ åµå¥æ¨¡å¼ï¼å¤é¨ Surfaceï¼2026-10-26ï¼ï¼å®¿ä¸» app ç» JNI æ³¨å¥èªå·±
-// SurfaceView ç ANativeWindowï¼NativeActivity/glue ä¸åä¸ââåµå¥åºæ¯
-// å®¿ä¸»æ¯æ®é Kotlin Activityï¼ââââââââââââââââââââââââââââââââââââ
-// è£éå£ = attach_external_windowï¼JNI è½¬åï¼ï¼äºä»¶ = æ³¨å¥ PENDINGï¼
-// åæ´¾æå¨é¡µé¢/å®¿ä¸»ä¾§ï¼web å®¿ä¸» boot è£å³çåæè®¾è®¡ï¼ã
-
-/// å¤é¨æ³¨å¥çªå£ï¼ANativeWindow å¼ç¨ï¼fromSurface è·å¾_acquireï¼detach
-/// æ¶ releaseï¼+ ä½å¾å°ºå¯¸ã
-struct ExternalWindow {
-    ptr: *mut std::ffi::c_void,
-    width: u32,
-    height: u32,
-}
-
-static EXTERNAL: Mutex<Option<ExternalWindow>> = Mutex::new(None);
-
-// ANativeWindow å¼ç¨è·¨çº¿ç¨ä¼ éå®å¨ï¼Android å¾å½¢å¥æçº¿ç¨æ å³ï¼
-// éæ¾èµ° detach ç release è°ç¨ï¼
-unsafe impl Send for ExternalWindow {}
-
-/// åµå¥æ¨¡å¼æ¯å¦æ¿æ´»ï¼glue è·¯å¾çç­è·¯å¼å³ï¼
-pub fn external_active() -> bool {
-    EXTERNAL.lock().unwrap_or_else(|p| p.into_inner()).is_some()
-}
-
-/// åµå¥å®¿ä¸»æ³¨å¥å¤é¨çªå£ï¼`ANativeWindow_fromSurface` çè¿åå¼ç¨ï¼
-/// å¼ç¨è®¡æ°å·² +1ï¼[`detach_external_window`] æ¶ releaseï¼ã
-///
-/// # Safety
-/// `ptr` å¿é¡»æ¯ææç `ANativeWindow*`ï¼fromSurface è¿åå¼ï¼ã
-pub unsafe fn attach_external_window(ptr: *mut std::ffi::c_void, width: u32, height: u32) {
-    // attach 即新场开演（进程一次契约下，每次 attach = 一轮新运行）：
-    // 清上一场残留事件（detach 落下的 CloseRequested / 旧 Resized / 触摸
-    // ——否则新场首泵吃到旧场 CloseRequested 立即收口，"第二次运行黑屏"
-    // 真机实证）；释放单窗槽位（窗口生命周期按"运行"而非"进程"计，
-    // 镜像 android_init 的每场重置）
-    {
-        let mut queue = PENDING.lock().unwrap_or_else(|p| p.into_inner());
-        queue.clear();
-    }
-    crate::window::reset_single_window_slot();
-    *EXTERNAL.lock().unwrap_or_else(|p| p.into_inner()) =
-        Some(ExternalWindow { ptr, width, height });
-    PENDING
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .push_back(Event::Resized { width, height });
-}
-
-/// åµå¥å®¿ä¸»è§£é¤çªå£ï¼SurfaceView éæ¯ï¼push CloseRequested â å¼æ
-/// å¸§å¾ªç¯èªç¶æ¶å£ââä¸ NativeActivity æ¨¡å¼ç Destroy è¯­ä¹ä¸è´ï¼
-pub fn detach_external_window(env: *mut std::ffi::c_void, surface: *mut std::ffi::c_void) {
-    // 无条件清槽 + push CloseRequested（引擎帧循环自然收口，与
-    // NativeActivity 的 Destroy 语义一致）。陈旧 detach（换场重叠期旧
-    // 场销毁晚于新场 attach）由 **Java 层代数守卫**拦截——ANCO 实证：
-    // fromSurface 的指针比对不可靠（同 Surface 未必返回同一
-    // ANativeWindow，比对失败 = 合法 detach 被误忽略 = 引擎永不收口，
-    // 声音不停 + 新场黑屏）。
-    let query = unsafe { ANativeWindow_fromSurface(env, surface) };
-    if query.is_null() {
-        return;
-    }
-    *EXTERNAL.lock().unwrap_or_else(|p| p.into_inner()) = None;
-    // 槽位引用（attach 时 +1）的对消延迟到引擎完全停止（防
-    // present-after-release）：暂存指针，壳收尾经
-    // release_pending_external 归还
-    *PENDING_RELEASE.lock().unwrap_or_else(|p| p.into_inner()) = Some(query as usize);
-    unsafe { ANativeWindow_release(query) };
-    PENDING
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .push_back(Event::CloseRequested);
-}
-
-/// 待物理释放的窗口引用（detach 暂存；引擎完全停止后由壳经
-/// [`release_pending_external`] 精确取走——usize 存裸指针绕开
-/// static Send 约束）
-static PENDING_RELEASE: std::sync::Mutex<Option<usize>> = std::sync::Mutex::new(None);
-
-/// 物理释放 detach 暂存的窗口引用（引擎完全停止后由壳调用一次；
-/// 空 = no-op。只动暂存槽，不碰当前窗口——换场安全）
-pub fn release_pending_external() {
-    if let Ok(mut pending) = PENDING_RELEASE.lock() {
-        if let Some(ptr) = pending.take() {
-            unsafe { ANativeWindow_release(ptr as *mut std::ffi::c_void) };
-        }
-    }
-}
-
-/// åµå¥å®¿ä¸»æ³¨å¥è§¦æ¸ï¼ä¸»ææ â é¼ æ äºä»¶åæï¼SDL æ¯ä¾ââä¸ glue è¾å¥
-/// ç¿»è¯åè¯­ä¹ï¼ãactionï¼0 = downï¼1 = moveï¼2 = upãåæ  = ä½å¾åç´ ã
-pub fn inject_external_touch(action: u8, x: f64, y: f64) {
-    use crate::event::MouseButton;
-    let mut queue = PENDING.lock().unwrap_or_else(|p| p.into_inner());
-    match action {
-        0 => {
-            queue.push_back(Event::MouseMoved { x, y });
-            queue.push_back(Event::MouseDown { button: MouseButton::Left });
-        }
-        1 => queue.push_back(Event::MouseMoved { x, y }),
-        2 => queue.push_back(Event::MouseUp { button: MouseButton::Left }),
-        _ => {}
-    }
-}
-
-// 坌入宿主的尺寸变化事件（Resized 事件入队）
-pub fn inject_external_resized(width: u32, height: u32) {
-    PENDING
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .push_back(Event::Resized { width, height });
 }
 
 pub(crate) struct WindowInner;
@@ -687,68 +580,4 @@ fn keycode_to_keycode(keycode: Keycode) -> KeyCode {
         Keycode::Break => K::Pause,
         other => K::Other(u32::from(other)),
     }
-}
-
-// ── JNI 桥实现（starfish-we::embedded 门面的委托目标；libandroid.so
-//    原生符号直连）────────────────────────────────────────────
-
-unsafe extern "C" {
-    fn ANativeWindow_fromSurface(
-        env: *mut std::ffi::c_void,
-        surface: *mut std::ffi::c_void,
-    ) -> *mut std::ffi::c_void;
-    fn ANativeWindow_release(window: *mut std::ffi::c_void);
-    fn ANativeWindow_getWidth(window: *mut std::ffi::c_void) -> i32;
-    fn ANativeWindow_getHeight(window: *mut std::ffi::c_void) -> i32;
-}
-
-/// [`crate::embedded::attach_surface`] 的委托目标（fromSurface 获得引用 +
-/// 尺寸读取 + 装配登记）。# Safety 见 facade 文档。
-pub(crate) unsafe fn attach_surface_impl(
-    env: *mut std::ffi::c_void,
-    surface: *mut std::ffi::c_void,
-) -> (u32, u32) {
-    let ptr = unsafe { ANativeWindow_fromSurface(env, surface) };
-    let width = unsafe { ANativeWindow_getWidth(ptr).max(0) } as u32;
-    let height = unsafe { ANativeWindow_getHeight(ptr).max(0) } as u32;
-    attach_external_window(ptr, width, height);
-    (width, height)
-}
-
-/// [`crate::embedded::surface_resized`] 的委托目标
-pub(crate) fn surface_resized_impl(width: u32, height: u32) {
-    inject_external_resized(width, height);
-}
-
-/// [`crate::embedded::detach_surface`] 的委托目标：比对清除 + push
-/// CloseRequested（引擎帧循环收口）。ANativeWindow 引用的物理释放由壳
-/// 在引擎收口后回调 [`release_external_window`]（防 present-after-release
-/// OOB）。
-///
-/// # Safety
-/// `env`/`surface` 必须是有效的 JNI 环境/Surface 句柄。
-pub(crate) unsafe fn detach_surface_impl(
-    env: *mut std::ffi::c_void,
-    surface: *mut std::ffi::c_void,
-) {
-    unsafe { detach_external_window(env, surface) };
-}
-
-/// 嵌入窗口当前尺寸（None = 未 attach）。宿主壳建窗前的尺寸自查用
-///（引擎表面初始尺寸跟随原生窗口实测值——满屏 1:1 的确定性来源）
-pub fn external_size() -> Option<(u32, u32)> {
-    crate::platform::android::external_size_impl()
-}
-
-/// 嵌入窗口当前尺寸（None = 未 attach）。宿主壳建窗前的尺寸自查用
-///（引擎表面初始尺寸跟随原生窗口实测值——满屏 1:1 的确定性来源）
-pub(crate) fn external_size_impl() -> Option<(u32, u32)> {
-    let slot = EXTERNAL.lock().unwrap_or_else(|p| p.into_inner());
-    let ext = slot.as_ref()?;
-    Some((ext.width, ext.height))
-}
-
-/// [`crate::embedded::inject_touch`] 的委托目标（action：0 down / 1 move / 2 up）
-pub(crate) fn inject_touch_impl(action: u8, x: f64, y: f64) {
-    inject_external_touch(action, x, y);
 }
