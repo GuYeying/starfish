@@ -226,6 +226,9 @@ fn translate(e: WindowEvent) -> Option<Event> {
         }
         WindowEvent::TextInput { text } => Some(Event::TextInput { text }),
         WindowEvent::MouseMoved { x, y } => {
+            // 物理 → 逻辑（呈现映射的逆变换——Android 嵌入下宿主坐标
+            // 是窗口像素，脚本坐标系是 set_mode 逻辑画布）
+            let (x, y) = display::map_point(x, y);
             let (x, y) = (x as i32, y as i32);
             mouse::set_pos(x, y);
             Some(Event::MouseMotion { x, y })
@@ -245,12 +248,14 @@ fn translate(e: WindowEvent) -> Option<Event> {
             y: delta_y as i32,
         }),
         WindowEvent::Touch { phase, finger, x, y } => {
-            crate::touch::on_touch(phase, finger, x as i32, y as i32);
+            let (x, y) = display::map_point(x, y);
+            let (x, y) = (x as i32, y as i32);
+            crate::touch::on_touch(phase, finger, x, y);
             Some(Event::Touch {
                 phase,
                 finger,
-                x: x as i32,
-                y: y as i32,
+                x,
+                y,
             })
         }
         WindowEvent::Suspended => Some(Event::Suspend),
