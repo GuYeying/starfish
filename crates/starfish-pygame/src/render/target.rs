@@ -502,26 +502,65 @@ impl Screen {
         } else {
             None
         };
-        // 裁剪区同映射（脚本逻辑坐标 → 物理 framebuffer）
-        let scissor = self.clip.get().and_then(|r| {
+        // 裁剪区（pygame 语义两段合成）：①脚本 set_clip 同映射（逻辑 →
+        // 物理）；②**画布裁剪**——桌面窗口即画布，出界绘制被窗口边缘
+        // 天然硬裁；Android letterbox 画布是物理表面的子矩形，黑边只是
+        // 清屏色，无裁剪则越界内容溢进黑边（真机实测）——按画布子矩形
+        // 显式 scissor 补齐"画布外不可见"语义。逻辑==物理（桌面/全屏）
+        // 恒等零动作
+        let scissor = {
             let (pw, ph) = self.surface.borrow().size();
             let (lw, lh) = self.logical.get();
             let fit = starfish_std::letterbox::Fit::fit(
                 pw as f64, ph as f64, lw as f64, lh as f64,
             );
-            let mapped: [i32; 4] = if lw == 0 || lh == 0 {
-                r
+            let mapped = self.clip.get().and_then(|r| {
+                if lw == 0 || lh == 0 {
+                    Some(r)
+                } else {
+                    let (mx, my) = fit.logical_to_physical(r[0] as f64, r[1] as f64);
+                    Some([
+                        mx as i32,
+                        my as i32,
+                        (r[2] as f32 * fit.scale as f32) as i32,
+                        (r[3] as f32 * fit.scale as f32) as i32,
+                    ])
+                }
+            });
+            // 画布子矩形（整像素取整——半像素差异不可见）。非恒等才启用
+            let canvas: Option<crate::IRect> = if lw > 0
+                && (lw as f64 * fit.scale != pw as f64
+                    || lh as f64 * fit.scale != ph as f64)
+            {
+                Some([
+                    fit.offset_x.round() as i32,
+                    fit.offset_y.round() as i32,
+                    (lw as f64 * fit.scale).round() as i32,
+                    (lh as f64 * fit.scale).round() as i32,
+                ])
             } else {
-                let (mx, my) = fit.logical_to_physical(r[0] as f64, r[1] as f64);
-                [
-                    mx as i32,
-                    my as i32,
-                    (r[2] as f32 * fit.scale as f32) as i32,
-                    (r[3] as f32 * fit.scale as f32) as i32,
-                ]
+                None
             };
-            super::batch::scissor_from(mapped, self.surface.borrow().size())
-        });
+            // 两段相交：canvas=None（恒等）→ 只剩脚本 clip；clip=None →
+            // 只剩画布；两者皆 None → 无裁剪
+            let combined: Option<crate::IRect> = match (mapped, canvas) {
+                (Some(c), Some(b)) => {
+                    let x0 = c[0].max(b[0]);
+                    let y0 = c[1].max(b[1]);
+                    let x1 = (c[0] + c[2]).min(b[0] + b[2]);
+                    let y1 = (c[1] + c[3]).min(b[1] + b[3]);
+                    if x1 > x0 && y1 > y0 {
+                        Some([x0, y0, x1 - x0, y1 - y0])
+                    } else {
+                        None
+                    }
+                }
+                (Some(c), None) => Some(c),
+                (None, Some(b)) => Some(b),
+                (None, None) => None,
+            };
+            combined.and_then(|r| super::batch::scissor_from(r, (pw, ph)))
+        };
         let cmd = {
             let batch = self.batch.borrow();
             // 呈现映射（等比 letterbox）：正交(物理) × 平移(居中) ×
