@@ -327,6 +327,15 @@ impl Screen {
             * glam::Mat4::from_scale(glam::Vec3::new(sx, sy, 1.0))
     }
 
+    /// 呈现拟合矩阵（NDC 域 clip 空间仿射——**自管相机的 letterbox
+    /// 对齐口**）：自绘管线经 write_buffer 直写的相机矩阵对引擎是不
+    /// 透明字节，无法被拦截组合——脚本自行左乘本矩阵即与主绘制同一
+    /// 映射：`final = present_fit() × 自管相机.mvp()`。逻辑==物理
+    /// （桌面/全屏/离屏）恒等
+    pub fn present_fit(&self) -> Mat4 {
+        self.fit_ndc()
+    }
+
     /// 呈现映射 MVP（逻辑 → 物理最终变换；egui 叠加合成消费——与 pack
     /// 主绘制同一映射，游戏内容与 UI 永远对齐）。Auto/Manual 相机统一
     /// 定约：相机一律解算在逻辑画布域（set_mode 语义尺寸），呈现
