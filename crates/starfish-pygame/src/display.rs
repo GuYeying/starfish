@@ -197,6 +197,20 @@ pub fn set_caption(title: &str) {
 }
 
 /// 窗口请求运行时生效（批次 O + 尺寸扩展——真身窗口由宿主壳先行装配，
+/// 桌面 letterbox 复现钩子（诊断用）：`STARFISH_DESKTOP_LETTERBOX=宽x高`
+/// 环境变量生效时，窗口实测尺寸钉为该值、逻辑恒 = set_mode 请求——
+/// Android 窗口化行为（物理≠逻辑 + 引擎等比居中映射）在本机复现，
+/// 供自绘管线/叠加通道的 letterbox 对齐做本地调试。未设置 = None
+pub(crate) fn desktop_letterbox() -> Option<(u32, u32)> {
+    static CACHED: std::sync::OnceLock<Option<(u32, u32)>> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        std::env::var("STARFISH_DESKTOP_LETTERBOX").ok().and_then(|s| {
+            let (w, h) = s.split_once('x')?;
+            Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
+        })
+    })
+}
+
 /// 脚本 set_mode 为完整请求：set_size 跟随 + 旗标经 Window::set_* 即时
 /// 生效。创建期一次性旗标（透明）垫底收下；OPENGL 垫底：引擎恒 wgpu）
 pub fn apply_window_request(size: (u32, u32), flags: u32) {
@@ -206,8 +220,10 @@ pub fn apply_window_request(size: (u32, u32), flags: u32) {
     }
     // 落地耗时打点（慢调用哨兵——启动诊断用）
     let t = starfish_std::debug::Stopwatch::now();
+    let desktop_lb = desktop_letterbox();
     with_window(|w| {
-        w.set_size(size);
+        // 复现钩子：窗口实测钉为环境变量指定尺寸（逻辑≠物理的前提）
+        w.set_size(desktop_lb.unwrap_or(size));
         w.set_resizable(flags & RESIZABLE != 0);
         w.set_fullscreen(flags & FULLSCREEN != 0);
         w.set_borderless(flags & NOFRAME != 0);
@@ -251,7 +267,17 @@ pub fn apply_window_request(size: (u32, u32), flags: u32) {
     // 缩小——缩小会在 buffer 内角落锚定），脚本画布由呈现映射缩放
     #[cfg(not(target_os = "android"))]
     if get_init() {
-        handle_resized(effective.0, effective.1);
+        match desktop_lb {
+            // 复现钩子：物理跟随窗口实测尺寸（钩子值），逻辑钉回
+            // set_mode 请求——物理≠逻辑的 Android 窗口化状态在本机成立
+            Some((fw, fh)) => {
+                handle_resized(fw, fh);
+                if get_init() {
+                    get_screen().set_logical_size(size.0, size.1);
+                }
+            }
+            None => handle_resized(effective.0, effective.1),
+        }
     }
 }
 
@@ -295,8 +321,13 @@ pub(crate) fn handle_resized(width: u32, height: u32) {
             "[display] resize 自愈 → {width}×{height}"
         ));
         // request_resize（非 resize）：帧进行中的缩放延迟到帧边界落地——
-        // 帧中重配置 = 深度新/颜色旧附件不匹配（批次二十三实测命令缓冲无效）
+        // 帧中重配置 = 深度新/颜色旧附件尺寸不匹配（批次二十三实测命令缓冲无效）
         get_screen().request_resize(width, height);
+        // 桌面 letterbox 复现钩子生效时：逻辑归 set_mode 所有（物理跟随
+        // 窗口实测）——与 Android 窗口化同一语义
+        if desktop_letterbox().is_some() {
+            return;
+        }
         // 桌面/web：物理窗口变化 = 逻辑画布跟随（pygame 语义——窗口即
         // 画布）；Android 逻辑归脚本 set_mode 所有（物理恒原生窗口，
         // 呈现映射等比缩放）
