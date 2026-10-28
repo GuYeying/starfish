@@ -16,6 +16,7 @@ pub mod app;
 pub mod debug;
 pub mod error;
 pub mod run_control;
+pub mod screen;
 
 /// （可选，feature `we`）starfish-we 窗口/事件 crate 再导出——
 /// [`app_entry!`] 的 Android 分支经 `$crate::we` 取 `AndroidApp`/`android_init`。
