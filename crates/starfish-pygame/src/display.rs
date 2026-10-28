@@ -234,15 +234,34 @@ pub fn apply_window_request(size: (u32, u32), flags: u32) {
     } else {
         size
     };
+    // 逻辑画布登记：Android 窗口化下 = 脚本请求尺寸（引擎等比居中
+    // 映射到物理）；桌面/物理可跟随平台 = 物理即逻辑（handle_resized
+    // 内统一回填）
+    #[cfg(target_os = "android")]
+    if get_init() {
+        get_screen().set_logical_size(effective.0, effective.1);
+    }
     // 尺寸变更同步落地（2026-10-26 web 黑屏根因修复）：set_mode 本是
     // 同步语义（真 pygame 同）——画布位图在 set_size 处已即时变化，
     // 引擎侧 surface/depth 若等异步事件下一帧才重配置，脚本 set_mode
     // 返回后立即绘制即撞"深度 800×600 vs 颜色 400×300"校验失败 →
     // CommandBuffer 永久失效。此处同步补发引擎 resize；同尺寸由
-    // RenderSurface::resize 短路（重复事件零成本）
+    // RenderSurface::resize 短路（重复事件零成本）。
+    // Android 窗口化例外：物理表面恒为原生窗口实测尺寸（不随请求
+    // 缩小——缩小会在 buffer 内角落锚定），脚本画布由呈现映射缩放
+    #[cfg(not(target_os = "android"))]
     if get_init() {
         handle_resized(effective.0, effective.1);
     }
+}
+
+/// 物理点 → 逻辑点（输入坐标映射；呈现映射的逆变换。display 未就绪 =
+/// 原样透传——事件可先于 set_mode 到达）
+pub fn map_point(x: f64, y: f64) -> (f64, f64) {
+    SCREEN.with(|s| match s.borrow().as_ref() {
+        Some(screen) => screen.map_point_to_logical(x, y),
+        None => (x, y),
+    })
 }
 
 /// 窗口整体不透明度（0.0 透明 .. 1.0 不透明；桌面窗口合成——
@@ -278,6 +297,11 @@ pub(crate) fn handle_resized(width: u32, height: u32) {
         // request_resize（非 resize）：帧进行中的缩放延迟到帧边界落地——
         // 帧中重配置 = 深度新/颜色旧附件不匹配（批次二十三实测命令缓冲无效）
         get_screen().request_resize(width, height);
+        // 桌面/web：物理窗口变化 = 逻辑画布跟随（pygame 语义——窗口即
+        // 画布）；Android 逻辑归脚本 set_mode 所有（物理恒原生窗口，
+        // 呈现映射等比缩放）
+        #[cfg(not(target_os = "android"))]
+        get_screen().set_logical_size(width, height);
     }
 }
 

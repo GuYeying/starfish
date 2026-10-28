@@ -230,6 +230,9 @@ pub struct Screen {
     /// 透明底模式（TRANSPARENT 创建旗标；begin_frame 清屏改 alpha 0
     ///——桌宠/悬浮件形态，配表面 alpha 合成）
     transparent_bg: Cell<bool>,
+    /// 逻辑画布尺寸（脚本 set_mode 语义尺寸——Android 嵌入下物理表面
+    /// 恒原生窗口、逻辑独立；呈现 = 等比缩放居中）
+    logical: Cell<(u32, u32)>,
     /// 延迟叠加队列（[`Screen::defer_overlay`] 的排程；present 时统一执行）
     pending_overlays: RefCell<Vec<Box<dyn FnOnce(&mut OverlayCtx)>>>,
 }
@@ -261,6 +264,7 @@ impl Screen {
             Arc::new(access),
             offscreen_access,
         );
+        let physical = surface.size();
         Ok(Self {
             gpu,
             surface: RefCell::new(surface),
@@ -271,6 +275,7 @@ impl Screen {
             format,
             samples,
             transparent_bg: Cell::new(false),
+            logical: Cell::new(physical),
             pending_overlays: RefCell::new(Vec::new()),
         })
     }
@@ -286,6 +291,50 @@ impl Screen {
     /// 不得跨帧持有附件）
     pub fn with_surface<R>(&self, f: impl FnOnce(&RenderSurface) -> R) -> R {
         f(&self.surface.borrow())
+    }
+
+    /// 逻辑画布尺寸登记（set_mode 语义尺寸；Android 嵌入下 = 脚本请求
+    /// 值，物理表面恒原生窗口——呈现按等比缩放居中映射）
+    pub fn set_logical_size(&self, width: u32, height: u32) {
+        self.logical.set((width, height));
+    }
+
+    /// 逻辑画布尺寸（`get_size()` 的返回语义）
+    pub fn logical_size(&self) -> (u32, u32) {
+        self.logical.get()
+    }
+
+    /// 呈现映射 MVP（逻辑 → 物理最终变换；egui 叠加合成消费——与 pack
+    /// 主绘制同一映射，游戏内容与 UI 永远对齐）。Manual 相机尊重覆盖
+    /// （Auto 状态下按本映射组合）
+    pub fn present_mvp(&self) -> Mat4 {
+        let (pw, ph) = self.surface.borrow().size();
+        let (lw, lh) = self.logical.get();
+        let s = (pw as f32 / lw.max(1) as f32).min(ph as f32 / lh.max(1) as f32);
+        let ox = (pw as f32 - lw as f32 * s) / 2.0;
+        let oy = (ph as f32 - lh as f32 * s) / 2.0;
+        let mut mvp = crate::render::camera_mvp_for((pw, ph));
+        if s != 1.0 {
+            mvp = mvp * glam::Mat4::from_scale(glam::Vec3::new(s, s, 1.0));
+        }
+        if ox != 0.0 || oy != 0.0 {
+            mvp = mvp * glam::Mat4::from_translation(glam::Vec3::new(ox, oy, 0.0));
+        }
+        mvp
+    }
+
+    /// 物理点 → 逻辑点（输入坐标映射；呈现映射的逆变换——等比缩放 +
+    /// 居中）
+    pub(crate) fn map_point_to_logical(&self, x: f64, y: f64) -> (f64, f64) {
+        let (pw, ph) = self.surface.borrow().size();
+        let (lw, lh) = self.logical.get();
+        if pw == 0 || ph == 0 || lw == 0 || lh == 0 {
+            return (x, y);
+        }
+        let scale = (pw as f64 / lw as f64).min(ph as f64 / lh as f64);
+        let ox = (pw as f64 - lw as f64 * scale) / 2.0;
+        let oy = (ph as f64 - lh as f64 * scale) / 2.0;
+        ((x - ox) / scale, (y - oy) / scale)
     }
 
     /// 窗口尺寸变化（交换链 + 深度重建；相机无需跟随——全局相机
@@ -434,12 +483,39 @@ impl Screen {
         } else {
             None
         };
+        // 裁剪区同映射（脚本逻辑坐标 → 物理 framebuffer）
         let scissor = self.clip.get().and_then(|r| {
-            super::batch::scissor_from(r, self.surface.borrow().size())
+            let (pw, ph) = self.surface.borrow().size();
+            let (lw, lh) = self.logical.get();
+            let s = (pw as f32 / lw.max(1) as f32).min(ph as f32 / lh.max(1) as f32);
+            let ox = (pw as f32 - lw as f32 * s) / 2.0;
+            let oy = (ph as f32 - lh as f32 * s) / 2.0;
+            let mapped: [i32; 4] = if lw == 0 || lh == 0 {
+                r
+            } else {
+                [
+                    (r[0] as f32 * s + ox) as i32,
+                    (r[1] as f32 * s + oy) as i32,
+                    (r[2] as f32 * s) as i32,
+                    (r[3] as f32 * s) as i32,
+                ]
+            };
+            super::batch::scissor_from(mapped, self.surface.borrow().size())
         });
         let cmd = {
             let batch = self.batch.borrow();
-            let camera = self.gpu.camera_for(self.size());
+            // 呈现映射（等比 letterbox）：正交(物理) × 平移(居中) ×
+            // 缩放(等比)。桌面逻辑==物理 → s=1、o=0 恒等；Android 逻辑
+            // (set_mode) < 物理(原生窗口) → 短轴铺满长轴留黑边，零变形
+            let (pw, ph) = self.surface.borrow().size();
+            let (lw, lh) = self.logical.get();
+            let s = (pw as f32 / lw.max(1) as f32).min(ph as f32 / lh.max(1) as f32);
+            let ox = (pw as f32 - lw as f32 * s) / 2.0;
+            let oy = (ph as f32 - lh as f32 * s) / 2.0;
+            let mut camera = self.gpu.camera_for((pw, ph));
+            camera.mvp = camera.mvp
+                * glam::Mat4::from_translation(glam::Vec3::new(ox, oy, 0.0))
+                * glam::Mat4::from_scale(glam::Vec3::new(s, s, 1.0));
             let mut ctx = EncodeCtx {
                 gpu: &self.gpu,
                 camera: &camera,
