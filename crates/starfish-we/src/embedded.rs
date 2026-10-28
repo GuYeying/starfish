@@ -1,12 +1,30 @@
 //! 嵌入式宿主门面（**Android 专属门控**，2026-10-26 定约）：pygame-rs-dev
 //! 等"嵌入式运行时 .so"导出给原生 Android 开发者的**最小暴露面**——
 //!
+//! ## 平台矩阵（嵌入模块规划，2026-10-28 重构定案）
+//!
+//! | 平台 | 嵌入模块 | 说明 |
+//! |---|---|---|
+//! | Android | ✓ 本门面 | ANativeWindow JNI 桥（ANCO 上的鸿蒙经此形态运行）|
+//! | iOS | 预留 | 窗口对象/生命周期不同（CAMetalLayer/UIView）——接入时新增 `platform::ios::embedded` 后端，**不复用 JNI 签名**（生命周期契约同构，签名各异）|
+//! | 鸿蒙原生 | 预留 | XComponent 后端（当前 ANCO 经 Android 形态）|
+//! | 桌面 | ✗ | 引擎自持 winit 窗口，嵌入场景未出现——预留 raw-window-handle 接入缝 |
+//! | wasm | ✗ | canvas 直连引擎，无外部窗口概念 |
+//!
+//! 架构纪律：**接口可以不一样（平台窗口对象本质不同），生命周期契约必须
+//! 同构**——attach（每场一次，清残留）→ resize → 渲染 → detach（= 收口）
+//! + pending-release 纪律（防 present-after-release）。抽象的是契约与
+//! 状态机，不是表面对象。
+//!
+//! ## 暴露面
+//!
 //! - [`attach_surface`] / [`surface_resized`] / [`detach_surface`]：
 //!   宿主 SurfaceView 生命周期回调的转发；
-//! - [`inject_touch`]：宿主 View 的触摸事件注入（主手指 → 鼠标合成）。
+//! - [`inject_touch`]：宿主 View 的触摸事件注入（主手指 → 鼠标合成）；
+//! - [`external_size`] / [`release_surface`]：尺寸自查与引用收尾。
 //!
 //! 设计约束（层级纪律）：starfish-we 的正式 API 仍是 [`crate::Window`]
-//! （NativeActivity/glue 形态）；本门面只暴露嵌入模式的四个动作，不
+//! （NativeActivity/glue 形态）；本门面只暴露嵌入模式的动作，不
 //! 重导出窗口内部——嵌入运行时的引擎驱动、载荷分派、io 基准都在
 //! 上层（pygame-rs-dev / pack 仓）。
 //!
