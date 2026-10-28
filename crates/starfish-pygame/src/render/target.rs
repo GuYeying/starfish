@@ -307,24 +307,33 @@ impl Screen {
         self.logical.get()
     }
 
-    /// 呈现映射 MVP（逻辑 → 物理最终变换；egui 叠加合成消费——与 pack
-    /// 主绘制同一映射，游戏内容与 UI 永远对齐）。Manual 相机尊重覆盖
-    /// （Auto 状态下按本映射组合）
-    pub fn present_mvp(&self) -> Mat4 {
+    /// 逻辑画布 → 物理呈现的 NDC 域拟合矩阵（clip 空间仿射——底行
+    /// (0,0,0,1)，透视除法后恰为"NDC 缩放+平移"）：把整幅 NDC 收进
+    /// letterbox 画布子矩形。Auto 与 Manual 相机统一的呈现 letterbox——
+    /// Auto2d 下与旧"正交(物理)×平移×缩放"逐位等价（恒等桌面），离屏
+    /// Surface（逻辑==物理）恒 identity
+    fn fit_ndc(&self) -> Mat4 {
         let (pw, ph) = self.surface.borrow().size();
         let (lw, lh) = self.logical.get();
         let fit = starfish_std::letterbox::Fit::fit(
             pw as f64, ph as f64, lw as f64, lh as f64,
         );
-        let mut mvp = crate::render::camera_mvp_for((pw, ph));
-        mvp = mvp
-            * glam::Mat4::from_translation(glam::Vec3::new(
-                fit.offset_x as f32,
-                fit.offset_y as f32,
-                0.0,
-            ))
-            * glam::Mat4::from_scale(glam::Vec3::new(fit.scale as f32, fit.scale as f32, 1.0));
-        mvp
+        let (pw, ph) = (pw.max(1) as f32, ph.max(1) as f32);
+        let sx = (lw.max(1) as f32 * fit.scale as f32) / pw;
+        let sy = (lh.max(1) as f32 * fit.scale as f32) / ph;
+        let bx = 2.0 * fit.offset_x as f32 / pw - 1.0 + sx;
+        let by = 1.0 - 2.0 * fit.offset_y as f32 / ph - sy;
+        glam::Mat4::from_translation(glam::Vec3::new(bx, by, 0.0))
+            * glam::Mat4::from_scale(glam::Vec3::new(sx, sy, 1.0))
+    }
+
+    /// 呈现映射 MVP（逻辑 → 物理最终变换；egui 叠加合成消费——与 pack
+    /// 主绘制同一映射，游戏内容与 UI 永远对齐）。Auto/Manual 相机统一
+    /// 定约：相机一律解算在逻辑画布域（set_mode 语义尺寸），呈现
+    /// letterbox 由 fit_ndc 统一施加——Manual 仍全权接管投影（视角/
+    /// 纵横比用户定，按逻辑画布构造），仅输出被收进画布子矩形
+    pub fn present_mvp(&self) -> Mat4 {
+        self.fit_ndc() * crate::render::camera_mvp_for(self.logical.get())
     }
 
     /// 物理点 → 逻辑点（输入坐标映射；呈现映射的逆变换——等比缩放 +
@@ -521,10 +530,16 @@ impl Screen {
                     "[present] 物理={pw}x{ph} 逻辑={lw}x{lh} scale={s:.3} ox={ox:.1} oy={oy:.1}"
                 ));
             }
-            let mut camera = self.gpu.camera_for((pw, ph));
-            camera.mvp = camera.mvp
-                * glam::Mat4::from_translation(glam::Vec3::new(ox, oy, 0.0))
-                * glam::Mat4::from_scale(glam::Vec3::new(s, s, 1.0));
+            // 呈现映射（等比 letterbox，NDC 域统一组合）：相机一律解算
+            // 在逻辑画布域（Auto 正交/透视按逻辑尺寸，Manual 用户相机
+            // 本就按逻辑画布构造），输出经 fit_ndc 收进画布子矩形。
+            // Auto2d 与旧"正交(物理)×平移×缩放"逐位等价；Manual 修正
+            // 双映射（旧路径把逻辑域相机输出再当物理域叠 T·S——内容
+            // 越画布右/下溢出，blit_transform demo 真机实测）；Auto3d
+            // 纵横比随之归画布
+            let fit_ndc = self.fit_ndc();
+            let mut camera = self.gpu.camera_for(self.logical.get());
+            camera.mvp = fit_ndc * camera.mvp;
             let mut ctx = EncodeCtx {
                 gpu: &self.gpu,
                 camera: &camera,
@@ -810,7 +825,12 @@ impl OverlayCtx {
 
 impl DrawTarget for Screen {
     fn fill(&self, color: impl Into<Color>) {
-        let (w, h) = self.size();
+        // fill 覆盖对象是脚本画布（set_mode 语义尺寸）——batch 顶点在
+        // pack 时统一过呈现映射（正交(物理) × 平移 × 缩放），故必须
+        // 用逻辑尺寸：桌面逻辑==物理恒等不受影响；Android 窗口化
+        // 逻辑<物理，用物理尺寸会把 letterbox 右/下黑边一起涂成
+        // 画布色（真机实测：黑边只剩左侧半条）
+        let (w, h) = self.logical_size();
         self.with_batch(|b| {
             b.push_quad(0.0, 0.0, w as f32, h as f32, rgba(color), None);
         });
