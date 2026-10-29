@@ -17,6 +17,7 @@ pub struct RenderSurface{
     // 帧
     color_format:TextureFormat,
     color_frame: Option<SurfaceTexture>,//当前帧
+    last_presented: Option<wgpu::Texture>,//上一已呈现帧（回读取证用）
     color_view:  Option<Arc<TextureView>>,   //当前活动渲染目标视图（MSAA 开启时为多重采样视图）
     color_attachment : Option<ColorAttachment>,
     // 交换链视图（每帧换新；MSAA 关闭时与 color_view 相同）
@@ -149,6 +150,7 @@ impl RenderSurface{
             color_view: None,
             color_attachment: None,
             swapchain_view: None,
+            last_presented: None,
 
             depth_format:depth_format,
             depth_texture:depth_texture,
@@ -340,6 +342,8 @@ impl RenderSurface{
             ));
             return;
         };
+        // 暂存已呈现纹理（回读取证口——present 后 copy 此图 = 屏幕真实内容）
+        self.last_presented = Some(frame.texture.clone());
         if diag {
             starfish_std::debug::devlog(&format!("[rs] present #{n}"));
         }
@@ -462,6 +466,12 @@ impl RenderSurface{
     /// 当前帧是否已获取（begin_frame 成功 → present 前 = true）
     pub fn has_current_frame(&self) -> bool {
         self.color_frame.is_some()
+    }
+
+    /// 上一已呈现帧的纹理（回读取证用——present 后有效，直至该图被
+    /// 交换链复用重写）
+    pub fn presented_texture(&self) -> Option<&wgpu::Texture> {
+        self.last_presented.as_ref()
     }
     pub fn get_current_depth_texture_view(&self)-> Option<Arc<TextureView>>{
         Some(self.depth_view.clone())
