@@ -189,6 +189,7 @@ impl RenderSurface{
         // Validation → 真实错误，跳帧
         if self.color_view.is_none() {
             let mut frame = None;
+            let mut last_reason = "3 次重试耗尽";
             for _ in 0..3 {
                 // catch_unwind:Surface 未配置/失效时 wgpu 内部直接 panic
                 // (wgpu_core "Surface is not configured for presentation",
@@ -234,6 +235,7 @@ impl RenderSurface{
                     }
                     Ok(wgpu::CurrentSurfaceTexture::Outdated
                     | wgpu::CurrentSurfaceTexture::Lost) => {
+                        last_reason = "Outdated/Lost";
                         if diag {
                             starfish_std::debug::devlog(&format!(
                                 "[rs] begin_frame #{n} acquire Outdated/Lost → 重建重试"
@@ -241,16 +243,22 @@ impl RenderSurface{
                         }
                     }
                     | Err(_) => {
+                        last_reason = "acquire Err（已重建交换链）";
                         self.resize(self.config.width, self.config.height);
                     }
                     Ok(wgpu::CurrentSurfaceTexture::Timeout
-                    | wgpu::CurrentSurfaceTexture::Occluded) => {}
+                    | wgpu::CurrentSurfaceTexture::Occluded) => {
+                        last_reason = "Timeout/Occluded";
+                    }
                     Ok(wgpu::CurrentSurfaceTexture::Validation) => panic!("渲染验证错误"),
                 }
             }
             let Some(frame) = frame else {
                 starfish_std::debug::devlog(&format!(
-                    "[rs] begin_frame #{n} FAIL（3 次重试耗尽）"
+                    "[rs] begin_frame #{n} FAIL（3 次重试耗尽）——本帧跳过"
+                ));
+                starfish_std::debug::console_log(&format!(
+                    "[rs] begin_frame #{n} FAIL（{last_reason}）——本帧跳过"
                 ));
                 eprintln!("[starfish] 渲染表面未就绪,本帧跳过(下一帧重试)");
                 return false;
@@ -319,12 +327,22 @@ impl RenderSurface{
 
     pub fn present(&mut self) {
         starfish_std::debug::assert_main_thread("RenderSurface::present");
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let diag = n < 12 || n % 60 == 0;
         // 取出当前帧交换链纹理。begin_frame 未就绪(false)时无帧可提交——
         // 跳过本帧 present(不 panic,对齐"未就绪即跳过")
         let Some(frame) = self.color_frame.take() else {
             starfish_std::debug::devlog("[rs] present 无帧跳过（begin 未就绪）");
+            starfish_std::debug::console_log(&format!(
+                "[rs] present #{n} 无帧跳过（begin 未就绪）"
+            ));
             return;
         };
+        if diag {
+            starfish_std::debug::devlog(&format!("[rs] present #{n}"));
+        }
         // 1. 收集所有待提交命令
         let mut all_commands = std::mem::take(&mut self.pending_cmds);
 
