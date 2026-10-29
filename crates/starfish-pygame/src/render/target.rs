@@ -506,10 +506,25 @@ impl Screen {
                     return Vec::new();
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {
-                    gpu.device.poll(wgpu::PollType::Wait {
-                        submission_index: None,
-                        timeout: None,
-                    });
+                    // Web：map 回调由浏览器事件循环驱动，单线程内
+                    // poll(Wait, timeout=None) 自旋永远等不到回调——帧泵
+                    // 整体咬死（compute_probe 帧 60 回读后停摆实测，
+                    // 2026-10-29）。v0 降级 = 空样本 + 说明日志；异步回读
+                    // 待 web 专项。
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        starfish_std::debug::console_log(
+                            "[screen-probe] web v0 不支持同步回读（异步 map 待专项）——返回空样本",
+                        );
+                        return Vec::new();
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        gpu.device.poll(wgpu::PollType::Wait {
+                            submission_index: None,
+                            timeout: None,
+                        });
+                    }
                 }
             }
         }
