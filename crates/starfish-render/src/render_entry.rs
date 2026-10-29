@@ -287,6 +287,14 @@ impl RenderEntry{
             panic!("{msg}");
         }));
 
+        // 原生（Android 等）：接 console_log——壳的诊断 sink 落 dev_log.txt
+        // （此前原生无处理器，全部校验错/创建错被静默吞掉，真机黑屏/全屏
+        // 陈旧帧无从定位）
+        #[cfg(not(target_arch = "wasm32"))]
+        device.on_uncaptured_error(Arc::new(move |e: wgpu::Error| {
+            starfish_std::debug::console_log(&format!("[wgpu-error] {e}"));
+        }));
+
 
         let render_context = RenderContext::new(
             instance,
