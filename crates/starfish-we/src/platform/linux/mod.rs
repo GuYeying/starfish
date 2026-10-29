@@ -39,6 +39,7 @@
 
 use std::collections::VecDeque;
 use std::num::NonZeroU32;
+use std::os::fd::{AsFd, AsRawFd};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -484,6 +485,33 @@ impl WindowInner {
         if core.dead {
             return core.state.pending.pop_front();
         }
+        // 0) Client-side key-repeat synthesis runs on every poll (before
+        //    the fast path — a pointer storm keeps `pending` non-empty and
+        //    would otherwise starve the repeat ticks).
+        // 0) 客户端按键重复合成，照旧逐 poll 一次（置于快路径之前——
+        //    指针风暴期 pending 长非空，合成不能跟着饿死）。
+        synthesize_repeat(&mut core.state);
+        // 1) Fast path: the local queue is non-empty → pop with ZERO
+        //    socket work. The pump drains one event per poll_event; under
+        //    a pointer storm the old path paid flush+read per event, and
+        //    libwayland's wl_display_read_events **blocks when no data is
+        //    pending** (its contract is prepare_read → poll → read_events;
+        //    we self-manage the pump, so every empty read parked until
+        //    Mutter's next per-frame batch ≈ one vblank+ each — 235 events
+        //    drained in 8.9 s on real hardware, 2026-10-29). Batch in via
+        //    dispatch, pop out one by one; socket work happens once when
+        //    the queue runs dry.
+        // 1) 快路径：本地队列非空 → 直接出队，零 socket 工作。泵的排水
+        //    循环逐条调 poll_event，旧路径指针风暴下每条都付一次
+        //    flush+read——而 libwayland 的 wl_display_read_events 在无
+        //    数据时**阻塞**（其契约是 prepare_read → poll → read_events
+        //    三步，自管泵跳过了 poll）：空读一卡就到 Mutter 下一帧的
+        //    批投递，单次实测 13~57ms，235 条事件排水 8.9s（真机
+        //    2026-10-29）。改为批进队、逐条出；socket 工作只在队列
+        //    见底时做一次。
+        if let Some(ev) = core.state.pending.pop_front() {
+            return Some(ev);
+        }
         // Destructure once: MutexGuard's Deref borrows the WHOLE core, so
         // `core.queue` + `&mut core.state` in the same expression would
         // double-borrow. Plain field access on `&mut *core` is disjoint.
@@ -498,36 +526,48 @@ impl WindowInner {
             ..
         } = &mut *core;
 
-        // 1) Flush outbound requests; errors resurface in read/dispatch
+        // 2) Flush outbound requests; errors resurface in read/dispatch
         //    below (a full socket buffer is transient, not fatal).
-        // 1) 冲刷出站请求；错误会在下方 read/dispatch 复现（socket 缓冲满
+        // 2) 冲刷出站请求；错误会在下方 read/dispatch 复现（socket 缓冲满
         //    属暂时性，非致命）。
         let _ = conn.flush();
         let _ = queue.flush();
-        // 2) Dispatch already-buffered events.
-        // 2) 派发已缓冲事件。
+        // 3) Dispatch already-buffered events.
+        // 3) 派发已缓冲事件。
         if queue.dispatch_pending(state).is_err() {
             return mark_dead(state, dead);
         }
-        // 3) Try to read more from the socket — an Err here is fatal (a
-        //    WouldBlock-style idle read is handled inside wayland-client
-        //    and surfaces as Ok(0)); `None` means events were already
-        //    buffered (step 2 dispatched them).
-        // 3) 尝试从 socket 再读——此处 Err 即致命（WouldBlock 类的空闲
-        //    读在 wayland-client 内部已被消化为 Ok(0)）；`None` 表示已有
-        //    事件缓冲（第 2 步已派发）。
-        let read = queue.prepare_read().map(|guard| guard.read());
+        if let Some(ev) = state.pending.pop_front() {
+            return Some(ev);
+        }
+        // 4) Try to read more from the socket — but only after a zero-
+        //    timeout readability probe: libwayland's read blocks on empty
+        //    (see fast-path note); a WouldBlock-style idle read surfaces
+        //    as Ok(0) inside wayland-client. An Err here is fatal.
+        // 4) 尝试从 socket 再读——但先做零超时可读探测：libwayland 的
+        //    read 在无数据时阻塞（见快路径注）；WouldBlock 类空闲读在
+        //    wayland-client 内部已被消化为 Ok(0)。此处 Err 即致命。
+        let fd = conn.as_fd().as_raw_fd();
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let readable = unsafe { libc::poll(&mut pfd, 1, 0) } > 0
+            && pfd.revents & libc::POLLIN != 0;
+        let read = if readable {
+            queue.prepare_read().map(|guard| guard.read())
+        } else {
+            None
+        };
         if matches!(read, Some(Err(_))) {
             return mark_dead(state, dead);
         }
-        // 4) Dispatch what step 3 read.
-        // 4) 派发第 3 步读到的事件。
+        // 5) Dispatch what step 4 read.
+        // 5) 派发第 4 步读到的事件。
         if read.is_some() && queue.dispatch_pending(state).is_err() {
             return mark_dead(state, dead);
         }
-        // 5) Client-side key-repeat synthesis.
-        // 5) 客户端按键重复合成。
-        synthesize_repeat(state);
         // 6) One event out.
         // 6) 取走一条事件。
         state.pending.pop_front()
@@ -603,9 +643,38 @@ impl WindowInner {
     }
 
     pub(crate) fn set_fullscreen(&self, fullscreen: bool) {
-        let core = self.lock_core();
+        let mut core = self.lock_core();
+        if core.dead {
+            return;
+        }
         if fullscreen {
+            // xdg 的 min/max 约束是双缓冲态（wl_surface.commit 才生效）——
+            // 解钉（set_min/max(0,0)，apply_window_request 的
+            // set_resizable(true)）须先以 commit 落地，再发全屏请求；
+            // 否则合成器计算全屏尺寸时约束仍是创建期 min=max 钉死值，
+            // configure 尺寸被钳回当前内容尺寸（Mutter 真机实测：1644×1083
+            // 的屏只配到 800×565 → 字母箱，2026-10-29）
+            {
+                let state = &mut core.state;
+                state.draw_fill();
+            }
             core.state.window.set_fullscreen(None);
+            // xdg 全屏是异步请求（合成器以 configure 回复才落地）——而
+            // set_mode 是同步语义（脚本 set_mode 返回后立即取窗实测尺寸
+            // 装配渲染表面）。部分合成器（Mutter 实测）把 toplevel 状态
+            // 变更攒到客户端下一次 commit 才处理：每轮先 draw_fill 提交
+            // 再往返收集 configure；configure handler 会把实测逻辑尺寸
+            // 落进 state 并补发 Resized。防 never-configure：至多 3 轮。
+            for _ in 0..3 {
+                {
+                    let state = &mut core.state;
+                    state.draw_fill();
+                }
+                let WaylandCore { queue, state, .. } = &mut *core;
+                if queue.roundtrip(state).is_err() {
+                    break;
+                }
+            }
         } else {
             core.state.window.unset_fullscreen();
         }
@@ -1233,6 +1302,12 @@ impl PointerHandler for WaylandState {
                         }
                     }
                     if on_content {
+                        // 内容区 Enter：客户端须自设 cursor（协议——否则
+                        // 合成器 cursor 态未定）；恢复默认箭头（从装饰框
+                        // 缩放边缘图标返回内容区时同样需要）
+                        if let Some(tp) = self.themed_pointer.as_mut() {
+                            let _ = tp.set_cursor(conn, CursorIcon::Default);
+                        }
                         self.pending.push_back(Event::MouseMoved {
                             x: x * f64::from(scale),
                             y: y * f64::from(scale),
@@ -1244,6 +1319,9 @@ impl PointerHandler for WaylandState {
                         if let Some(frame) = self.frame.as_mut() {
                             frame.click_point_left();
                         }
+                    } else if let Some(tp) = self.themed_pointer.as_mut() {
+                        // 离开内容区（去装饰框/离窗）：还原默认箭头
+                        let _ = tp.set_cursor(conn, CursorIcon::Default);
                     }
                 }
                 Motion { time } => {
