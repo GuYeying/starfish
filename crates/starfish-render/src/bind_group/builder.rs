@@ -112,6 +112,35 @@ impl BindGroupBuilder {
         self
     }
 
+    /// 绑定裸 storage 缓冲（已持有 `Arc<wgpu::Buffer>` 时直用；raw 字节
+    /// 语义自管——Python 绑定层的 storage 语义入口）
+    ///
+    /// `read_only = true`：只读，VERTEX | FRAGMENT | COMPUTE 三态可见
+    /// （片元/顶点读存储属核心能力）；`false`：可写，仅 COMPUTE 可见
+    /// （顶点/片元可写需额外特性，按需再放）。
+    pub fn storage_raw(
+        mut self,
+        binding: u32,
+        buffer: Arc<wgpu::Buffer>,
+        read_only: bool,
+    ) -> Self {
+        let visibility = if read_only {
+            ShaderStages::VERTEX | ShaderStages::FRAGMENT | ShaderStages::COMPUTE
+        } else {
+            ShaderStages::COMPUTE
+        };
+        self.items.push(BindItem {
+            binding,
+            visibility,
+            resource: BindResource::Storage {
+                buffer,
+                size: None,
+                read_only,
+            },
+        });
+        self
+    }
+
     /// 绑定裸纹理视图（外部纹理源直绑口：视频帧等库外创建的纹理）
     ///
     /// 与 [`Self::texture_view_array`] 同为裸视图入参——不经库 [`Texture`]

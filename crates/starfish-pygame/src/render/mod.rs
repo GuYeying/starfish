@@ -49,10 +49,12 @@ pub use starfish_render::bind_group::bind_group::BindGroup;
 pub use starfish_render::bind_group::builder::BindGroupBuilder;
 pub use starfish_render::mesh::mesh::Mesh;
 pub use starfish_render::pipeline::RenderPipeline;
+pub use starfish_render::pipeline::ComputePipeline;
 pub use starfish_render::render_pass::attachments::{ColorAttachment, DepthAttachment};
 pub use starfish_render::render_resource_access::RenderResourceAccess;
 pub use starfish_render::render_surface::RenderSurface;
 pub use starfish_render::shader_module::shader_module::ShaderModule;
+pub use starfish_render::texture::{Texture as RenderTexture, ViewKey as RenderTextureViewKey, TextureDescriptor as RenderTextureDescriptor, TextureSemantic as RenderTextureSemantic, TextureUsage as RenderTextureUsage, TextureDim as RenderTextureDim};
 
 use std::cell::RefCell;
 use std::collections::HashMap;

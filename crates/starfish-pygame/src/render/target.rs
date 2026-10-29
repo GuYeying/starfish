@@ -735,6 +735,17 @@ impl OverlayCtx {
         pass.end();
     }
 
+    /// 开一条计算通道执行 `draw`（compute pipeline 直绘——Dispatch 语义；
+    /// 无附件，资源经 bind group 访问；bind 按调用序自动排组位）
+    pub fn with_compute_pass(
+        &mut self,
+        label: &str,
+        draw: impl FnOnce(&mut starfish_render::render_pass::compute_pass::ComputePass),
+    ) {
+        let mut pass = self.encoder.begin_compute_pass(Some(label));
+        draw(&mut pass);
+    }
+
     /// 在任意离屏面上开一条通道（**中间面客人通道**——自带管线的绘制
     /// 端（如 egui_wgpu）先画进面、再经 [`Self::blit_fullscreen`] 用引擎
     /// sprite 管线合成回目标：客人零改其管线即可吃全局相机定约）。
