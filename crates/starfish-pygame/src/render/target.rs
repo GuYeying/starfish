@@ -426,6 +426,104 @@ impl Screen {
         RenderPass::screen(self, true)
     }
 
+    /// 帧缓冲取证回读（诊断专用，**present/flip 前调用有效**）：网格采样
+    /// 当前交换链内容，返回 (x, y, r, g, b)。letterbox 判定的客观像素
+    /// 证据（PrintWindow/合成器截图在 flip-model 下可能返回陈旧帧）。
+    /// 内部阻塞等映射（诊断低频调用可接受）。
+    pub fn readback_probe(&self) -> Vec<(u32, u32, [u8; 4])> {
+        let surface = self.surface.borrow();
+        let Some(texture) = surface.current_frame_texture() else {
+            starfish_std::debug::console_log(
+                "[screen-probe] color_frame 为 None（present 后调用？）",
+            );
+            return Vec::new();
+        };
+        let (w, h) = surface.size();
+        let bpr = (w * 4).div_ceil(256) * 256;
+        let gpu = gpu();
+        let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("pygame_screen_probe"),
+            size: (bpr * h) as u64,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(bpr),
+                    rows_per_image: Some(h),
+                },
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+        );
+        gpu.queue.submit([encoder.finish()]);
+        let (tx, rx) = std::sync::mpsc::channel();
+        buffer.slice(..).map_async(wgpu::MapMode::Read, move |res| {
+            let _ = tx.send(res);
+        });
+        loop {
+            match rx.try_recv() {
+                Ok(Ok(())) => break,
+                Ok(Err(e)) => {
+                    starfish_std::debug::console_log(&format!(
+                        "[screen-probe] 回读失败 {e}"
+                    ));
+                    return Vec::new();
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    starfish_std::debug::console_log("[screen-probe] 通道断开");
+                    return Vec::new();
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    gpu.device.poll(wgpu::PollType::Wait {
+                        submission_index: None,
+                        timeout: None,
+                    });
+                }
+            }
+        }
+        let data = match buffer.get_mapped_range(..) {
+            Ok(view) => view.to_vec(),
+            Err(e) => {
+                starfish_std::debug::console_log(&format!(
+                    "[screen-probe] 映射失败 {e}"
+                ));
+                return Vec::new();
+            }
+        };
+        buffer.unmap();
+        // 7×5 网格采样
+        let mut out = Vec::new();
+        for gy in 0..5u32 {
+            for gx in 0..7u32 {
+                let x = (w - 1) * gx / 6;
+                let y = (h - 1) * gy / 4;
+                let off = y as usize * bpr as usize + x as usize * 4;
+                if off + 4 <= data.len() {
+                    out.push((
+                        x,
+                        y,
+                        [data[off], data[off + 1], data[off + 2], data[off + 3]],
+                    ));
+                }
+            }
+        }
+        out
+    }
+
     /// 裁剪区（scissor；作用于本目标全部绘制，None = 不裁剪）
     pub fn set_clip(&self, clip: Option<IRect>) {
         self.clip.set(clip);
