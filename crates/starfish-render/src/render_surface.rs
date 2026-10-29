@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use wgpu::{Device, Queue, Surface, SurfaceCapabilities, SurfaceTexture, TextureFormat};
 use crate::render_pass::attachments::{ColorAttachment, DepthAttachment};
@@ -7,6 +8,14 @@ use wgpu::{TextureView};
 
 
 //管理每帧的数据的
+static FB_DUMP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 帧缓冲取证 dump 开关（诊断——present 内 resolve 后采样帧缓冲并落
+/// console_log；Android 上 dev_log 可取证）
+pub fn set_fb_dump(on: bool) {
+    FB_DUMP.store(on, Ordering::SeqCst);
+}
+
 pub struct RenderSurface{
     surface: Arc<wgpu::Surface<'static>>,          // 渲染表面（对应窗口）
     device: Arc<wgpu::Device>,                // GPU逻辑设备（核心）
@@ -382,8 +391,8 @@ impl RenderSurface{
             let _submission_idx = self.queue.submit(all_commands);
         }
         // 3.5 帧缓冲取证 dump（诊断：resolve 后、present 前的唯一有效
-        //     采样点——env STARFISH_SCREEN_DUMP=1 启用）
-        if std::env::var("STARFISH_SCREEN_DUMP").is_ok() {
+        //     采样点——set_fb_dump(true) 启用）
+        if FB_DUMP.load(Ordering::SeqCst) {
             let (w, h) = (self.config.width, self.config.height);
             let bpr = (w * 4).div_ceil(256) * 256;
             let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
