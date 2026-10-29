@@ -884,6 +884,17 @@ impl OverlayCtx {
         draw(&mut pass);
     }
 
+    /// 缓冲间拷贝（本帧编码内有序执行——compute 写 storage → copy 到
+    /// uniform 的GPU 闭环直通口）
+    pub fn copy_buffer_to_buffer(
+        &mut self,
+        src: &wgpu::Buffer,
+        dst: &wgpu::Buffer,
+        size: u64,
+    ) {
+        self.encoder.copy_buffer_to_buffer(src, 0, dst, 0, size);
+    }
+
     /// 在任意离屏面上开一条通道（**中间面客人通道**——自带管线的绘制
     /// 端（如 egui_wgpu）先画进面、再经 [`Self::blit_fullscreen`] 用引擎
     /// sprite 管线合成回目标：客人零改其管线即可吃全局相机定约）。
