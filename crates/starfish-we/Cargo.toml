@@ -57,6 +57,9 @@ objc2-core-foundation = { workspace = true, features = ["CFRunLoop"] }
 wayland-client = { workspace = true }
 smithay-client-toolkit = { workspace = true }
 sctk-adwaita = { workspace = true }
+# 事件泵的零超时可读探测（libwayland wl_display_read_events 无数据时
+# 阻塞，须先 poll(POLLIN, 0)——树内既有传递依赖，零新增体积）
+libc = "0.2"
 
 [target.'cfg(target_os = "android")'.dependencies]
 android-activity = { workspace = true }

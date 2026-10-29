@@ -224,7 +224,10 @@ pub fn apply_window_request(size: (u32, u32), flags: u32) {
     with_window(|w| {
         // 复现钩子：窗口实测钉为环境变量指定尺寸（逻辑≠物理的前提）
         w.set_size(desktop_lb.unwrap_or(size));
-        w.set_resizable(flags & RESIZABLE != 0);
+        // FULLSCREEN 解除 min=max 钉死（Wayland 合成器的约束引擎在全屏
+        // 态也吃 max_size——钉请求尺寸时 configure 尺寸原地不变，窗口
+        // 字母箱钉在请求尺寸，Mutter 真机实测 2026-10-29）
+        w.set_resizable(flags & RESIZABLE != 0 || flags & FULLSCREEN != 0);
         w.set_fullscreen(flags & FULLSCREEN != 0);
         w.set_borderless(flags & NOFRAME != 0);
         // HIDDEN 运行时语义 = 隐藏窗口（真 pygame 为创建期；垫底执行）
@@ -236,16 +239,18 @@ pub fn apply_window_request(size: (u32, u32), flags: u32) {
         }
     });
     // FULLSCREEN 旗标：尺寸请求作废——画布改取原生窗口实测尺寸
-    // （Android 嵌入 = 外部窗口实测值，满屏 1:1 零变形零映射；桌面 =
-    // 全屏后的窗口实测值）。非全屏 = 请求尺寸原样（GLES 缩放铺满，
-    // 既定语义）。"set_mode 与 fullscreen 处理"的语义修正定案
+    // （Android 嵌入 = 外部窗口实测值，满屏 1:1 零变形零映射；Linux
+    // Wayland = 全屏 configure 回落后的窗口实测值——后端 set_fullscreen
+    // 内有界往返收集 configure，此处同步可取；实测失败垫底回请求尺寸）。
+    // 非全屏 = 请求尺寸原样（GLES 缩放铺满，既定语义）。
+    // "set_mode 与 fullscreen 处理"的语义修正定案
     let effective = if flags & FULLSCREEN != 0 {
-        #[cfg(target_os = "android")]
+        #[cfg(any(target_os = "android", target_os = "linux"))]
         match with_window(|w| w.size()) {
             Some(native) if native.0 > 0 && native.1 > 0 => native,
             _ => size,
         }
-        #[cfg(not(target_os = "android"))]
+        #[cfg(not(any(target_os = "android", target_os = "linux")))]
         size
     } else {
         size
