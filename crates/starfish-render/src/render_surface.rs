@@ -434,6 +434,12 @@ impl RenderSurface{
     pub fn get_current_color_texture_view(&self) -> Option<Arc<TextureView>>{
         self.color_view.clone()
     }
+
+    /// 当前帧交换链纹理（GPU 回读取证用——present 前有效；present 后
+    /// color_frame 已收走 = None）
+    pub fn current_frame_texture(&self) -> Option<&wgpu::Texture> {
+        self.color_frame.as_ref().map(|f| &f.texture)
+    }
     pub fn get_current_depth_texture_view(&self)-> Option<Arc<TextureView>>{
         Some(self.depth_view.clone())
     }
