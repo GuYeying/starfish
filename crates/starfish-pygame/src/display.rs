@@ -245,13 +245,15 @@ pub fn apply_window_request(size: (u32, u32), flags: u32) {
     // 非全屏 = 请求尺寸原样（GLES 缩放铺满，既定语义）。
     // "set_mode 与 fullscreen 处理"的语义修正定案
     let effective = if flags & FULLSCREEN != 0 {
-        #[cfg(any(target_os = "android", target_os = "linux"))]
+        // 全屏画布 = 原生窗口实测尺寸（Android 嵌入 = 外部窗实测；桌面 =
+        // 全屏 apply 后的窗实测——Win32 SetWindowPos 同步发 WM_SIZE、
+        // Wayland 后端 set_fullscreen 内先解钉 commit 再有界往返收
+        // configure，均可同步取到；Web 全屏为 no-op，实测 = 请求 = 原
+        // 行为）。实测失败垫底回请求尺寸。
         match with_window(|w| w.size()) {
             Some(native) if native.0 > 0 && native.1 > 0 => native,
             _ => size,
         }
-        #[cfg(not(any(target_os = "android", target_os = "linux")))]
-        size
     } else {
         size
     };
