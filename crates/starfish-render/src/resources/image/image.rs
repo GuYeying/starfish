@@ -28,6 +28,17 @@ pub enum ImageData {
     Compressed(Box<dyn CompressedImage>),
 }
 
+impl ImageData {
+    /// 零填充/自带字节的 RGBA8 图像构造（绑定层便捷口——Python 侧免依赖
+    /// image crate）。`bytes` 长度须 = w×h×4，不符时 Err。
+    pub fn rgba8(width: u32, height: u32, bytes: Vec<u8>) -> Result<Self, ()> {
+        match RgbaImage::from_raw(width, height, bytes) {
+            Some(img) => Ok(Self::Rgba8(img)),
+            None => Err(()),
+        }
+    }
+}
+
 
 
 //为了后期能兼容更多更好的纹理文件，暂时实现一个Image抽象类型，这个是作为中间层，也就是各种类型通过转换成Image，然后再通过Image上传到GPU纹理中

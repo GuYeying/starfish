@@ -324,6 +324,16 @@ impl Texture {
         &self.desc
     }
 
+    /// 宽（像素——创建期实测尺寸）
+    pub fn width(&self) -> u32 {
+        self.texture.width()
+    }
+
+    /// 高（像素）
+    pub fn height(&self) -> u32 {
+        self.texture.height()
+    }
+
     pub fn label(&self) -> &str {
         &self.label
     }

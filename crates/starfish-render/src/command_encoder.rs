@@ -89,6 +89,21 @@ impl CommandEncoder {
         self.inner.finish()
     }
 
+    /// 开启计算通道（compute pipeline 直绘——Dispatch 语义；无附件，
+    /// 资源经 bind group 访问；bind 按调用序自动排组位）
+    pub fn begin_compute_pass(
+        &mut self,
+        label: Option<&str>,
+    ) -> crate::render_pass::compute_pass::ComputePass<'_> {
+        let desc = wgpu::ComputePassDescriptor {
+            label,
+            timestamp_writes: None,
+        };
+        crate::render_pass::compute_pass::ComputePass::new(
+            self.inner.begin_compute_pass(&desc),
+        )
+    }
+
     /// 写入时间戳（需 `Features::TIMESTAMP_QUERY`，`features::core()` 默认已含；
     /// query_set 的类型必须为 `QueryType::Timestamp`）
     ///
