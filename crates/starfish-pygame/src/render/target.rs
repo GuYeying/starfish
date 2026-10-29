@@ -437,14 +437,26 @@ impl Screen {
     /// 证据（PrintWindow/合成器截图在 flip-model 下可能返回陈旧帧）。
     /// 内部阻塞等映射（诊断低频调用可接受）。
     pub fn readback_probe(&self) -> Vec<(u32, u32, [u8; 4])> {
-        let surface = self.surface.borrow();
-        let Some(texture) = surface.current_frame_texture() else {
-            starfish_std::debug::console_log(
-                "[screen-probe] color_frame 为 None（present 后调用？）",
-            );
+        // 取样源：优先上一已呈现帧（present 后调用 = 屏幕真实内容），
+        // 回退当前帧（present 前——MSAA 下未 resolve = 黑，局限已知）
+        let presented = {
+            let surface = self.surface.borrow();
+            surface.presented_texture().cloned()
+        };
+        let current = {
+            let surface = self.surface.borrow();
+            surface.current_frame_texture().cloned()
+        };
+        let texture_owner: Option<&wgpu::Texture> = match (&presented, &current) {
+            (Some(t), _) => Some(t),
+            (None, Some(t)) => Some(t),
+            _ => None,
+        };
+        let Some(texture) = texture_owner else {
+            starfish_std::debug::console_log("[screen-probe] 无可采样纹理");
             return Vec::new();
         };
-        let (w, h) = surface.size();
+        let (w, h) = (texture.width(), texture.height());
         let bpr = (w * 4).div_ceil(256) * 256;
         let gpu = gpu();
         let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
@@ -612,6 +624,11 @@ impl Screen {
         // 清屏色，无裁剪则越界内容溢进黑边（真机实测）——按画布子矩形
         // 显式 scissor 补齐"画布外不可见"语义。逻辑==物理（桌面/全屏）
         // 恒等零动作
+        // 画布裁剪开关（"画布外不可见"）：默认停用——GL/GLES 后端实测
+        // set_scissor_rect 会使整条 batch pass 画不出任何内容（黑屏，
+        // A/B 实证，DX12 正常），机理待查。设
+        // STARFISH_LETTERBOX_SCISSOR=1 可启用（研究用）
+        let canvas_scissor = std::env::var("STARFISH_LETTERBOX_SCISSOR").is_ok();
         let scissor = {
             let (pw, ph) = self.surface.borrow().size();
             let (lw, lh) = self.logical.get();
@@ -632,7 +649,8 @@ impl Screen {
                 }
             });
             // 画布子矩形（整像素取整——半像素差异不可见）。非恒等才启用
-            let canvas: Option<crate::IRect> = if lw > 0
+            let canvas: Option<crate::IRect> = if canvas_scissor
+                && lw > 0
                 && (lw as f64 * fit.scale != pw as f64
                     || lh as f64 * fit.scale != ph as f64)
             {
@@ -663,7 +681,11 @@ impl Screen {
                 (None, Some(b)) => Some(b),
                 (None, None) => None,
             };
-            combined.and_then(|r| super::batch::scissor_from(r, (pw, ph)))
+            if std::env::var("STARFISH_NO_SCISSOR").is_ok() {
+                None
+            } else {
+                combined.and_then(|r| super::batch::scissor_from(r, (pw, ph)))
+            }
         };
         let cmd = {
             let batch = self.batch.borrow();
