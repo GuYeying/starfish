@@ -458,6 +458,11 @@ impl RenderSurface{
     pub fn current_frame_texture(&self) -> Option<&wgpu::Texture> {
         self.color_frame.as_ref().map(|f| &f.texture)
     }
+
+    /// 当前帧是否已获取（begin_frame 成功 → present 前 = true）
+    pub fn has_current_frame(&self) -> bool {
+        self.color_frame.is_some()
+    }
     pub fn get_current_depth_texture_view(&self)-> Option<Arc<TextureView>>{
         Some(self.depth_view.clone())
     }

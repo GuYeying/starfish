@@ -392,14 +392,20 @@ impl Screen {
             starfish_std::debug::devlog("[screen] present 跳过（未 begin）");
             return;
         }
-        self.begun.set(false);
         self.pack(false);
         // 延迟叠加（定约见 defer_overlay）：本帧全部 pack 之后、present
-        // 之前执行——登记序即画家序，恒在游戏内容之上
+        // 之前执行——登记序即画家序，恒在游戏内容之上。
+        // ⚠️ 必须在 begun 复位**之前**运行：run_overlay 的 ensure_begun
+        // 此时要短路（帧已 begin，不重复 acquire）——若 begun 先复位，
+        // 叠加会在 present 中途触发 begin_frame 重新 acquire 交换链帧
+        //（color_frame 被换成未绘制新帧 + begun=true 泄漏 → 下帧
+        // ensure_begun 短路 → 绘制进已 present 的旧图 → 屏幕冻结在
+        // 陈旧帧/黑屏，真机 Android 实测全症状）
         let deferred: Vec<_> = self.pending_overlays.borrow_mut().drain(..).collect();
         for f in deferred {
             self.run_overlay(f);
         }
+        self.begun.set(false);
         // present 对"begin 未就绪无帧"自身免疫（跳过路径）
         self.surface.borrow_mut().present();
         self.batch.borrow_mut().clear();
@@ -734,6 +740,18 @@ impl Screen {
     /// 交换链 MSAA 采样数（外接渲染器管线须匹配，否则 wgpu 校验错）
     pub fn sample_count(&self) -> u32 {
         self.samples
+    }
+
+    /// 帧生命周期状态串（诊断探针——begun/color_frame/尺寸一屏可读）
+    pub fn frame_state(&self) -> String {
+        let surface = self.surface.borrow();
+        format!(
+            "begun={} frame={} {}x{}",
+            self.begun.get(),
+            surface.has_current_frame(),
+            surface.size().0,
+            surface.size().1
+        )
     }
 
     /// 叠加渲染通道——**立即形态**（定约见上方注释块）：`f` 内经
