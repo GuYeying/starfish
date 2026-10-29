@@ -122,6 +122,16 @@ pub async fn set_mode_ex(size: (u32, u32), flags: u32) -> Result<(), RenderConte
             backends |= be;
         }
     }
+    // Web：GL 旗标（OPENGL/OPENGLES——GLES 判定探针的创建期预扫描词置
+    // 位）在 wasm 上追加 BROWSER_WEBGPU 优先位。wgpu 适配器择序 WebGPU
+    // 先于 GL，旗标语义（"要 GLES 家族"）落为"WebGPU 优先、WebGL2 兜
+    // 底"——强制单 GL 会落 glow web_sys 的采样参数 f32 切片不支持
+    // panic（Sampler parameter for `f32` slice is not supported，
+    // surface_size_probe 建窗即 trap，2026-10-29 真页实测）。
+    #[cfg(target_arch = "wasm32")]
+    if backends.intersects(wgpu::Backends::GL) {
+        backends |= wgpu::Backends::BROWSER_WEBGPU;
+    }
     // 透明创建位：DirectComposition 呈现（DxgiFromVisual——wgpu 文档
     // 明示 DxgiFromHwnd "does not support transparency"）+ 表面
     // **显式 PreMultiplied**（管线 ALPHA_BLENDING 的 alpha 通道因子
