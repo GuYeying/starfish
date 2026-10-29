@@ -381,6 +381,68 @@ impl RenderSurface{
         if !all_commands.is_empty() {
             let _submission_idx = self.queue.submit(all_commands);
         }
+        // 3.5 帧缓冲取证 dump（诊断：resolve 后、present 前的唯一有效
+        //     采样点——env STARFISH_SCREEN_DUMP=1 启用）
+        if std::env::var("STARFISH_SCREEN_DUMP").is_ok() {
+            let (w, h) = (self.config.width, self.config.height);
+            let bpr = (w * 4).div_ceil(256) * 256;
+            let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("starfish_fb_dump"),
+                size: (bpr * h) as u64,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let mut enc = self.device.create_command_encoder(&Default::default());
+            enc.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &frame.texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &buffer,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(bpr),
+                        rows_per_image: Some(h),
+                    },
+                },
+                wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            );
+            self.queue.submit([enc.finish()]);
+            let (tx, rx) = std::sync::mpsc::channel();
+            buffer.slice(..).map_async(wgpu::MapMode::Read, move |res| {
+                let _ = tx.send(res);
+            });
+            self.device.poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            });
+            let _ = rx.recv();
+            let data = match buffer.get_mapped_range(..) {
+                Ok(view) => view.to_vec(),
+                Err(_) => Vec::new(),
+            };
+            buffer.unmap();
+            let mut out = Vec::new();
+            for gy in 0..5u32 {
+                for gx in 0..7u32 {
+                    let x = (w - 1) * gx / 6;
+                    let y = (h - 1) * gy / 4;
+                    let off = y as usize * bpr as usize + x as usize * 4;
+                    if off + 4 <= data.len() {
+                        out.push(format!(
+                            "({x},{y})=#{:02X}{:02X}{:02X}",
+                            data[off], data[off + 1], data[off + 2]
+                        ));
+                    }
+                }
+            }
+            starfish_std::debug::console_log(&format!(
+                "[fb-dump] {}x{} {}", w, h, out.join(" ")
+            ));
+        }
         // 4. 上屏
         self.queue.present(frame);
         // 重置帧状态
