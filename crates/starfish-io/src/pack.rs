@@ -19,7 +19,7 @@ const INDEX_AAD: &[u8] = b"sf-index";
 
 /// 解密封装：magic 探测 → XChaCha20-Poly1305 open（AAD = 路径）。
 /// 无封装（非 SFXE1）= 原样透传（明文资源无缝混合）。
-pub(crate) fn unwrap_envelope(raw: &[u8], aad_path: &str, key: &[u8; 32]) -> Result<Vec<u8>, String> {
+pub(crate) fn unwrap_envelope(raw: &[u8], key: &[u8; 32]) -> Result<Vec<u8>, String> {
     if raw.len() < 17 + 16 || &raw[..5] != ENV_MAGIC {
         return Ok(raw.to_vec()); // 无封装 = 透传
     }
@@ -30,7 +30,7 @@ pub(crate) fn unwrap_envelope(raw: &[u8], aad_path: &str, key: &[u8; 32]) -> Res
             nonce,
             Payload {
                 msg: &raw[17..],
-                aad: aad_path.as_bytes(),
+                aad: b"starfish-asset-v1",
             },
         )
         .map_err(|e| format!("解密失败（密钥不匹配或资源被篡改）: {e:?}"))
@@ -51,12 +51,14 @@ pub(crate) fn wrap_envelope(plain: &[u8], aad_path: &str, key: &[u8; 32], nonce2
 }
 
 /// 资源包（SFIX1）只读视图：open 时解析（解密）索引，按路径取封装再解密
+#[derive(Clone)]
 pub struct Pack {
     map: BTreeMap<String, Entry>,
     key: [u8; 32],
     raw: Vec<u8>, // 整包驻内存（v1——io.read 本就是整文件读语义）
 }
 
+#[derive(Clone)]
 struct Entry {
     offset: u64,
     len: u64,
@@ -108,6 +110,11 @@ impl Pack {
         self.map.is_empty()
     }
 
+    /// 条目路径清单（runtime 装表遍历用）
+    pub fn entry_paths(&self) -> Vec<String> {
+        self.map.keys().cloned().collect()
+    }
+
     /// 按路径取资源（封装解密 + AAD=路径）
     pub fn read(&self, path: &str) -> Result<Vec<u8>, String> {
         let Some(e) = self.map.get(path) else {
@@ -118,7 +125,7 @@ impl Pack {
         if end > self.raw.len() {
             return Err(format!("资源条目越界: {path}"));
         }
-        unwrap_envelope(&self.raw[off..end], path, &self.key)
+        unwrap_envelope(&self.raw[off..end], &self.key)
     }
 }
 

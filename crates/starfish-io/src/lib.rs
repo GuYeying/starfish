@@ -23,7 +23,22 @@
 //! Web 端契约：`write` 以 **POST**（body = 原始字节）发往 `path`，
 //! 服务端需接受该端点的写入；非 2xx 状态 → [`IoError::Backend`]。
 
-pub(crate) mod pack;
+pub mod pack;
+pub use pack::Pack;
+
+// ── 内嵌资源包源（runtime 单文件形态——self-blob 解析后注入；创建时
+// 一次性 set，io.read 解析链包优先）──
+static PACK_SOURCE: std::sync::OnceLock<Option<pack::Pack>> = std::sync::OnceLock::new();
+
+/// runtime 壳注入内嵌资源包（self-blob → Pack::open 后调此口）
+pub fn set_pack_source(pack: pack::Pack) {
+    let _ = PACK_SOURCE.set(Some(pack));
+}
+
+fn pack_lookup(path: &str) -> Option<Vec<u8>> {
+    let pack = PACK_SOURCE.get()?.as_ref()?;
+    pack.read(path).ok()
+}
 
 /// IO 错误（不可用能力显式报错，不做静默降级）
 #[derive(Debug)]
@@ -236,70 +251,74 @@ pub fn set_base_dir(dir: impl AsRef<std::path::Path>) {
 /// - **资源策略**：init_resource 配置了包时 = 包优先查找（runtime 构
 ///   建），未命中回落路径；wasm fetch 散文件按密钥解封装（加密资源）
 
-// ── 资源源策略（创建时一次性——starfish-debug 同款定约；平台中立外层）──
+// ── 资源加密（创建时一次性——密钥/魔数 init 注入；**松散加密文件**
+// 单一形态——单文件包已裁撤：io.read 整文件读语义下包无增益，逐文件
+// 加密即防护本体；wasm 多文件 fetch 同格式，2026-11-01 定约）──
 
-static SOURCE: std::sync::OnceLock<Option<Vec<pack::Pack>>> = std::sync::OnceLock::new();
 static IO_KEY: std::sync::OnceLock<Option<[u8; 32]>> = std::sync::OnceLock::new();
+static IO_MAGIC: std::sync::OnceLock<[u8; 5]> = std::sync::OnceLock::new();
 
-/// 资源策略 init（宿主创建时调用一次；未调 = 纯路径现行为）：
-/// packs 非空 = runtime 包读取（按序查找；wasm 仅多文件模式——packs
-/// 被忽略并告警）；key = 资源解密密钥（包索引/条目 + wasm 加密散文件
-/// 同钥——打包与加密解耦）
-pub fn init_resource(packs: &[std::path::PathBuf], key: Option<[u8; 32]>) {
-    #[cfg(target_arch = "wasm32")]
-    if !packs.is_empty() {
-        crate::pack::console_note("wasm 仅多文件模式——packs 忽略（设计定约）");
-    }
-    let mut loaded = Vec::new();
-    #[cfg(not(target_arch = "wasm32"))]
-    for p in packs {
-        match std::fs::read(p) {
-            Ok(raw) => match pack::Pack::open(raw, &key.unwrap_or([0u8; 32])) {
-                Ok(pack) => loaded.push(pack),
-                Err(e) => eprintln!("[starfish-io] 资源包 {p:?} 打开失败: {e}"),
-            },
-            Err(e) => eprintln!("[starfish-io] 资源包 {p:?} 读取失败: {e}"),
-        }
-    }
-    let _ = SOURCE.set(if loaded.is_empty() { None } else { Some(loaded) });
-    let _ = IO_KEY.set(key);
+/// 资源加密 init（宿主创建时调用一次；未调 = 无解密，密文资源读出即
+/// 原始封装字节）：key = 32B 解密密钥；magic = 项目自定义封装魔数
+///（缺省 "SFXE1"——按项目换魔数可让通用扫描器失效，零成本加防护）
+pub fn init_crypto(key: [u8; 32], magic: [u8; 5]) {
+    let _ = IO_KEY.set(Some(key));
+    let _ = IO_MAGIC.set(magic);
 }
 
-/// 包查找：按序取第一个命中的资源字节（无命中 = None → 回落路径层）
-fn pack_lookup(path: &str) -> Option<Vec<u8>> {
-    let packs = SOURCE.get()?.as_ref()?;
-    for (i, pack) in packs.iter().enumerate() {
-        match pack.read(path) {
-            Ok(b) => {
-                eprintln!("[starfish-io] pack_lookup {path}: 包{i} 命中 {}B", b.len());
-                return Some(b);
-            }
-            Err(e) => eprintln!("[starfish-io] pack_lookup {path}: 包{i} 未命中: {e}"),
-        }
-    }
-    eprintln!("[starfish-io] pack_lookup {path}: 全部包未命中");
-    None
+pub fn io_key() -> Option<[u8; 32]> {
+    IO_KEY.get().cloned().flatten()
 }
 
-/// 解密密钥（wasm 散文件解封用；native 包内解密已在 Pack::read 内）
-pub(crate) fn io_key() -> Option<[u8; 32]> {
-    IO_KEY.get_or_init(|| None).clone()
+pub fn io_magic() -> [u8; 5] {
+    IO_MAGIC.get().copied().unwrap_or(*b"SFXE1")
 }
 
-/// - **资源策略**：init_resource 配置了包时 = 包优先查找（runtime 构
-///   建），未命中回落路径；wasm fetch 散文件按密钥解封装（加密资源）
+/// - **资源加密**：init_crypto 注入密钥/魔数后，读到的加密封装文件
+///   自动解密（明文资源透传，混合无缝）；密钥不符 = 显式报错（密文物
+///   理错误不该静默出垃圾图）
 pub async fn read(path: &str) -> Result<Vec<u8>, IoError> {
     if let Some(bytes) = pack_lookup(path) {
         return Ok(bytes);
     }
     let raw = imp::read(path).await?;
-    // wasm 加密散文件解封（native 的包内条目已在 pack_lookup 解过）
     if let Some(key) = io_key() {
-        if let Ok(plain) = crate::pack::unwrap_envelope(&raw, path, &key) {
-            return Ok(plain);
-        }
+        return unwrap_envelope(&raw, path, &key, &io_magic())
+            .map_err(IoError::Backend);
     }
     Ok(raw)
+}
+
+/// 解密封装（SFXE1 格式：magic5 | nonce12 | 密文+tag16）：
+/// AAD = 域常量（完整性与域绑定——**不含路径**：松散文件读路径随
+/// 基准目录变化，路径 AAD 会在换目录/换机时假性失败，2026-11-01 实测）；
+/// magic 探测不匹配 = Ok(透传原字节)——明文/密文混合无缝；
+/// magic 命中但解密失败 = Err（密钥错/被篡改，显式暴露）
+pub(crate) fn unwrap_envelope(
+    raw: &[u8],
+    _aad_path: &str,
+    key: &[u8; 32],
+    magic: &[u8; 5],
+) -> Result<Vec<u8>, String> {
+    use chacha20poly1305::{
+        aead::{Aead, KeyInit, Payload},
+        ChaCha20Poly1305, Key, Nonce,
+    };
+    const DOMAIN_AAD: &[u8] = b"starfish-asset-v1";
+    if raw.len() < 33 || &raw[..5] != magic {
+        return Ok(raw.to_vec()); // 无封装 = 透传（明文资源）
+    }
+    let nonce = Nonce::from_slice(&raw[5..17]); // IETF 12B
+    let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
+    cipher
+        .decrypt(
+            nonce,
+            Payload {
+                msg: &raw[17..],
+                aad: DOMAIN_AAD,
+            },
+        )
+        .map_err(|e| format!("资源解密失败（密钥不匹配或已篡改）: {e:?}"))
 }
 
 /// 写入全部字节（覆盖）
