@@ -23,6 +23,8 @@
 //! Web 端契约：`write` 以 **POST**（body = 原始字节）发往 `path`，
 //! 服务端需接受该端点的写入；非 2xx 状态 → [`IoError::Backend`]。
 
+pub(crate) mod pack;
+
 /// IO 错误（不可用能力显式报错，不做静默降级）
 #[derive(Debug)]
 pub enum IoError {
@@ -231,8 +233,73 @@ pub fn set_base_dir(dir: impl AsRef<std::path::Path>) {
 ///
 /// - 原生：std::fs::read（path 为文件路径，相对基准目录/CWD 或绝对）
 /// - Web：`fetch(path)` GET（path 为 URL，相对页面地址或绝对）
+/// - **资源策略**：init_resource 配置了包时 = 包优先查找（runtime 构
+///   建），未命中回落路径；wasm fetch 散文件按密钥解封装（加密资源）
+
+// ── 资源源策略（创建时一次性——starfish-debug 同款定约；平台中立外层）──
+
+static SOURCE: std::sync::OnceLock<Option<Vec<pack::Pack>>> = std::sync::OnceLock::new();
+static IO_KEY: std::sync::OnceLock<Option<[u8; 32]>> = std::sync::OnceLock::new();
+
+/// 资源策略 init（宿主创建时调用一次；未调 = 纯路径现行为）：
+/// packs 非空 = runtime 包读取（按序查找；wasm 仅多文件模式——packs
+/// 被忽略并告警）；key = 资源解密密钥（包索引/条目 + wasm 加密散文件
+/// 同钥——打包与加密解耦）
+pub fn init_resource(packs: &[std::path::PathBuf], key: Option<[u8; 32]>) {
+    #[cfg(target_arch = "wasm32")]
+    if !packs.is_empty() {
+        crate::pack::console_note("wasm 仅多文件模式——packs 忽略（设计定约）");
+    }
+    let mut loaded = Vec::new();
+    #[cfg(not(target_arch = "wasm32"))]
+    for p in packs {
+        match std::fs::read(p) {
+            Ok(raw) => match pack::Pack::open(raw, &key.unwrap_or([0u8; 32])) {
+                Ok(pack) => loaded.push(pack),
+                Err(e) => eprintln!("[starfish-io] 资源包 {p:?} 打开失败: {e}"),
+            },
+            Err(e) => eprintln!("[starfish-io] 资源包 {p:?} 读取失败: {e}"),
+        }
+    }
+    let _ = SOURCE.set(if loaded.is_empty() { None } else { Some(loaded) });
+    let _ = IO_KEY.set(key);
+}
+
+/// 包查找：按序取第一个命中的资源字节（无命中 = None → 回落路径层）
+fn pack_lookup(path: &str) -> Option<Vec<u8>> {
+    let packs = SOURCE.get()?.as_ref()?;
+    for (i, pack) in packs.iter().enumerate() {
+        match pack.read(path) {
+            Ok(b) => {
+                eprintln!("[starfish-io] pack_lookup {path}: 包{i} 命中 {}B", b.len());
+                return Some(b);
+            }
+            Err(e) => eprintln!("[starfish-io] pack_lookup {path}: 包{i} 未命中: {e}"),
+        }
+    }
+    eprintln!("[starfish-io] pack_lookup {path}: 全部包未命中");
+    None
+}
+
+/// 解密密钥（wasm 散文件解封用；native 包内解密已在 Pack::read 内）
+pub(crate) fn io_key() -> Option<[u8; 32]> {
+    IO_KEY.get_or_init(|| None).clone()
+}
+
+/// - **资源策略**：init_resource 配置了包时 = 包优先查找（runtime 构
+///   建），未命中回落路径；wasm fetch 散文件按密钥解封装（加密资源）
 pub async fn read(path: &str) -> Result<Vec<u8>, IoError> {
-    imp::read(path).await
+    if let Some(bytes) = pack_lookup(path) {
+        return Ok(bytes);
+    }
+    let raw = imp::read(path).await?;
+    // wasm 加密散文件解封（native 的包内条目已在 pack_lookup 解过）
+    if let Some(key) = io_key() {
+        if let Ok(plain) = crate::pack::unwrap_envelope(&raw, path, &key) {
+            return Ok(plain);
+        }
+    }
+    Ok(raw)
 }
 
 /// 写入全部字节（覆盖）

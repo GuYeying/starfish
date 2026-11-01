@@ -5,6 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 description = "跨平台文件/数据读取与保存：一套通用异步 API，原生 std::fs 直实现 / Web fetch 直实现"
 
+[dependencies]
+chacha20poly1305 = { workspace = true }
+serde_json = "1"
+
 # 桌面/移动：阻塞实现包在 async 体外壳内
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 pollster = { workspace = true }
