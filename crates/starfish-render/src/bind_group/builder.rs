@@ -34,6 +34,7 @@ impl BindGroupBuilder {
             visibility: ShaderStages::FRAGMENT,
             resource: BindResource::Texture {
                 view,
+                filterable: true,
             },
         });
 
@@ -53,6 +54,24 @@ impl BindGroupBuilder {
             visibility: ShaderStages::FRAGMENT,
             resource: BindResource::Texture {
                 view,
+                filterable: true,
+            },
+        });
+
+        self
+    }
+
+    /// 数据纹理（texelFetch 通路）：VERTEX|FRAGMENT 可见 + 非
+    /// filterable——rgba32float 等"不可过滤"格式的合法绑定形态
+    /// （2026-10-30 compute_probe pos 纹理通路；VS textureLoad 必须
+    /// VERTEX 可见，FRAGMENT 兼顾 frag 端同口读取）
+    pub fn texture_view_data(mut self, binding: u32, view: Arc<wgpu::TextureView>) -> Self {
+        self.items.push(BindItem {
+            binding,
+            visibility: ShaderStages::VERTEX | ShaderStages::FRAGMENT,
+            resource: BindResource::Texture {
+                view,
+                filterable: false,
             },
         });
 
@@ -86,11 +105,13 @@ impl BindGroupBuilder {
 
     /// 绑定裸 uniform 缓冲（已持有 `Arc<wgpu::Buffer>` 时直用；语义同 [`Self::uniform`]）
     ///
-    /// `size` 作为 min_binding_size（字节）。默认可见性 VERTEX | FRAGMENT。
+    /// `size` 作为 min_binding_size（字节）。可见性 VERTEX | FRAGMENT |
+    /// COMPUTE（三段——compute 会话 cfg uniform 同口；storage 只读形态
+    /// 同此定约。wgpu 允许 layout 可见性超集，渲染管线无感）
     pub fn uniform_raw(mut self, binding: u32, buffer: Arc<wgpu::Buffer>, size: u64) -> Self {
         self.items.push(BindItem {
             binding,
-            visibility: ShaderStages::VERTEX | ShaderStages::FRAGMENT,
+            visibility: ShaderStages::VERTEX | ShaderStages::FRAGMENT | ShaderStages::COMPUTE,
             resource: BindResource::Uniform {
                 buffer,
                 size: Some(size),
@@ -151,6 +172,7 @@ impl BindGroupBuilder {
             visibility: ShaderStages::FRAGMENT,
             resource: BindResource::Texture {
                 view,
+                filterable: true,
             },
         });
 
@@ -252,13 +274,13 @@ impl BindGroupBuilder {
                 // =========================
                 // Texture
                 // =========================
-                BindResource::Texture { .. } => {
+                BindResource::Texture { filterable, .. } => {
                     layout_entries.push(wgpu::BindGroupLayoutEntry {
                         binding: item.binding,
                         visibility: item.visibility,
                         ty: wgpu::BindingType::Texture {
                             sample_type: wgpu::TextureSampleType::Float {
-                                filterable: true,
+                                filterable: *filterable,
                             },
                             view_dimension: wgpu::TextureViewDimension::D2,
                             multisampled: false,
@@ -361,7 +383,7 @@ impl BindGroupBuilder {
                         resource: buffer.as_entire_binding(),
                     });
                 }
-                BindResource::Texture { view } => {
+                BindResource::Texture { view, .. } => {
                     bind_entries.push(wgpu::BindGroupEntry {
                         binding: item.binding,
                         resource: wgpu::BindingResource::TextureView(view.as_ref()),

@@ -19,6 +19,7 @@
 //! `map_async` 等待（桌面 `poll(Wait)` 阻塞驱动 / Web `poll(Poll)` +
 //! rAF 让出重试）→ 去行填充 → RGBA8。
 
+use std::sync::OnceLock;
 use starfish_io as engine_io;
 use starfish_render::resources::image::ImageData;
 use crate::render::{gpu, CpuAlpha, DrawTarget, Surface, Texture};
@@ -88,6 +89,58 @@ pub fn load_from_bytes(bytes: &[u8]) -> Result<Surface, ImageError> {
         surface.set_cpu_alpha(CpuAlpha::from_rgba8((w, h), rgba.as_raw()));
     }
     Ok(surface)
+}
+
+// ── 占位资源（资产加载失败的终极兜底）────────────────────────────
+//
+// 定约（"缺资源不崩溃"）：加载失败 = log_error + **纯内存生成的占位图**
+// 顶上，脚本拿到有效 Surface 继续跑——占位 = 64×64 品红/黑棋盘格
+// （Source 引擎同款视觉，一眼可辨）。生成路径零 I/O、不可能失败。
+// 严格模式 `STARFISH_STRICT_ASSETS=1`：仍抛错（CI 资源完整性测试用）。
+
+pub fn strict_assets() -> bool {
+    std::env::var("STARFISH_STRICT_ASSETS").is_ok()
+}
+
+/// 品红/黑棋盘格占位图（纯内存生成；size 需为偶数）
+fn placeholder_image(size: u32) -> ImageData {
+    let mut img = image::RgbaImage::new(size, size);
+    let half = (size / 2).max(1);
+    for y in 0..size {
+        for x in 0..size {
+            let magenta = ((x / half) + (y / half)) % 2 == 0;
+            let px = if magenta { [255, 0, 255, 255] } else { [24, 0, 24, 255] };
+            img.put_pixel(x, y, image::Rgba(px));
+        }
+    }
+    ImageData::Rgba8(img)
+}
+
+/// 全局占位图（**模块根级静态**——OnceLock 惰性生成一次，进程内复用；
+/// GPU Surface 每次从此数据构建——纹理随设备生命周期，不做全局静态）
+static PLACEHOLDER: OnceLock<ImageData> = OnceLock::new();
+
+fn placeholder_data() -> &'static ImageData {
+    PLACEHOLDER.get_or_init(|| placeholder_image(64))
+}
+
+/// 占位 Surface（镜像 load_from_bytes 成功路径——含 CPU alpha 影子）。
+/// 64 = 缓存命中零生成；非 64 = 现场生成（当前全部调用方均 64）
+pub fn placeholder_surface(size: u32) -> Surface {
+    let owned;
+    let data: &ImageData = if size == 64 {
+        placeholder_data()
+    } else {
+        owned = placeholder_image(size);
+        &owned
+    };
+    let texture = Texture::from_image(data);
+    let mut surface = Surface::from_texture(texture);
+    if let ImageData::Rgba8(rgba) = data {
+        let (w, h) = (rgba.width(), rgba.height());
+        surface.set_cpu_alpha(CpuAlpha::from_rgba8((w, h), rgba.as_raw()));
+    }
+    surface
 }
 
 /// 解码为 CPU 统一图像格式（RGBA8；纯逻辑，可测）

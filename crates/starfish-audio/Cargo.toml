@@ -12,6 +12,7 @@ default = ["dialog"]
 dialog = ["dep:starfish-dialog"]
 
 [dependencies]
+starfish-debug = { workspace = true }
 starfish-permission = { workspace = true }
 starfish-dialog = { workspace = true, optional = true }
 cpal = { workspace = true }

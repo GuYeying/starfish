@@ -1,10 +1,9 @@
-//! 开发者诊断设施：日志输出 / 崩溃转发 / 线程契约守卫
+//! 线程契约守卫 + 停表（日志输出已收拢到 **starfish-debug** crate 的
+//! `log` 模块——级别/文件/wasm 远程/第三方 log 桥接全在彼处；本模块
+//! 只剩线程契约与计时设施）。
 //!
-//! 组织方式（对齐 video 的按平台分文件模式）：
-//! - [`mod@super`]（本文件）：平台中立的**统一入口**（console_log /
-//!   assert_main_thread）与线程契约
-//! - [`web`]：wasm 实现（console.log / panic hook 落浏览器控制台）
-//! - [`native`]：原生实现（stdout；panic 天然走 stderr）
+//! 历史注：`console_log`/`devlog`/`set_diag_sink` 已随日志统一批撤除
+//! （2026-10-31）——调用点全部迁往 `starfish_debug::log_*!` 宏。
 //!
 //! 定位：本模块是所有"调试期辅助"的唯一家——**底层调试，严格不做
 //! 跨平台抽象的强行归一**：平台专属能力保持平台门控语义（如
@@ -17,8 +16,6 @@ use std::thread::{current, ThreadId};
 
 #[cfg(target_arch = "wasm32")]
 mod web;
-#[cfg(not(target_arch = "wasm32"))]
-mod native;
 
 // ── 跨平台毫秒停表（诊断打点用）────────────────────────────────────
 
@@ -47,63 +44,6 @@ impl Stopwatch {
         #[cfg(target_arch = "wasm32")]
         {
             0
-        }
-    }
-}
-
-// ── 日志输出（统一入口；平台实现在子模块）───────────────────────────
-
-/// 诊断落盘 sink（壳按需注入一次；console_log 每条同步转发）。
-///
-/// 动机：Android stdout = logcat 转发线程的管道——**块缓冲**，进程被
-/// 杀时未冲刷的面包屑全部丢失。壳注入"追加写 dev_log.txt"的 sink 后，
-/// 全部诊断输出（runtime 阶段打点 / testhost 首帧分段 / panic 短讯）
-/// 同步落盘，崩溃后 USB 直拉定位最后一条。
-static DIAG_SINK: std::sync::Mutex<Option<Box<dyn Fn(&str) + Send + Sync>>> =
-    std::sync::Mutex::new(None);
-
-/// 注入诊断落盘 sink（壳启动早期调用一次；未注入 = 零开销跳过）
-pub fn set_diag_sink(f: Box<dyn Fn(&str) + Send + Sync>) {
-    if let Ok(mut g) = DIAG_SINK.lock() {
-        *g = Some(f);
-    }
-}
-
-/// 跨平台日志：wasm → 浏览器控制台（console.log）；桌面 → stdout；
-/// 已注入 sink 时同步转发落盘（见 [`set_diag_sink`]）。
-///
-/// wasm 没有 stdout/stderr，`println!` 在浏览器无处可去——Web 应用的
-/// 诊断输出一律走本函数。
-pub fn console_log(msg: &str) {
-    if let Ok(g) = DIAG_SINK.lock() {
-        if let Some(f) = g.as_ref() {
-            f(msg);
-        }
-    }
-    #[cfg(target_arch = "wasm32")]
-    web::log(msg);
-    #[cfg(not(target_arch = "wasm32"))]
-    native::log(msg);
-}
-
-/// 诊断落盘通道（批次二十四临时，随诊断批撤除）：wasm → console_log
-///（println 于 wasm 不可见——web 渲染链路排障的唯一出口，2026-10-26）；
-/// 桌面 println；Android 追加 `/sdcard/Download/bp_log.txt`。
-/// 渲染链路排障共用（begin_frame/present/resize 各环节打点）。
-pub fn devlog(msg: &str) {
-    #[cfg(target_arch = "wasm32")]
-    console_log(msg);
-    #[cfg(not(target_arch = "wasm32"))]
-    println!("{msg}");
-    #[cfg(target_os = "android")]
-    {
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("/sdcard/Download/bp_log.txt")
-        {
-            use std::io::Write;
-            let _ = writeln!(f, "{msg}");
         }
     }
 }

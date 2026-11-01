@@ -346,3 +346,20 @@ mod tests {
         std::thread::sleep(Duration::from_millis(ms));
     }
 }
+
+/// wasm32-unknown-unknown 无 Instant（sys/time/unsupported.rs panic）——
+/// v1 恒 0（对齐 starfish-std Stopwatch 模式）；web 精确时钟走
+/// performance.now 的后续批次接手
+#[cfg(target_arch = "wasm32")]
+fn elapsed_impl() -> std::time::Duration {
+    std::time::Duration::ZERO
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn elapsed_impl() -> std::time::Duration {
+    use std::sync::OnceLock;
+    use std::time::Instant;
+    // 懒初始化固定原点（与 now() 同款——非负、单调、解耦首次调用时机）
+    static ORIGIN: OnceLock<Instant> = OnceLock::new();
+    ORIGIN.get_or_init(Instant::now).elapsed()
+}

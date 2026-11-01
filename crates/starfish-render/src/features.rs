@@ -127,18 +127,24 @@ pub fn names(feats: Features) -> Vec<&'static str> {
     feats.iter_names().map(|(name, _)| name).collect()
 }
 
-/// 打印能力报告（创建设备后调用一次）
-pub fn report(wish: Features, granted: Features) {
-    println!("===== wgpu feature report =====");
-    println!("wish:    {:?}", names(wish));
-    println!("granted: {:?}", names(granted));
-    let miss = missing(wish, granted);
-    if miss.is_empty() {
-        println!("missing: (none)");
-    } else {
-        println!("missing: {:?}", names(miss));
-    }
-    println!("===============================");
+/// 打印能力报告（创建设备后调用一次）。limits 只打关键项：uniform
+/// 块上限直接决定"大数组挂 uniform binding"脚本的可行性（GLES 设备
+/// 常见 16KB/24KB/64KB 档，DX12/Vulkan 64MiB+——2026-10-30 compute_probe
+/// Android 定判用）
+pub fn report(wish: Features, granted: Features, limits: &wgpu::Limits) {
+    starfish_debug::log_info!(format!(
+        "wgpu feature report
+wish:    {:?}
+granted: {:?}
+missing: {:?}
+         limits: max_uniform_buffer_binding_size={} max_storage_buffer_binding_size={}          max_storage_buffers_per_shader_stage={}",
+        names(wish),
+        names(granted),
+        names(missing(wish, granted)),
+        limits.max_uniform_buffer_binding_size,
+        limits.max_storage_buffer_binding_size,
+        limits.max_storage_buffers_per_shader_stage,
+    ));
 }
 
 #[cfg(test)]

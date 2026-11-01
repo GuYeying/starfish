@@ -7,7 +7,6 @@
 //! 资产经 `include_bytes!` 内嵌（全平台零 IO——Web 无文件系统、Android
 //! 资产通道 v2 前的内嵌方案，见 image 模块文档）。
 
-use starfish_std::debug::console_log;
 use starfish_we::{Event, KeyCode, Window};
 use starfish_pygame::font::Font;
 use starfish_pygame::image;
@@ -80,12 +79,12 @@ async fn app_body() -> Result<(), Box<dyn std::error::Error>> {
                 f.end();
             }
             match image::save(&shot, "saved_demo.png") {
-                Ok(()) => console_log("[image_demo] 已保存 saved_demo.png"),
-                Err(e) => console_log(&format!("[image_demo] 保存失败: {e}")),
+                Ok(()) => starfish_debug::log_info!("[image_demo] 已保存 saved_demo.png"),
+                Err(e) => starfish_debug::log_error!(&format!("[image_demo] 保存失败: {e}")),
             }
         }
         if frames >= AUTO_EXIT_FRAMES {
-            console_log(&format!(
+            starfish_debug::log_info!(&format!(
                 "[image_demo] {AUTO_EXIT_FRAMES} 帧完成，{}",
                 if cfg!(target_arch = "wasm32") { "Web 驻留" } else { "正常退出" }
             ));

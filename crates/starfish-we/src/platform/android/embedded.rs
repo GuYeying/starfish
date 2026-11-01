@@ -35,6 +35,7 @@ pub(crate) static EXTERNAL: Mutex<Option<ExternalWindow>> = Mutex::new(None);
 unsafe impl Send for ExternalWindow {}
 
 /// 嵌入模式是否激活（glue 路径的短路开关）
+/// 同样的，这个是用于poll_event检查是否是嵌入模式来控制是否要使用嵌入式事件队列的事件。
 pub fn external_active() -> bool {
     EXTERNAL.lock().unwrap_or_else(|p| p.into_inner()).is_some()
 }

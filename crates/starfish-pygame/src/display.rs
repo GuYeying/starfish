@@ -88,7 +88,7 @@ pub async fn set_mode_ex(size: (u32, u32), flags: u32) -> Result<(), RenderConte
         panic!("display.set_mode 进程一次（契约 §七）；重复调用不支持");
     }
     if flags & !KNOWN_MASK != 0 {
-        starfish_std::debug::console_log(&format!(
+        starfish_debug::log_info!(&format!(
             "[pygame] set_mode: 未登记旗标位 0x{:X} 忽略（垫底原则）",
             flags & !KNOWN_MASK
         ));
@@ -171,7 +171,7 @@ pub async fn set_mode_ex(size: (u32, u32), flags: u32) -> Result<(), RenderConte
         match Screen::new_with(&window, surface_settings.clone(), gpu_settings).await {
             Ok(s) => s,
             Err(_) if explicit_backends => {
-                starfish_std::debug::console_log(
+                starfish_debug::log_info!(
                     "[pygame] 声明后端不可用，回退全后端重试（wgpu 隐式退化）",
                 );
                 Screen::new_with(&window, surface_settings, GpuSettings::default()).await?
@@ -212,13 +212,7 @@ pub fn set_caption(title: &str) {
 /// Android 窗口化行为（物理≠逻辑 + 引擎等比居中映射）在本机复现，
 /// 供自绘管线/叠加通道的 letterbox 对齐做本地调试。未设置 = None
 pub(crate) fn desktop_letterbox() -> Option<(u32, u32)> {
-    static CACHED: std::sync::OnceLock<Option<(u32, u32)>> = std::sync::OnceLock::new();
-    *CACHED.get_or_init(|| {
-        std::env::var("STARFISH_DESKTOP_LETTERBOX").ok().and_then(|s| {
-            let (w, h) = s.split_once('x')?;
-            Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
-        })
-    })
+    starfish_debug::letterbox_sim()
 }
 
 /// 脚本 set_mode 为完整请求：set_size 跟随 + 旗标经 Window::set_* 即时
@@ -226,10 +220,13 @@ pub(crate) fn desktop_letterbox() -> Option<(u32, u32)> {
 pub fn apply_window_request(size: (u32, u32), flags: u32) {
 
     if flags & OPENGL != 0 {
-        starfish_std::debug::console_log("[display] OPENGL 旗标垫底（引擎恒 wgpu）");
+        starfish_debug::log_info!("[display] OPENGL 旗标垫底（引擎恒 wgpu）");
     }
     // 落地耗时打点（慢调用哨兵——启动诊断用）
     let t = starfish_std::debug::Stopwatch::now();
+    // starfish-debug 全屏形态模拟（创建时声明）：脚本 set_mode 一律按
+    // FULLSCREEN 旗标处理——移动端全屏形态的本机对照
+    let flags = if starfish_debug::fullscreen_sim() { flags | FULLSCREEN } else { flags };
     let desktop_lb = desktop_letterbox();
     with_window(|w| {
         // 复现钩子：窗口实测钉为环境变量指定尺寸（逻辑≠物理的前提）
@@ -334,7 +331,7 @@ pub(crate) fn handle_resized(width: u32, height: u32) {
     if get_init() {
         // 批次二十四诊断：Android 走 devlog（文件+TCP 真机可取证）
         #[cfg(target_os = "android")]
-        starfish_std::debug::devlog(&format!(
+        starfish_debug::log_debug!(&format!(
             "[display] resize 自愈 → {width}×{height}"
         ));
         // request_resize（非 resize）：帧进行中的缩放延迟到帧边界落地——

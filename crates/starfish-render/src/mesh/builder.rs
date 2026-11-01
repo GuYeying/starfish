@@ -23,6 +23,8 @@ pub struct MeshBuilder {
     vertex_buffer_usages:BufferUsages,
     index_buffer_usages:BufferUsages,
 
+    /// 顶点布局实例步进（with_instance_stepped）
+    instance_stepped: bool,
 }
 
 impl MeshBuilder {
@@ -38,8 +40,17 @@ impl MeshBuilder {
             long_indices:Vec::new(),
             short_indices:Vec::new(),
             vertex_buffer_usages: BufferUsages::VERTEX,
-            index_buffer_usages: BufferUsages::INDEX
+            index_buffer_usages: BufferUsages::INDEX,
+            instance_stepped: false,
         }
+    }
+
+    /// 顶点布局按**实例步进**（instanced draw——GPU 粒子：每实例一粒，
+    /// pos 经顶点属性进 VS——顶点属性是固定功能通路，规避 VS 段纹理/
+    /// SSBO 读取的多平台静默失效，2026-10-30 实测定案）
+    pub fn with_instance_stepped(mut self) -> Self {
+        self.instance_stepped = true;
+        self
     }
 
     pub fn with_vertex_usages(mut self,usages:BufferUsages)->Self{
@@ -73,7 +84,12 @@ impl MeshBuilder {
         label_vertex: Option<&str>,
         label_index: Option<&str>,
     ) -> Mesh {
-        let buffer_layout = BufferLayout::vertex(&self.layout);
+        // 步进模式：常规逐顶点 / 实例步进（with_instance_stepped）
+        let buffer_layout = if self.instance_stepped {
+            BufferLayout::instance(&self.layout)
+        } else {
+            BufferLayout::vertex(&self.layout)
+        };
 
         // =========================
         // Vertex
@@ -122,7 +138,6 @@ impl MeshBuilder {
             })));
 
             index_format = Some(IndexFormat::Uint16);
-            print!("16!!!");
         } else if !self.long_indices.is_empty() {
             let max_index = *self.long_indices.iter().max().unwrap();
 
@@ -134,7 +149,6 @@ impl MeshBuilder {
             );
 
             index_count = self.long_indices.len() as u32;
-            print!("32!!!");
 
             index_buffer = Some(Arc::new(self.device.create_buffer_init(&BufferInitDescriptor {
                 label: label_index,
@@ -145,7 +159,6 @@ impl MeshBuilder {
             index_format = Some(IndexFormat::Uint32);
         }
         
-        println!("{} {}", vertex_count,index_count);
         Mesh::new(
             vertex_buffer,
             index_buffer,

@@ -167,11 +167,11 @@ impl AudioPump {
                 match super::web::fetch_bytes(&path).await {
                     Ok(bytes) => match PumpCore::from_bytes(bytes, rate) {
                         Ok(c) => *core.borrow_mut() = Some(c),
-                        Err(e) => starfish_std::debug::console_log(&format!(
+                        Err(e) => starfish_debug::log_error!(&format!(
                             "[video] 音轨泵装配失败（静音降级）: {e}"
                         )),
                     },
-                    Err(msg) => starfish_std::debug::console_log(&format!(
+                    Err(msg) => starfish_debug::log_error!(&format!(
                         "[video] 音轨源 fetch 失败（静音降级）: {msg}"
                     )),
                 }
@@ -253,7 +253,7 @@ impl AudioPump {
                         // 跳过坏帧；连续超限才禁用泵（坏音轨不拖死画面）
                         core.consecutive_errors += 1;
                         if core.consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
-                            starfish_std::debug::console_log(&format!(
+                            starfish_debug::log_error!(&format!(
                                 "[video] 音轨连续解码失败 {MAX_CONSECUTIVE_ERRORS} 帧，泵禁用: {e}"
                             ));
                             core.eos = true;

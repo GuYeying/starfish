@@ -140,4 +140,39 @@ impl CommandEncoder {
         self.inner
             .copy_buffer_to_buffer(source, source_offset, destination, destination_offset, copy_size);
     }
+
+    /// 拷贝缓冲区到 2D 纹理（GPU 侧数据通路：compute 写 storage →
+    /// 搬进采样纹理 → 渲染端 texelFetch——顶点段 SSBO 设备相关、uniform
+    /// 有 64KB 级上限，大 N 数据只有纹理通路装得下）。buffer 布局 =
+    /// bpr 对齐 256；rows_per_image = copy 高
+    pub fn copy_buffer_to_texture(
+        &mut self,
+        source: &wgpu::Buffer,
+        bytes_per_row: u32,
+        destination: &wgpu::Texture,
+        copy_width: u32,
+        copy_height: u32,
+    ) {
+        self.inner.copy_buffer_to_texture(
+            wgpu::TexelCopyBufferInfo {
+                buffer: source,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(bytes_per_row),
+                    rows_per_image: Some(copy_height),
+                },
+            },
+            wgpu::TexelCopyTextureInfo {
+                texture: destination,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::Extent3d {
+                width: copy_width,
+                height: copy_height,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
 }

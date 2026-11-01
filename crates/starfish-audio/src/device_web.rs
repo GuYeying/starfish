@@ -117,7 +117,7 @@ pub(crate) fn open_input(
             let js = match wasm_bindgen_futures::JsFuture::from(promise).await {
                 Ok(v) => v,
                 Err(e) => {
-                    eprintln!("[starfish-audio] 麦克风授权失败/被拒: {e:?}");
+                    starfish_debug::log_error!(format!("[starfish-audio] 麦克风授权失败/被拒: {e:?}"));
                     return;
                 }
             };
@@ -126,7 +126,7 @@ pub(crate) fn open_input(
         let source = match ctx2.create_media_stream_source(&stream) {
             Ok(n) => n,
             Err(e) => {
-                eprintln!("[starfish-audio] MediaStreamSource 创建失败: {e:?}");
+                starfish_debug::log_error!(format!("[starfish-audio] MediaStreamSource 创建失败: {e:?}"));
                 return;
             }
         };
@@ -134,7 +134,7 @@ pub(crate) fn open_input(
         let processor = match ctx2.create_script_processor_with_buffer_size_and_number_of_input_channels_and_number_of_output_channels(4096, 1, 0) {
             Ok(n) => n,
             Err(e) => {
-                eprintln!("[starfish-audio] ScriptProcessor 创建失败: {e:?}");
+                starfish_debug::log_error!(format!("[starfish-audio] ScriptProcessor 创建失败: {e:?}"));
                 return;
             }
         };

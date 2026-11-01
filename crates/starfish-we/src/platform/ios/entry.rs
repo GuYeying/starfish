@@ -76,7 +76,7 @@ pub fn ios_start(tick: fn(&Window) -> Option<i32>) -> ! {
     // 触碰该类型，查找会失败，应用将以无委托状态空转。
     let _ = <AppDelegate as objc2::ClassType>::class();
     let registered = objc2::runtime::AnyClass::get(c"StarfishAppDelegate").is_some();
-    eprintln!("[starfish] delegate class registered: {registered} / 委托类已注册: {registered}");
+    starfish_debug::log_info!(format!("[starfish] delegate class registered: {registered}"));
     // SAFETY: argc=0 / argv=null is accepted by UIApplicationMain; the
     // delegate class name refers to the class registered just above.
     // SAFETY: UIApplicationMain 接受 argc=0、argv=null；委托类名指向
@@ -123,18 +123,18 @@ define_class!(
             _application: &UIApplication,
             _options: Option<&NSDictionary>,
         ) -> Bool {
-            eprintln!("[starfish] didFinishLaunching: creating window / 建窗中");
+            starfish_debug::log_info!("[starfish] didFinishLaunching: creating window");
             match Window::new("starfish ios", (0, 0), crate::flags::WindowFlags::default()) {
                 Ok(window) => {
                     WINDOW.with_borrow_mut(|slot| *slot = Some(window));
                     install_frame_driver(self);
-                    eprintln!(
-                        "[starfish] window created + frame driver installed / 建窗完成 + 帧驱动已装"
+                    starfish_debug::log_info!(
+                        "[starfish] window created + frame driver installed"
                     );
                     Bool::YES
                 }
                 Err(err) => {
-                    eprintln!("window creation failed / 建窗失败: {err}");
+                    starfish_debug::log_error!(format!("建窗失败: {err}"));
                     Bool::NO
                 }
             }

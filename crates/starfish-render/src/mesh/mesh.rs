@@ -54,7 +54,7 @@ impl Mesh {
     }
 
 
-    pub(crate) fn vertex_buffer(&self)-> &Arc<Buffer>{
+    pub fn vertex_buffer(&self)-> &Arc<Buffer>{
         &self.vertex_buffer
     }
 

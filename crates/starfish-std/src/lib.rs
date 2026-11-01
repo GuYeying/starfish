@@ -2,7 +2,8 @@
 //!
 //! 收拢跨模块共享的部分（原 `base` 恒编译件）：
 //! - [`error`]：引擎统一错误类型（`Error(String)`）
-//! - [`debug`]：跨平台诊断输出（[`debug::console_log`]）/ panic 转发 /
+//! - [`debug`]：线程契约守卫 / 停表 / panic 转发（日志已迁
+//!   starfish-debug）
 //!   线程契约守卫——wasm 上 `println!` 无处可去，诊断一律走 `console_log`
 //! - [`app`]：平台驱动器垫片（桌面 `block_on` / Web `spawn_local` 再导出，
 //!   [`app_entry!`] 宏的基础设施）
@@ -94,7 +95,7 @@ macro_rules! app_entry {
             match $crate::app::block_on($body) {
                 Ok(()) => {}
                 Err(e) => {
-                    $crate::debug::console_log(&format!("[starfish] 退出: {e}"))
+                    $crate::__log_exit(&format!("[starfish] 退出: {e}"))
                 }
             }
             // 收尾：音频线程（cpal Stream）不 join，走进程清理。
@@ -116,7 +117,7 @@ macro_rules! app_entry {
                 match $body.await {
                     Ok(()) => {}
                     Err(e) => {
-                        $crate::debug::console_log(&format!("[starfish] 退出: {e}"))
+                        $crate::__log_exit(&format!("[starfish] 退出: {e}"))
                     }
                 }
             });

@@ -13,6 +13,7 @@ default = []
 we = ["dep:starfish-we"]
 
 [dependencies]
+starfish-debug = { workspace = true }
 starfish-we = { workspace = true, optional = true }
 
 # 桌面/Android：阻塞式异步驱动（app 再导出 pollster::block_on）

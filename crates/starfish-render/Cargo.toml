@@ -6,6 +6,7 @@ rust-version.workspace = true
 description = "wgpu 渲染封装：bind_group/mesh/pipeline/render_pass/shader_module/RenderEntry/Surface + 资源装载（resources）"
 
 [dependencies]
+starfish-debug = { workspace = true }
 starfish-std = { workspace = true }
 # we-wgpu：raw-window-handle trait 实现，create_surface 零 unsafe 直通
 # （可选——无窗渲染/headless 场景不需要 starfish-we；见 features.we）

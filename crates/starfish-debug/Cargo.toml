@@ -1,0 +1,14 @@
+# log crate 桥（第三方日志捕获——wgpu/egui/rapier 等已在依赖树）
+[dependencies]
+log = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = { workspace = true }
+web-sys = { workspace = true }
+
+[package]
+name = "starfish-debug"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "dev 诊断配置契约（创建时一次性定约）——letterbox 物理钉定/全屏形态模拟/拟合 HUD；无任何运行时变更接口"

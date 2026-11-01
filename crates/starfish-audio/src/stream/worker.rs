@@ -174,7 +174,7 @@ impl DecoderPump {
                 match self.reader.seek(sec) {
                     // 先换代再写新数据，读者据此丢弃旧代残留
                     Ok(()) => self.ring.begin_generation(),
-                    Err(e) => eprintln!("[starfish audio] seek 失败: {e}"),
+                    Err(e) => starfish_debug::log_warn!(format!("[starfish audio] seek 失败: {e}")),
                 }
             }
             None => {}
@@ -222,7 +222,7 @@ impl DecoderPump {
                 0
             }
             Err(e) => {
-                eprintln!("[starfish audio] 解码错误，流终止: {e}");
+                starfish_debug::log_error!(format!("[starfish audio] 解码错误，流终止: {e}"));
                 self.ring.set_eof();
                 0
             }

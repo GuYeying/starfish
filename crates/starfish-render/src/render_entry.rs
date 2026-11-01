@@ -186,11 +186,11 @@ impl RenderEntry{
             &device,
             &queue,
             granted_features,
-            granted_limits,
+            granted_limits.clone(),
             adapter_info,
         );
 
-        super::features::report(gpu_settings.desired_features, granted_features);
+        super::features::report(gpu_settings.desired_features, granted_features, &granted_limits);
 
         let render_frame = RenderSurface::new(
             &surface,
@@ -292,7 +292,7 @@ impl RenderEntry{
         // 陈旧帧无从定位）
         #[cfg(not(target_arch = "wasm32"))]
         device.on_uncaptured_error(Arc::new(move |e: wgpu::Error| {
-            starfish_std::debug::console_log(&format!("[wgpu-error] {e}"));
+            starfish_debug::log_info!(&format!("[wgpu-error] {e}"));
         }));
 
 
@@ -302,11 +302,11 @@ impl RenderEntry{
             &device,
             &queue,
             granted_features,
-            granted_limits,
+            granted_limits.clone(),
             adapter_info,
         );
 
-        super::features::report(gpu_settings.desired_features, granted_features);
+        super::features::report(gpu_settings.desired_features, granted_features, &granted_limits);
         
 
         let render_frame: RenderSurface =
@@ -634,11 +634,11 @@ impl RenderEntry{
             &device,
             &queue,
             granted_features,
-            granted_limits,
+            granted_limits.clone(),
             adapter_info,
         );
 
-        super::features::report(gpu_settings.desired_features, granted_features);
+        super::features::report(gpu_settings.desired_features, granted_features, &granted_limits);
 
         let render_surface = RenderSurface::new(
             &surface,

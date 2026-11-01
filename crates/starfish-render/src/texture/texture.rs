@@ -64,6 +64,40 @@ impl Texture {
         Self::create_and_upload(device, queue, label, size, image, desc, Origin3d::ZERO)
     }
 
+    /// 空 2D 数据纹理（**CPU 端不上传内容**——数据由 GPU 侧写入：
+    /// copy_buffer_to_texture / 计算存储纹理）。rgba32float 等"非图像"
+    /// 格式的数据通路（texelFetch 读、不采样不过滤）：usage = 采样 +
+    /// COPY_DST（2026-10-30 compute_probe 大粒子档 pos 纹理）
+    pub fn empty_2d_data(
+        device: &Device,
+        label: &str,
+        width: u32,
+        height: u32,
+        format: TextureFormat,
+    ) -> Self {
+        let desc = TextureDescriptor {
+            semantic: crate::texture::texture_desc::TextureSemantic::Data,
+            usage: crate::texture::texture_desc::TextureUsage::Sampled,
+            gpu_format_override: Some(format),
+            dimension: TextureDim::D2,
+            mipmap: crate::texture::texture_desc::MipmapPolicy::Disabled,
+            multisample: None,
+            array_layers: 1,
+        };
+        let size = Extent3d { width, height, depth_or_array_layers: 1 };
+        let wgpu_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        Self::build_texture_object(label.to_string(), wgpu_tex, size, desc)
+    }
+
     /// 创建立方体贴图
     pub(crate) fn from_rgba8_cube(
         device: &Device,

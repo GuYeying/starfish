@@ -133,7 +133,7 @@ pub fn open_output_stream(
     let channels = config.channels;
 
     let mut user_cb = user_cb;
-    let err_cb = move |e| eprintln!("[starfish-audio] 播放流错误: {e}");
+    let err_cb = move |e| starfish_debug::log_error!(format!("[starfish-audio] 播放流错误: {e}"));
     let data_cb = move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
         fill_interleaved(data, channels, |frames| user_cb.on_frames(frames));
     };
@@ -189,7 +189,7 @@ pub fn open_input_stream(
     // cpal 输入侧给的是只读采样，而 AudioUserCallback 约定 &mut [StereoFrame]
     //（录音路径要就地处理）；复用一块暂存缓冲做中转，音频线程内零重复分配
     let mut staging: Vec<StereoFrame> = Vec::new();
-    let err_cb = move |e| eprintln!("[starfish-audio] 录音流错误: {e}");
+    let err_cb = move |e| starfish_debug::log_error!(format!("[starfish-audio] 录音流错误: {e}"));
     let data_cb = move |data: &[f32], _: &cpal::InputCallbackInfo| {
         if channels != 2 {
             return;

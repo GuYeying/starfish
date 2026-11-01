@@ -35,10 +35,11 @@ impl RenderResourceAccess {
     )->Self{
         device.on_uncaptured_error(
             Arc::new(|err| {
-                eprintln!("\n================ WGPU 底层验证错误 ================");
-                eprintln!("错误类型: {:?}", err);
-                eprintln!("完整详情:\n{err:#?}");
-                eprintln!("===================================================\n");
+                starfish_debug::log_error!(format!(
+                    "WGPU 底层验证错误: {err}
+完整详情:
+{err:#?}"
+                ))
             })
         );
         Self{
@@ -217,6 +218,18 @@ impl RenderResourceAccess {
         Texture::from_rgba8_2d(&self.device, &self.queue, label, image, desc)
     }
 
+    /// 空 2D 数据纹理（rgba32float 等 GPU 侧写入通路——见
+    /// [`Texture::empty_2d_data`]；texelFetch 读、不采样不过滤）
+    pub fn create_texture_data_2d(
+        &self,
+        label: &str,
+        width: u32,
+        height: u32,
+        format: wgpu::TextureFormat,
+    ) -> Texture {
+        Texture::empty_2d_data(&self.device, label, width, height, format)
+    }
+
     pub fn create_texture_from_rgba8_1d(&self,label: &str,image_data: &ImageData,desc: TextureDescriptor)->Texture{
         let  image = &Image::new(image_data);
         Texture::from_rgba8_1d(&self.device,  &self.queue, label, image, desc)
@@ -305,6 +318,11 @@ impl RenderResourceAccess {
 
     pub fn mesh_builder(&self,layout: Vec<wgpu::VertexFormat>,vertices: Vec<u8>,) -> MeshBuilder {
         MeshBuilder::new(&self.device,layout,vertices)
+    }
+
+    /// 实例步进网格（instanced draw——见 MeshBuilder::with_instance_stepped）
+    pub fn mesh_builder_instance(&self,layout: Vec<wgpu::VertexFormat>,vertices: Vec<u8>,) -> MeshBuilder {
+        MeshBuilder::new(&self.device,layout,vertices).with_instance_stepped()
     }
 
     pub fn bind_group_builder(&self) -> BindGroupBuilder {

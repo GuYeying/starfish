@@ -72,7 +72,7 @@ async fn app_body() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         if wins.is_empty() {
-            starfish_std::debug::console_log(&format!(
+            starfish_debug::log_info!(&format!(
                 "[multi_window] 全部窗口已关，共 {frames} 帧"
             ));
             return Ok(());
@@ -87,7 +87,7 @@ async fn app_body() -> Result<(), Box<dyn std::error::Error>> {
 
         frames += 1;
         if frames % 120 == 0 {
-            starfish_std::debug::console_log(&format!(
+            starfish_debug::log_info!(&format!(
                 "[multi_window] 帧 {frames}，存活 {} 窗",
                 wins.len()
             ));

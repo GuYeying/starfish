@@ -367,7 +367,7 @@ impl Screen {
     /// 帧中直接重配置 = 深度新/颜色旧附件尺寸不匹配 → 命令缓冲无效。
     pub fn request_resize(&self, width: u32, height: u32) {
         // 批次二十四诊断
-        starfish_std::debug::devlog(&format!(
+        starfish_debug::log_debug!(&format!(
             "[screen] request_resize {width}×{height} begun={}",
             self.begun.get()
         ));
@@ -375,7 +375,7 @@ impl Screen {
             self.pending_resize.set(Some((width, height)));
         } else {
             self.resize(width, height);
-            starfish_std::debug::devlog("[screen] resize 已落地");
+            starfish_debug::log_debug!("[screen] resize 已落地");
         }
     }
 
@@ -389,7 +389,7 @@ impl Screen {
             b.len()
         };
         if !begun {
-            starfish_std::debug::devlog("[screen] present 跳过（未 begin）");
+            starfish_debug::log_warn!("[screen] present 跳过（未 begin）");
             return;
         }
         self.pack(false);
@@ -432,129 +432,20 @@ impl Screen {
         RenderPass::screen(self, true)
     }
 
-    /// 帧缓冲取证回读（诊断专用，**present/flip 前调用有效**）：网格采样
-    /// 当前交换链内容，返回 (x, y, r, g, b)。letterbox 判定的客观像素
-    /// 证据（PrintWindow/合成器截图在 flip-model 下可能返回陈旧帧）。
-    /// 内部阻塞等映射（诊断低频调用可接受）。
+    /// 帧缓冲取证回读（诊断专用）：7×5 网格采样最近一次成功呈现的
+    /// 快照，返回 (x, y, [r,g,b,a])。letterbox 判定的客观像素证据
+    ///（PrintWindow/合成器截图在 flip-model 下可能返回陈旧帧）。
+    /// 数据源 = present 时刻的异步快照（RenderSurface::probe_snapshot_grid
+    /// ）——Surface Texture present 后即毁，事后纹理拷贝 = DestroyedResource
+    /// 毒提交（DX12 实测 2026-10-30），旧"事后拷贝"方案废弃。
     pub fn readback_probe(&self) -> Vec<(u32, u32, [u8; 4])> {
-        // 取样源：优先上一已呈现帧（present 后调用 = 屏幕真实内容），
-        // 回退当前帧（present 前——MSAA 下未 resolve = 黑，局限已知）
-        let presented = {
-            let surface = self.surface.borrow();
-            surface.presented_texture().cloned()
-        };
-        let current = {
-            let surface = self.surface.borrow();
-            surface.current_frame_texture().cloned()
-        };
-        let texture_owner: Option<&wgpu::Texture> = match (&presented, &current) {
-            (Some(t), _) => Some(t),
-            (None, Some(t)) => Some(t),
-            _ => None,
-        };
-        let Some(texture) = texture_owner else {
-            starfish_std::debug::console_log("[screen-probe] 无可采样纹理");
-            return Vec::new();
-        };
-        let (w, h) = (texture.width(), texture.height());
-        let bpr = (w * 4).div_ceil(256) * 256;
-        let gpu = gpu();
-        let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("pygame_screen_probe"),
-            size: (bpr * h) as u64,
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let mut encoder = gpu.device.create_command_encoder(&Default::default());
-        encoder.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &buffer,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(bpr),
-                    rows_per_image: Some(h),
-                },
-            },
-            wgpu::Extent3d {
-                width: w,
-                height: h,
-                depth_or_array_layers: 1,
-            },
-        );
-        gpu.queue.submit([encoder.finish()]);
-        let (tx, rx) = std::sync::mpsc::channel();
-        buffer.slice(..).map_async(wgpu::MapMode::Read, move |res| {
-            let _ = tx.send(res);
-        });
-        loop {
-            match rx.try_recv() {
-                Ok(Ok(())) => break,
-                Ok(Err(e)) => {
-                    starfish_std::debug::console_log(&format!(
-                        "[screen-probe] 回读失败 {e}"
-                    ));
-                    return Vec::new();
-                }
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    starfish_std::debug::console_log("[screen-probe] 通道断开");
-                    return Vec::new();
-                }
-                Err(std::sync::mpsc::TryRecvError::Empty) => {
-                    // Web：map 回调由浏览器事件循环驱动，单线程内
-                    // poll(Wait, timeout=None) 自旋永远等不到回调——帧泵
-                    // 整体咬死（compute_probe 帧 60 回读后停摆实测，
-                    // 2026-10-29）。v0 降级 = 空样本 + 说明日志；异步回读
-                    // 待 web 专项。
-                    #[cfg(target_arch = "wasm32")]
-                    {
-                        starfish_std::debug::console_log(
-                            "[screen-probe] web v0 不支持同步回读（异步 map 待专项）——返回空样本",
-                        );
-                        return Vec::new();
-                    }
-                    #[cfg(not(target_arch = "wasm32"))]
-                    {
-                        gpu.device.poll(wgpu::PollType::Wait {
-                            submission_index: None,
-                            timeout: None,
-                        });
-                    }
-                }
-            }
+        let grid = self.surface.borrow().probe_snapshot_grid();
+        if grid.is_empty() {
+            starfish_debug::log_info!(
+                "[screen-probe] 无可用快照（首帧 / 映射未完成 / web 无 COPY_SRC）",
+            );
         }
-        let data = match buffer.get_mapped_range(..) {
-            Ok(view) => view.to_vec(),
-            Err(e) => {
-                starfish_std::debug::console_log(&format!(
-                    "[screen-probe] 映射失败 {e}"
-                ));
-                return Vec::new();
-            }
-        };
-        buffer.unmap();
-        // 7×5 网格采样
-        let mut out = Vec::new();
-        for gy in 0..5u32 {
-            for gx in 0..7u32 {
-                let x = (w - 1) * gx / 6;
-                let y = (h - 1) * gy / 4;
-                let off = y as usize * bpr as usize + x as usize * 4;
-                if off + 4 <= data.len() {
-                    out.push((
-                        x,
-                        y,
-                        [data[off], data[off + 1], data[off + 2], data[off + 3]],
-                    ));
-                }
-            }
-        }
-        out
+        grid
     }
 
     /// 裁剪区（scissor；作用于本目标全部绘制，None = 不裁剪）
@@ -633,75 +524,32 @@ impl Screen {
         } else {
             None
         };
-        // 裁剪区（pygame 语义两段合成）：①脚本 set_clip 同映射（逻辑 →
-        // 物理）；②**画布裁剪**——桌面窗口即画布，出界绘制被窗口边缘
-        // 天然硬裁；Android letterbox 画布是物理表面的子矩形，黑边只是
-        // 清屏色，无裁剪则越界内容溢进黑边（真机实测）——按画布子矩形
-        // 显式 scissor 补齐"画布外不可见"语义。逻辑==物理（桌面/全屏）
-        // 恒等零动作
-        // 画布裁剪开关（"画布外不可见"）：默认停用——GL/GLES 后端实测
-        // set_scissor_rect 会使整条 batch pass 画不出任何内容（黑屏，
-        // A/B 实证，DX12 正常），机理待查。设
-        // STARFISH_LETTERBOX_SCISSOR=1 可启用（研究用）
-        let canvas_scissor = std::env::var("STARFISH_LETTERBOX_SCISSOR").is_ok();
-        let scissor = {
+        // 裁剪区（pygame set_clip 语义）：脚本裁剪矩形经呈现映射（逻辑 →
+        // 物理）后生效。
+        // ⚠️ 画布裁剪（letterbox 下按画布子矩形裁剪的"画布外不可见"
+        // 语义）**已删除**：GL/GLES 后端实测 set_scissor_rect 会使整条
+        // batch pass 画不出任何内容（黑屏，A/B 实证，DX12 正常），机理
+        // 待查。代价 = 越界绘制可见（会涂到黑边上），游戏侧自行剔除或
+        // 覆盖；需要时从 git 历史（970faa9）恢复本段实现。
+        let scissor = self.clip.get().and_then(|r| {
             let (pw, ph) = self.surface.borrow().size();
             let (lw, lh) = self.logical.get();
             let fit = starfish_std::letterbox::Fit::fit(
                 pw as f64, ph as f64, lw as f64, lh as f64,
             );
-            let mapped = self.clip.get().and_then(|r| {
-                if lw == 0 || lh == 0 {
-                    Some(r)
-                } else {
-                    let (mx, my) = fit.logical_to_physical(r[0] as f64, r[1] as f64);
-                    Some([
-                        mx as i32,
-                        my as i32,
-                        (r[2] as f32 * fit.scale as f32) as i32,
-                        (r[3] as f32 * fit.scale as f32) as i32,
-                    ])
-                }
-            });
-            // 画布子矩形（整像素取整——半像素差异不可见）。非恒等才启用
-            let canvas: Option<crate::IRect> = if canvas_scissor
-                && lw > 0
-                && (lw as f64 * fit.scale != pw as f64
-                    || lh as f64 * fit.scale != ph as f64)
-            {
-                Some([
-                    fit.offset_x.round() as i32,
-                    fit.offset_y.round() as i32,
-                    (lw as f64 * fit.scale).round() as i32,
-                    (lh as f64 * fit.scale).round() as i32,
-                ])
+            let mapped = if lw == 0 || lh == 0 {
+                r
             } else {
-                None
+                let (mx, my) = fit.logical_to_physical(r[0] as f64, r[1] as f64);
+                [
+                    mx as i32,
+                    my as i32,
+                    (r[2] as f32 * fit.scale as f32) as i32,
+                    (r[3] as f32 * fit.scale as f32) as i32,
+                ]
             };
-            // 两段相交：canvas=None（恒等）→ 只剩脚本 clip；clip=None →
-            // 只剩画布；两者皆 None → 无裁剪
-            let combined: Option<crate::IRect> = match (mapped, canvas) {
-                (Some(c), Some(b)) => {
-                    let x0 = c[0].max(b[0]);
-                    let y0 = c[1].max(b[1]);
-                    let x1 = (c[0] + c[2]).min(b[0] + b[2]);
-                    let y1 = (c[1] + c[3]).min(b[1] + b[3]);
-                    if x1 > x0 && y1 > y0 {
-                        Some([x0, y0, x1 - x0, y1 - y0])
-                    } else {
-                        None
-                    }
-                }
-                (Some(c), None) => Some(c),
-                (None, Some(b)) => Some(b),
-                (None, None) => None,
-            };
-            if std::env::var("STARFISH_NO_SCISSOR").is_ok() {
-                None
-            } else {
-                combined.and_then(|r| super::batch::scissor_from(r, (pw, ph)))
-            }
-        };
+            super::batch::scissor_from(mapped, (pw, ph))
+        });
         let cmd = {
             let batch = self.batch.borrow();
             // 呈现映射（等比 letterbox）：正交(物理) × 平移(居中) ×
@@ -715,7 +563,7 @@ impl Screen {
             let (s, ox, oy) = (fit.scale as f32, fit.offset_x as f32, fit.offset_y as f32);
             if !self.pack_logged.get() {
                 self.pack_logged.set(true);
-                starfish_std::debug::console_log(&format!(
+                starfish_debug::log_info!(&format!(
                     "[present] 物理={pw}x{ph} 逻辑={lw}x{lh} scale={s:.3} ox={ox:.1} oy={oy:.1} scissor={:?}",
                     scissor,
                 ));
@@ -908,6 +756,22 @@ impl OverlayCtx {
         size: u64,
     ) {
         self.encoder.copy_buffer_to_buffer(src, 0, dst, 0, size);
+    }
+
+    /// 缓冲 → 2D 纹理拷贝（大 N 数据通路：storage → 采样纹理 → VS
+    /// texelFetch；bytes_per_row 须 256 对齐，(copy_width, copy_height)
+    /// = 本次拷贝区域）
+    pub fn copy_buffer_to_texture(
+        &mut self,
+        src: &wgpu::Buffer,
+        bytes_per_row: u32,
+        dst: &wgpu::Texture,
+        copy_width: u32,
+        copy_height: u32,
+    ) {
+        self.encoder.copy_buffer_to_texture(
+            src, bytes_per_row, dst, copy_width, copy_height,
+        );
     }
 
     /// 在任意离屏面上开一条通道（**中间面客人通道**——自带管线的绘制
@@ -1189,7 +1053,7 @@ impl<'a> RenderPass<'a> {
             PassKind::Screen(s) => s.defer_overlay(f),
             PassKind::Surface(s) => s.defer_overlay(f),
             PassKind::Mrt { .. } => {
-                starfish_std::debug::devlog(
+                starfish_debug::log_warn!(
                     "[session] defer_overlay：MRT 会话暂不支持客人叠加（v1）",
                 );
             }

@@ -201,7 +201,7 @@ impl NativeTcp {
             },
             Err(e) => {
                 state.store(STATE_CLOSED, std::sync::atomic::Ordering::Release);
-                eprintln!("starfish.net: 地址解析失败 {addr}: {e}");
+                starfish_debug::log_error!(format!("starfish.net: 地址解析失败 {addr}: {e}"));
                 return;
             }
         };
@@ -209,7 +209,7 @@ impl NativeTcp {
         {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("starfish.net: 连接 {addr} 失败: {e}");
+                starfish_debug::log_error!(format!("starfish.net: 连接 {addr} 失败: {e}"));
                 state.store(STATE_CLOSED, std::sync::atomic::Ordering::Release);
                 return;
             }

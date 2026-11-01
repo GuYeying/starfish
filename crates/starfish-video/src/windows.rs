@@ -94,7 +94,7 @@ pub(crate) fn hardware_h264_available() -> bool {
         }
         if !created {
             #[cfg(test)]
-            eprintln!("[hw-probe] D3D11CreateDevice 失败");
+            starfish_debug::log_warn!("[hw-probe] D3D11CreateDevice 失败");
             return false;
         }
         let Some(device) = device else {
@@ -102,7 +102,7 @@ pub(crate) fn hardware_h264_available() -> bool {
         };
         let Ok(video_device) = device.cast::<ID3D11VideoDevice>() else {
             #[cfg(test)]
-            eprintln!("[hw-probe] cast ID3D11VideoDevice 失败");
+            starfish_debug::log_warn!("[hw-probe] cast ID3D11VideoDevice 失败");
             return false;
         };
 

@@ -9,7 +9,6 @@
 //!
 //! 运行：`cargo run --example pygame_probe`
 
-use starfish_std::debug::console_log;
 use starfish_gfx::geometry::shape2d;
 use starfish_we::{Event, KeyCode, Window};
 use starfish_pygame::draw;
@@ -176,7 +175,7 @@ async fn app_body() -> Result<(), Box<dyn std::error::Error>> {
         screen.present();
         frames += 1;
         if frames >= AUTO_EXIT_FRAMES {
-            console_log(&format!(
+            starfish_debug::log_info!(&format!(
                 "[pygame_probe] {AUTO_EXIT_FRAMES} 帧完成，{}",
                 if cfg!(target_arch = "wasm32") { "Web 驻留" } else { "正常退出" }
             ));

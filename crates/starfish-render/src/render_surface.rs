@@ -48,7 +48,20 @@ pub struct RenderSurface{
 
     pending_cmds: Vec<CommandBuffer>,
 
+    // 启动期诊断（ms 级定位——首帧上屏时刻 + probe 快照自耗累计）
+    first_present_done: std::cell::Cell<bool>,
+    present_count: std::cell::Cell<u32>,
+    snapshot_ms: std::cell::Cell<u128>,
+    snapshot_count: std::cell::Cell<u32>,
 
+    // screen-probe 呈现快照（present 时刻拷贝——Surface Texture present
+    // 后即毁，事后拷贝 = DestroyedResource 毒提交，DX12 实测 2026-10-30）
+    probe_buf: Option<wgpu::Buffer>,   // MAP_READ|COPY_DST（bpr×h）
+    probe_size: (u32, u32),            // 缓冲对应的帧尺寸
+    probe_bpr: u32,
+    // map_async 在途接收端（回调由 poll 冲刷；RefCell = probe 只借 &self）
+    probe_pend: std::cell::RefCell<Option<std::sync::mpsc::Receiver<Vec<u8>>>>,
+    probe_pixels: std::cell::RefCell<Option<Vec<u8>>>,   // 最新完成快照
 }
 
 impl RenderSurface{
@@ -161,6 +174,16 @@ impl RenderSurface{
             swapchain_view: None,
             last_presented: None,
 
+            probe_buf: None,
+            probe_size: (0, 0),
+            probe_bpr: 0,
+            probe_pend: std::cell::RefCell::new(None),
+            probe_pixels: std::cell::RefCell::new(None),
+            first_present_done: std::cell::Cell::new(false),
+            present_count: std::cell::Cell::new(0),
+            snapshot_ms: std::cell::Cell::new(0),
+            snapshot_count: std::cell::Cell::new(0),
+
             depth_format:depth_format,
             depth_texture:depth_texture,
             depth_view:depth_view,
@@ -191,7 +214,7 @@ impl RenderSurface{
         let n = N.fetch_add(1, Ordering::Relaxed);
         let diag = n < 12 || n % 60 == 0;
         if diag {
-            starfish_std::debug::devlog(&format!("[rs] begin_frame #{n} enter"));
+            starfish_debug::log_debug!(&format!("[rs] begin_frame #{n} enter"));
         }
         // 获取当前交换链纹理（自愈式）：
         // Outdated/Lost/未配置(panic 经 catch_unwind) → 重建交换链配置与
@@ -225,7 +248,7 @@ impl RenderSurface{
                             || f.texture.height() != self.config.height
                         {
                             if diag {
-                                starfish_std::debug::devlog(&format!(
+                                starfish_debug::log_debug!(&format!(
                                     "[rs] begin_frame #{n} 尺寸脱节 {}x{} → {}x{} 自愈",
                                     self.config.width,
                                     self.config.height,
@@ -238,7 +261,7 @@ impl RenderSurface{
                         }
                         frame = Some(f);
                         if diag {
-                            starfish_std::debug::devlog(&format!(
+                            starfish_debug::log_debug!(&format!(
                                 "[rs] begin_frame #{n} acquire ok"
                             ));
                         }
@@ -248,7 +271,7 @@ impl RenderSurface{
                     | wgpu::CurrentSurfaceTexture::Lost) => {
                         last_reason = "Outdated/Lost";
                         if diag {
-                            starfish_std::debug::devlog(&format!(
+                            starfish_debug::log_debug!(&format!(
                                 "[rs] begin_frame #{n} acquire Outdated/Lost → 重建重试"
                             ));
                         }
@@ -265,10 +288,10 @@ impl RenderSurface{
                 }
             }
             let Some(frame) = frame else {
-                starfish_std::debug::devlog(&format!(
+                starfish_debug::log_error!(&format!(
                     "[rs] begin_frame #{n} FAIL（3 次重试耗尽）——本帧跳过"
                 ));
-                starfish_std::debug::console_log(&format!(
+                starfish_debug::log_error!(&format!(
                     "[rs] begin_frame #{n} FAIL（{last_reason}）——本帧跳过"
                 ));
                 eprintln!("[starfish] 渲染表面未就绪,本帧跳过(下一帧重试)");
@@ -345,8 +368,8 @@ impl RenderSurface{
         // 取出当前帧交换链纹理。begin_frame 未就绪(false)时无帧可提交——
         // 跳过本帧 present(不 panic,对齐"未就绪即跳过")
         let Some(frame) = self.color_frame.take() else {
-            starfish_std::debug::devlog("[rs] present 无帧跳过（begin 未就绪）");
-            starfish_std::debug::console_log(&format!(
+            starfish_debug::log_debug!("[rs] present 无帧跳过（begin 未就绪）");
+            starfish_debug::log_warn!(&format!(
                 "[rs] present #{n} 无帧跳过（begin 未就绪）"
             ));
             return;
@@ -354,7 +377,7 @@ impl RenderSurface{
         // 暂存已呈现纹理（回读取证口——present 后 copy 此图 = 屏幕真实内容）
         self.last_presented = Some(frame.texture.clone());
         if diag {
-            starfish_std::debug::devlog(&format!("[rs] present #{n}"));
+            starfish_debug::log_debug!(&format!("[rs] present #{n}"));
         }
         // 1. 收集所有待提交命令
         let mut all_commands = std::mem::take(&mut self.pending_cmds);
@@ -393,6 +416,14 @@ impl RenderSurface{
         // 3.5 帧缓冲取证 dump（诊断：resolve 后、present 前的唯一有效
         //     采样点——set_fb_dump(true) 启用）
         if FB_DUMP.load(Ordering::SeqCst) {
+            // Web 交换链纹理无 COPY_SRC 用法（浏览器提供）——先查用法：
+            // 毒拷贝命令一旦编码/提交，CommandBuffer 即 Invalid（同
+            // screen-probe 修复，2026-10-30）
+            if !frame.texture.usage().contains(wgpu::TextureUsages::COPY_SRC) {
+                starfish_debug::log_info!(
+                    "[fb-dump] 交换链纹理无 COPY_SRC 用法（web）——跳过本帧取证",
+                );
+            } else {
             let (w, h) = (self.config.width, self.config.height);
             let bpr = (w * 4).div_ceil(256) * 256;
             let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -448,10 +479,111 @@ impl RenderSurface{
                     }
                 }
             }
-            starfish_std::debug::console_log(&format!(
+            starfish_debug::log_info!(&format!(
                 "[fb-dump] {}x{} {}", w, h, out.join(" ")
             ));
+            }
         }
+        // 3.6 screen-probe 快照（诊断）：趁纹理活着拷进 MAP_READ 缓冲
+        //     异步回读（present 后 Surface Texture 即毁——destroyed 后
+        //     再拷 = DestroyedResource 毒提交）。COPY_SRC 守卫同 fb-dump
+        //    （web 交换链无此用法）。单缓冲 + 在途跳过：probe 是低频
+        //     诊断，上一帧快照仍然有效（"最近一次成功呈现的内容"）。
+        // 快照降频：每 8 帧一次（首帧必跑）——全屏 GPU→CPU 拷贝均摊
+        // 成本 ÷8（Android Maleoon 单次 ~10ms 级，逐帧跑 = 可感知卡顿）
+        let snap_due = self.present_count.get() % 8 == 0;
+        // wasm32 无 Instant（sys/time/unsupported.rs panic）——计时仅
+        // native；wasm 只保留计数
+        #[cfg(not(target_arch = "wasm32"))]
+        let snap_t0 = std::time::Instant::now();
+        {
+            let pend = self.probe_pend.borrow().is_some();
+            let _ = self.device.poll(wgpu::PollType::Poll);
+            self.drain_probe();
+            if snap_due && !pend && self.probe_pend.borrow().is_none() {
+                let (w, h) = (self.config.width, self.config.height);
+                let bpr = (w * 4).div_ceil(256) * 256;
+                let need = (bpr * h) as u64;
+                let stale = match &self.probe_buf {
+                    Some(b) => b.size() != need,
+                    None => true,
+                };
+                if stale {
+                    self.probe_buf = Some(self.device.create_buffer(
+                        &wgpu::BufferDescriptor {
+                            label: Some("starfish_probe_snap"),
+                            size: need,
+                            usage: wgpu::BufferUsages::MAP_READ
+                                | wgpu::BufferUsages::COPY_DST,
+                            mapped_at_creation: false,
+                        },
+                    ));
+                    self.probe_size = (w, h);
+                    self.probe_bpr = bpr;
+                    *self.probe_pixels.borrow_mut() = None;
+                }
+                if frame.texture.usage().contains(wgpu::TextureUsages::COPY_SRC) {
+                    let buf = self.probe_buf.as_ref().unwrap().clone();
+                    let mut enc =
+                        self.device.create_command_encoder(&Default::default());
+                    enc.copy_texture_to_buffer(
+                        wgpu::TexelCopyTextureInfo {
+                            texture: &frame.texture,
+                            mip_level: 0,
+                            origin: wgpu::Origin3d::ZERO,
+                            aspect: wgpu::TextureAspect::All,
+                        },
+                        wgpu::TexelCopyBufferInfo {
+                            buffer: &buf,
+                            layout: wgpu::TexelCopyBufferLayout {
+                                offset: 0,
+                                bytes_per_row: Some(bpr),
+                                rows_per_image: Some(h),
+                            },
+                        },
+                        wgpu::Extent3d {
+                            width: w,
+                            height: h,
+                            depth_or_array_layers: 1,
+                        },
+                    );
+                    self.queue.submit([enc.finish()]);
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    let buf_cb = buf.clone();
+                    buf.slice(..).map_async(wgpu::MapMode::Read, move |res| {
+                        // 回调线程 = poll 调用线程（引擎主线程）；读完即 unmap
+                        let data = if res.is_ok() {
+                            match buf_cb.get_mapped_range(..) {
+                                Ok(view) => view.to_vec(),
+                                Err(_) => Vec::new(),
+                            }
+                        } else {
+                            Vec::new()
+                        };
+                        buf_cb.unmap();
+                        let _ = tx.send(data);
+                    });
+                    *self.probe_pend.borrow_mut() = Some(rx);
+                }
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                self.snapshot_ms
+                    .set(self.snapshot_ms.get() + snap_t0.elapsed().as_micros());
+            }
+            self.snapshot_count.set(self.snapshot_count.get() + 1);
+        }
+        // 启动期诊断：首帧上屏时刻（黑屏时长终点）+ 快照自耗累计
+        if !self.first_present_done.get() {
+            self.first_present_done.set(true);
+            starfish_debug::log_info!(format!(
+                "[present] 首帧上屏（黑屏终点）——probe快照自耗 {:.1}ms/{}次 | {}",
+                self.snapshot_ms.get() as f64 / 1000.0,
+                self.snapshot_count.get(),
+                starfish_debug::log::stats_string(),
+            ));
+        }
+        self.present_count.set(self.present_count.get() + 1);
         // 4. 上屏
         self.queue.present(frame);
         // 重置帧状态
@@ -543,6 +675,51 @@ impl RenderSurface{
     /// 交换链复用重写）
     pub fn presented_texture(&self) -> Option<&wgpu::Texture> {
         self.last_presented.as_ref()
+    }
+
+    /// 收割已完成的 probe 快照映射（poll 回调把像素经通道送来）。
+    /// take() 语义：未完成则还回去（避免借用期内二次 borrow_mut）。
+    fn drain_probe(&self) {
+        let rx = match self.probe_pend.borrow_mut().take() {
+            Some(rx) => rx,
+            None => return,
+        };
+        match rx.try_recv() {
+            Ok(data) => *self.probe_pixels.borrow_mut() = Some(data),
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                *self.probe_pend.borrow_mut() = Some(rx);
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                *self.probe_pixels.borrow_mut() = Some(Vec::new());
+            }
+        }
+    }
+
+    /// screen-probe 快照网格采样（7×5，元素 = (x, y, [r,g,b,a])）：
+    /// 数据源 = 最近一次成功回读的呈现快照（present 时刻拷贝，见
+    /// present() 3.6 块）。无快照 = 空 Vec（首帧 / 映射未完成 / web
+    /// 交换链无 COPY_SRC）。内部先 poll 冲刷在途映射。
+    pub fn probe_snapshot_grid(&self) -> Vec<(u32, u32, [u8; 4])> {
+        let _ = self.device.poll(wgpu::PollType::Poll);
+        self.drain_probe();
+        let pixels = self.probe_pixels.borrow();
+        let Some(data) = pixels.as_ref() else {
+            return Vec::new();
+        };
+        let (w, h) = self.probe_size;
+        let bpr = self.probe_bpr as usize;
+        let mut out = Vec::new();
+        for gy in 0..5u32 {
+            for gx in 0..7u32 {
+                let x = (w - 1) * gx / 6;
+                let y = (h - 1) * gy / 4;
+                let off = y as usize * bpr + x as usize * 4;
+                if off + 4 <= data.len() {
+                    out.push((x, y, [data[off], data[off + 1], data[off + 2], data[off + 3]]));
+                }
+            }
+        }
+        out
     }
     pub fn get_current_depth_texture_view(&self)-> Option<Arc<TextureView>>{
         Some(self.depth_view.clone())

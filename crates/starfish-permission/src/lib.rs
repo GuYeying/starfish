@@ -101,11 +101,11 @@ pub async fn ensure_async(permission: Permission) -> bool {
                 Ok(v) => {
                     let stream: web_sys::MediaStream = v.into();
                     CACHED_STREAM.with(|c| *c.borrow_mut() = Some(stream));
-                    starfish_std::debug::console_log("[permission] 麦克风已授权（流已缓存）");
+                    starfish_debug::log_info!("[permission] 麦克风已授权（流已缓存）");
                     true
                 }
                 Err(e) => {
-                    starfish_std::debug::console_log(&format!(
+                    starfish_debug::log_error!(&format!(
                         "[permission] 麦克风授权被拒/失败: {e:?}"
                     ));
                     false

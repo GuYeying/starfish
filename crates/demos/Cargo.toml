@@ -10,6 +10,7 @@ description = "starfish 示例与三端自检套件（hello + pygame 全模块�
 multi-window = ["starfish-we/multi-window"]
 
 [dependencies]
+starfish-debug = { workspace = true }
 starfish-pygame = { workspace = true }
 # Android 构建需 we feature（app_entry! 的 android_main 宿主装配）
 starfish-std = { workspace = true, features = ["we"] }

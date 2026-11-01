@@ -123,9 +123,18 @@ pub fn pump() -> bool {
     }
     let ms_drain = t_drain.ms();
     if ms_drain > 50 {
-        starfish_std::debug::devlog(&format!(
+        starfish_debug::log_warn!(&format!(
             "[event] pump 排水 {n_events} 条事件耗时 {ms_drain}ms"
         ));
+    }
+    // 桌面 letterbox 开发热键 snoop——**cfg 门控**（生产编译期剔除）且
+    // gate 前置：钩子未激活 = 零 clone 零调用（此前每帧白 clone 整个
+    // 事件队列，2026-10-31 审计修正）。不消费事件；排水后调用——
+    // with_window 无嵌套借用风险
+    #[cfg(feature = "dev-letterbox")]
+    if crate::display::desktop_letterbox().is_some() {
+        let frame_events: Vec<Event> = QUEUE.with(|q| q.borrow().iter().cloned().collect());
+        crate::display::dev_hotkey_snoop(&frame_events);
     }
     quit
 }

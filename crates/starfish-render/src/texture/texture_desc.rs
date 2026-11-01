@@ -83,10 +83,10 @@ impl TextureDescriptor {
         // 校验：只有RenderTarget/ShadowMap/Depth才允许MSAA
         let is_rt = matches!(usage, TextureUsage::RenderTarget | TextureUsage::ShadowMap);
         if !is_rt && desc.multisample.is_some() {
-            eprintln!(
+            starfish_debug::log_warn!(format!(
                 "[WARN] 纹理语义 {:?} 非渲染目标，MSAA配置被忽略",
                 desc.semantic
-            );
+            ));
         }
         if is_rt && desc.multisample.is_none() {
             eprintln!("[INFO] 渲染目标纹理未指定MSAA，默认关闭抗锯齿");

@@ -35,7 +35,7 @@ thread_local! {
 
 /// 诊断打点（println + console_log——三端可见，wasm 上即 F12 console）
 pub fn log(msg: &str) {
-    starfish_std::debug::console_log(msg);
+    starfish_debug::log_info!(msg);
     println!("{msg}");
 }
 
@@ -62,7 +62,7 @@ pub struct Checks {
 
 impl Checks {
     pub fn new(module: &'static str) -> Self {
-        starfish_std::debug::console_log(&format!("[{}] checks init", module));
+        starfish_debug::log_info!(&format!("[{}] checks init", module));
         Self { module, items: Vec::new() }
     }
 

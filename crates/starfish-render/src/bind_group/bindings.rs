@@ -13,6 +13,8 @@ pub enum BindResource {
     },
     Texture {
         view: Arc<wgpu::TextureView>,
+        /// false = 数据纹理（rgba32float 等不可过滤格式，texelFetch 读）
+        filterable: bool,
     },
     /// 纹理视图数组（bindless 基础；layout count = views.len()）
     TextureArray {

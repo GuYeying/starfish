@@ -22,6 +22,7 @@ wgpu-auto = ["we-wgpu", "dep:wgpu"]
 multi-window = []
 
 [dependencies]
+starfish-debug = { workspace = true }
 raw-window-handle = { workspace = true, optional = true }
 wgpu = { workspace = true, optional = true }
 

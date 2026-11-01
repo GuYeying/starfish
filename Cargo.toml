@@ -3,13 +3,14 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.9.60"
+version = "0.9.61"
 edition = "2024"
 rust-version = "1.85"
 
 [workspace.dependencies]
 # ── 内部 crate（路径依赖单源）──
 starfish-std = { path = "crates/starfish-std" }
+starfish-debug = { path = "crates/starfish-debug" }
 starfish-we = { path = "crates/starfish-we" }
 starfish-time = { path = "crates/starfish-time" }
 starfish-permission = { path = "crates/starfish-permission" }
@@ -58,7 +59,7 @@ thiserror = "2.0.18"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 once_cell = "1.21.4"
-log = "0.4"
+log = { version = "0.4", features = ["std"] }
 
 # ── 视频解复用 / Android ──
 mp4 = "0.14"

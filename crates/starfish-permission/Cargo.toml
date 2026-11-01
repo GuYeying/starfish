@@ -6,6 +6,7 @@ rust-version.workspace = true
 description = "运行时权限申请（全平台统一入口）：Android 系统弹框受控阻塞 / 桌面恒 true / Web 委派+ensure_async 授权即取流"
 
 [dependencies]
+starfish-debug = { workspace = true }
 # wasm 分支诊断输出（ensure_async 授权打点走 console_log）
 starfish-std = { workspace = true }
 

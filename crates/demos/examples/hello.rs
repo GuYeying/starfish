@@ -48,7 +48,7 @@ async fn app_body() -> Result<(), Box<dyn std::error::Error>> {
         surface.present();
         frames += 1;
         if frames % 120 == 0 {
-            starfish_std::debug::console_log(&format!("[hello] 帧 {frames}"));
+            starfish_debug::log_info!(&format!("[hello] 帧 {frames}"));
         }
         // 帧拍（桌面: no-op async；web: rAF yield）
         next_frame().await;
