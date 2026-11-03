@@ -16,3 +16,4 @@ _sig_io_tmp.bin
 Thumbs.db
 /crates/demos/target
 /crates/demos/jniLibs
+examples/demos/jniLibs/
