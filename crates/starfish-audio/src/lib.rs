@@ -293,14 +293,14 @@ impl AudioMixer {
         self.play_with(sound, 0)
     }
 
-    pub fn play_on(&mut self, sound: Arc<SoundData>, channel: usize) -> Result<(), AudioError> {
+    pub fn play_on(&mut self, sound: Arc<SoundData>, loops: i32, channel: usize) -> Result<(), AudioError> {
         let sound = resample_to_domain(sound, self.output_sample_rate());
         let mut inner = self.inner.lock().unwrap();
         let ch = inner
             .sfx_channels
             .get_mut(channel)
             .ok_or(AudioError::custom("channel out of range"))?;
-        *ch = SfxChannel::with_sound(sound, 0);
+        *ch = SfxChannel::with_sound(sound, loops);
         Ok(())
     }
 

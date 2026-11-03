@@ -217,17 +217,34 @@ macro_rules! ios_main {
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 pub async fn next_frame() {}
 
-/// Web implementation: the rAF promise bridgeï¼Web å®ç° = rAF ç Promise
-/// æ¡¥ï¼è¯­ä¹ä¸æ³¨æäºé¡¹è§ä¸æ¹æ¡é¢å­ªçåæ¯çææ¡£ï¼ã
+/// Web implementation: the rAF promise bridge（Web 实现 = rAF 的 Promise
+/// 桥；语义与注意事项见上方桌面孪生分支的文档）。
+///
+/// **rAF + setTimeout race 兜底**（2026-11-03 实测）：嵌入式 webview
+/// 容器（ZCode IAB 等）存在 **rAF 永不驱动** 的环境（setTimeout 正常、
+/// rAF 回调从不执行——纯探针页实证）——纯 rAF 桥的帧循环从第一拍就永久
+/// 挂死。race 两路：rAF 正常的环境 vsync ~16ms 先到（50ms 兜底永不抢先
+/// 主路）；rAF 不驱动的环境 setTimeout 50ms 保证帧推进（≥20fps，游戏
+/// 逻辑/资源装载照常走通）。
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 pub async fn next_frame() {
-    let promise = js_sys::Promise::new(
+    let window = web_sys::window()
+        .expect("web: no global window / 无全局 window");
+    let raf = js_sys::Promise::new(
         &mut |resolve: js_sys::Function, _reject: js_sys::Function| {
-            web_sys::window()
-                .expect("web: no global window / æ å¨å± window")
+            window
                 .request_animation_frame(&resolve)
-                .expect("requestAnimationFrame failed / rAF è°ç¨å¤±è´¥");
+                .expect("requestAnimationFrame failed / rAF 调用失败");
         },
     );
-    let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+    let tick = js_sys::Promise::new(
+        &mut |resolve: js_sys::Function, _reject: js_sys::Function| {
+            window
+                .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, 50)
+                .expect("setTimeout failed / setTimeout 调用失败");
+        },
+    );
+    let racers = js_sys::Array::of2(raf.as_ref(), tick.as_ref());
+    let _ =
+        wasm_bindgen_futures::JsFuture::from(js_sys::Promise::race(racers.as_ref())).await;
 }

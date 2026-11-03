@@ -31,10 +31,12 @@ pub struct SymphoniaReader {
 
 impl SymphoniaReader {
     /// 打开文件并探测格式
+    ///
+    /// 走 starfish_io::read_sync 统一资源链（内嵌包 → 加密散文件 → 明文透传）
     pub fn open(path: &str) -> Result<Self, AudioError> {
-        let file = std::fs::File::open(path)
+        let bytes = starfish_io::read_sync(path)
             .map_err(|e| AudioError::custom(format!("打开音频文件失败 {path}: {e}")))?;
-        Self::from_media_source(Box::new(file), path)
+        Self::from_bytes(bytes)
     }
 
     /// 从内存字节探测格式（Web / 字节缝场景）

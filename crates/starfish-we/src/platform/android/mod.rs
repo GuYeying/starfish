@@ -103,7 +103,19 @@ static WINDOW_READY: AtomicBool = AtomicBool::new(false);
 /// 支持同进程内多次调用（进程被系统缓存复用时，`android_main` 会二次
 /// 执行）：覆盖旧 app、清空上次运行遗留的事件缓冲、重置就绪标记。
 pub fn android_init(app: AndroidApp) {
-    *APP.lock().expect("APP lock poisoned / APP 锁中毒") = Some(app);
+    {
+        let mut guard = APP.lock().expect("APP lock poisoned / APP 锁中毒");
+        // 资产/目录句柄移交 starfish-io（资源读取语义归 io 层——窗口
+        // crate 只做句柄移交；NativeActivity 自管理形态的资源展开在
+        // io 侧完成）。单锁作用域内完成——APP 锁不可重入。
+        let am = app.asset_manager();
+        let data_dir = app
+            .internal_data_path()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        starfish_io::android_attach(am, data_dir);
+        *guard = Some(app);
+    }
     // The single-window slot is counted per "run": during the overlap the
     // previous instance may still hold the slot.
     // 单窗口占位按"运行"计算：交叠期内上一实例可能还占着位子。

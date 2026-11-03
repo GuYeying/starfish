@@ -88,7 +88,7 @@ pub async fn set_mode_ex(size: (u32, u32), flags: u32) -> Result<(), RenderConte
         panic!("display.set_mode 进程一次（契约 §七）；重复调用不支持");
     }
     if flags & !KNOWN_MASK != 0 {
-        starfish_debug::log_info!(&format!(
+        starfish_debug::log_debug!(&format!(
             "[pygame] set_mode: 未登记旗标位 0x{:X} 忽略（垫底原则）",
             flags & !KNOWN_MASK
         ));
@@ -171,7 +171,7 @@ pub async fn set_mode_ex(size: (u32, u32), flags: u32) -> Result<(), RenderConte
         match Screen::new_with(&window, surface_settings.clone(), gpu_settings).await {
             Ok(s) => s,
             Err(_) if explicit_backends => {
-                starfish_debug::log_info!(
+                starfish_debug::log_debug!(
                     "[pygame] 声明后端不可用，回退全后端重试（wgpu 隐式退化）",
                 );
                 Screen::new_with(&window, surface_settings, GpuSettings::default()).await?
@@ -220,7 +220,7 @@ pub(crate) fn desktop_letterbox() -> Option<(u32, u32)> {
 pub fn apply_window_request(size: (u32, u32), flags: u32) {
 
     if flags & OPENGL != 0 {
-        starfish_debug::log_info!("[display] OPENGL 旗标垫底（引擎恒 wgpu）");
+        starfish_debug::log_debug!("[display] OPENGL 旗标垫底（引擎恒 wgpu）");
     }
     // 落地耗时打点（慢调用哨兵——启动诊断用）
     let t = starfish_std::debug::Stopwatch::now();
@@ -234,9 +234,16 @@ pub fn apply_window_request(size: (u32, u32), flags: u32) {
         // FULLSCREEN 解除 min=max 钉死（Wayland 合成器的约束引擎在全屏
         // 态也吃 max_size——钉请求尺寸时 configure 尺寸原地不变，窗口
         // 字母箱钉在请求尺寸，Mutter 真机实测 2026-10-29）
+        // 旗标应用顺序（2026-11-03 修，实测根因）：**borderless 必须最先、
+        // fullscreen 必须最后**——原序 set_borderless(false) 排在
+        // set_fullscreen 之后，把 WS_CAPTION|WS_THICKFRAME 整体回填到
+        // 已全屏的窗口（样式重算弹回创建尺寸 = "带边框+不满屏缝隙"；
+        // THICKFRAME 残留 = 可拖边无边框按钮），窗口化默认也因此可拖边
+        // resize。现序：borderless 定形态 → resizable 定权威 → fullscreen
+        // 收尾铺满。
+        w.set_borderless(flags & NOFRAME != 0);
         w.set_resizable(flags & RESIZABLE != 0 || flags & FULLSCREEN != 0);
         w.set_fullscreen(flags & FULLSCREEN != 0);
-        w.set_borderless(flags & NOFRAME != 0);
         // HIDDEN 运行时语义 = 隐藏窗口（真 pygame 为创建期；垫底执行）
         if flags & HIDDEN != 0 {
             w.set_visible(false);

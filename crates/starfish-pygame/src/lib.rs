@@ -37,6 +37,9 @@ pub mod net;
 pub mod permission;
 pub mod render;
 pub mod effects;
+/// 资源加密面（**全家唯一加密归属**——加密红线 2026-11-03：SFXE1/
+/// 密钥/哈希/解密只在此；其余引擎 crate 零加密语义）
+pub mod sfx;
 pub mod sndarray;
 /// pygame.sprite 对应物（Godot 式重设计——池化 Group + 世代 id +
 /// (z,y) 排序会话绘制；细案见 reference/）

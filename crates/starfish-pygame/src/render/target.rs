@@ -441,7 +441,7 @@ impl Screen {
     pub fn readback_probe(&self) -> Vec<(u32, u32, [u8; 4])> {
         let grid = self.surface.borrow().probe_snapshot_grid();
         if grid.is_empty() {
-            starfish_debug::log_info!(
+            starfish_debug::log_debug!(
                 "[screen-probe] 无可用快照（首帧 / 映射未完成 / web 无 COPY_SRC）",
             );
         }
@@ -563,7 +563,7 @@ impl Screen {
             let (s, ox, oy) = (fit.scale as f32, fit.offset_x as f32, fit.offset_y as f32);
             if !self.pack_logged.get() {
                 self.pack_logged.set(true);
-                starfish_debug::log_info!(&format!(
+                starfish_debug::log_debug!(&format!(
                     "[present] 物理={pw}x{ph} 逻辑={lw}x{lh} scale={s:.3} ox={ox:.1} oy={oy:.1} scissor={:?}",
                     scissor,
                 ));

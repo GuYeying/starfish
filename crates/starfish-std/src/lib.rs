@@ -94,8 +94,11 @@ macro_rules! app_entry {
         fn main() {
             match $crate::app::block_on($body) {
                 Ok(()) => {}
+                // Err = 应用体失败：stderr 直出 + 非零退出（曾引用不存在的
+                // $crate::__log_exit——2026-11-02 整理阶段 demos 实编译暴露）
                 Err(e) => {
-                    $crate::__log_exit(&format!("[starfish] 退出: {e}"))
+                    eprintln!("[starfish] 退出: {e}");
+                    std::process::exit(1);
                 }
             }
             // 收尾：音频线程（cpal Stream）不 join，走进程清理。
@@ -117,7 +120,9 @@ macro_rules! app_entry {
                 match $body.await {
                     Ok(()) => {}
                     Err(e) => {
-                        $crate::__log_exit(&format!("[starfish] 退出: {e}"))
+                        return Err(wasm_bindgen::prelude::JsValue::from_str(
+                            &format!("[starfish] 退出: {e}"),
+                        ))
                     }
                 }
             });

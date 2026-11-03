@@ -292,7 +292,7 @@ impl RenderEntry{
         // 陈旧帧无从定位）
         #[cfg(not(target_arch = "wasm32"))]
         device.on_uncaptured_error(Arc::new(move |e: wgpu::Error| {
-            starfish_debug::log_info!(&format!("[wgpu-error] {e}"));
+            starfish_debug::log_error!(&format!("[wgpu-error] {e}"));
         }));
 
 

@@ -6,8 +6,10 @@ rust-version.workspace = true
 description = "跨平台文件/数据读取与保存：一套通用异步 API，原生 std::fs 直实现 / Web fetch 直实现"
 
 [dependencies]
-chacha20poly1305 = { workspace = true }
 serde_json = "1"
+# 加密红线（2026-11-03）：本 crate 零加密语义——SFXE1/密钥/哈希/解密
+# 全归 starfish-pygame 资源面；io 只做字节搬运（读/写/存在性/Android
+# 原始展开原语）
 
 # 桌面/移动：阻塞实现包在 async 体外壳内
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
@@ -19,3 +21,8 @@ wasm-bindgen = { workspace = true }
 wasm-bindgen-futures = { workspace = true }
 js-sys = { workspace = true }
 web-sys = { workspace = true }
+
+# Android：APK 资产展开后端（AssetManager 句柄由 starfish-we 移交——
+# 资源读取语义归 io 层，窗口 crate 只做句柄移交，2026-11-02 定约）
+[target.'cfg(target_os = "android")'.dependencies]
+ndk = { workspace = true }

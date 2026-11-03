@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
-members = ["crates/*"]
+# crates/* = 引擎本体；examples/* = 示例/自检 crate（demos 2026-11-02
+# 自 crates/ 提升——展示位与源码位分离，新示例 crate 直接入住 examples/）
+members = ["crates/*", "examples/*"]
 
 [workspace.package]
 version = "0.9.61"
@@ -66,6 +68,7 @@ chacha20poly1305 = { version = "0.10", default-features = false, features = ["al
 mp4 = "0.14"
 jni = "0.21"
 ndk-context = "0.1"
+ndk = "0.9"
 robius-android-env = "0.2"
 
 # ── 桌面对话框 / 手柄 ──

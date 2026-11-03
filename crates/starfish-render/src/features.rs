@@ -132,7 +132,7 @@ pub fn names(feats: Features) -> Vec<&'static str> {
 /// 常见 16KB/24KB/64KB 档，DX12/Vulkan 64MiB+——2026-10-30 compute_probe
 /// Android 定判用）
 pub fn report(wish: Features, granted: Features, limits: &wgpu::Limits) {
-    starfish_debug::log_info!(format!(
+    starfish_debug::log_debug!(format!(
         "wgpu feature report
 wish:    {:?}
 granted: {:?}

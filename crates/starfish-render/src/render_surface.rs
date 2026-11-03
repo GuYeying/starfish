@@ -420,7 +420,7 @@ impl RenderSurface{
             // 毒拷贝命令一旦编码/提交，CommandBuffer 即 Invalid（同
             // screen-probe 修复，2026-10-30）
             if !frame.texture.usage().contains(wgpu::TextureUsages::COPY_SRC) {
-                starfish_debug::log_info!(
+                starfish_debug::log_debug!(
                     "[fb-dump] 交换链纹理无 COPY_SRC 用法（web）——跳过本帧取证",
                 );
             } else {
@@ -479,7 +479,7 @@ impl RenderSurface{
                     }
                 }
             }
-            starfish_debug::log_info!(&format!(
+            starfish_debug::log_debug!(&format!(
                 "[fb-dump] {}x{} {}", w, h, out.join(" ")
             ));
             }
@@ -576,7 +576,7 @@ impl RenderSurface{
         // 启动期诊断：首帧上屏时刻（黑屏时长终点）+ 快照自耗累计
         if !self.first_present_done.get() {
             self.first_present_done.set(true);
-            starfish_debug::log_info!(format!(
+            starfish_debug::log_debug!(format!(
                 "[present] 首帧上屏（黑屏终点）——probe快照自耗 {:.1}ms/{}次 | {}",
                 self.snapshot_ms.get() as f64 / 1000.0,
                 self.snapshot_count.get(),

@@ -147,7 +147,7 @@ impl Sound {
 
     /// play_on(channel, loops=0)：指定通道播放
     pub fn play_on(&self, channel: usize, loops: i32) -> Result<(), AudioError> {
-        with(|m| m.play_on(self.data.clone(), channel)).and_then(|r| r)
+        with(|m| m.play_on(self.data.clone(), loops, channel)).and_then(|r| r)
     }
 }
 
@@ -172,7 +172,7 @@ impl Channel {
 
     /// play(sound, loops=0)：在通道上播放
     pub fn play(&self, sound: &Sound, loops: i32) -> Result<(), AudioError> {
-        with(|m| m.play_on(sound.data.clone(), self.idx)).and_then(|r| r)
+        with(|m| m.play_on(sound.data.clone(), loops, self.idx)).and_then(|r| r)
     }
 
     /// stop()：停止本通道（含清特效通知）
@@ -198,7 +198,7 @@ impl Channel {
     /// fade_in(sound, ms)：淡入播放
     pub fn fade_in(&self, sound: &Sound, ms: u32) -> Result<(), AudioError> {
         with(|m| {
-            m.play_on(sound.data.clone(), self.idx)?;
+            m.play_on(sound.data.clone(), 0, self.idx)?;//play once
             m.fade_in(self.idx, ms);
             Ok(())
         })

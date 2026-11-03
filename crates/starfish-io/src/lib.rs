@@ -22,23 +22,10 @@
 //!
 //! Web 端契约：`write` 以 **POST**（body = 原始字节）发往 `path`，
 //! 服务端需接受该端点的写入；非 2xx 状态 → [`IoError::Backend`]。
-
-pub mod pack;
-pub use pack::Pack;
-
-// ── 内嵌资源包源（runtime 单文件形态——self-blob 解析后注入；创建时
-// 一次性 set，io.read 解析链包优先）──
-static PACK_SOURCE: std::sync::OnceLock<Option<pack::Pack>> = std::sync::OnceLock::new();
-
-/// runtime 壳注入内嵌资源包（self-blob → Pack::open 后调此口）
-pub fn set_pack_source(pack: pack::Pack) {
-    let _ = PACK_SOURCE.set(Some(pack));
-}
-
-fn pack_lookup(path: &str) -> Option<Vec<u8>> {
-    let pack = PACK_SOURCE.get()?.as_ref()?;
-    pack.read(path).ok()
-}
+//!
+//! **模块布局（2026-11-03 分平台拆分）**：统一接口在本文件导出；平台
+//! 实现按 cfg 路由——`native.rs`（std::fs）/ `web.rs`（fetch）二选一
+//! 装载为 `mod imp`；Android 资产原语独立 `android.rs`（`pub use` 导出）。
 
 /// IO 错误（不可用能力显式报错，不做静默降级）
 #[derive(Debug)]
@@ -59,56 +46,27 @@ impl std::fmt::Display for IoError {
 }
 impl std::error::Error for IoError {}
 
-// ── 原生：std::fs 直实现（桌面 + 移动沙箱）─────────────────────────
+// ── 平台实现路由（统一 `mod imp` 面——lib.rs 公共 API 只对 imp 说话）──
 
 #[cfg(not(target_arch = "wasm32"))]
-mod imp {
-    use super::IoError;
-    use std::path::{Path, PathBuf};
-    use std::sync::Mutex;
+#[path = "native.rs"]
+mod imp;
 
-    /// 相对路径的基准目录：Android/iOS 沙箱 = 应用私有目录（引擎入口注入）；
-    /// 未设置 = CWD 相对（桌面默认）。绝对路径不受影响。
-    static BASE_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
+#[cfg(target_arch = "wasm32")]
+#[path = "web.rs"]
+mod imp;
 
-    pub fn set_base_dir(dir: &Path) {
-        *BASE_DIR.lock().unwrap() = Some(dir.to_path_buf());
-    }
+// ── Android：APK 资产展开后端（独立模块，pub use 统一导出）────────
+// AssetManager 句柄由 starfish-we 的 android_init **移交**至此（窗口
+// crate 只做句柄移交，不承载资源读取）；零解密——加密层在
+// starfish-pygame::sfx。
 
-    /// 相对路径 → 基准目录拼接；绝对路径原样
-    pub fn resolve(path: &str) -> PathBuf {
-        let p = Path::new(path);
-        if p.is_absolute() {
-            p.to_path_buf()
-        } else if let Some(base) = BASE_DIR.lock().unwrap().as_ref() {
-            base.join(p)
-        } else {
-            p.to_path_buf()
-        }
-    }
+#[cfg(target_os = "android")]
+mod android;
+#[cfg(target_os = "android")]
+pub use android::{attach as android_attach, expand as android_expand, read_asset as android_read_asset};
 
-    pub(super) async fn read(path: &str) -> Result<Vec<u8>, IoError> {
-        std::fs::read(resolve(path)).map_err(|e| IoError::Backend(format!("read {path}: {e}")))
-    }
-
-    pub(super) async fn write(path: &str, data: Vec<u8>) -> Result<(), IoError> {
-        std::fs::write(resolve(path), data).map_err(|e| IoError::Backend(format!("write {path}: {e}")))
-    }
-
-    pub(super) async fn exists(path: &str) -> Result<bool, IoError> {
-        Ok(resolve(path).exists())
-    }
-
-    /// 测试专用：清除基准目录（恢复 CWD 相对）
-    #[cfg(test)]
-    pub fn clear_base_dir() {
-        *BASE_DIR.lock().unwrap() = None;
-    }
-
-    pub fn base_dir() -> Option<PathBuf> {
-        BASE_DIR.lock().unwrap().clone()
-    }
-}
+// ── 公开 API（统一异步；原生阻塞实现 + Web 真异步）──────────────────
 
 /// 当前基准目录（只读视图；与 [`set_base_dir`] 对偶）
 ///
@@ -130,107 +88,6 @@ pub fn resolve(path: &str) -> std::path::PathBuf {
     imp::resolve(path)
 }
 
-// ── Web：fetch 直实现（GET 读 / POST 保存）─────────────────────────
-
-#[cfg(target_arch = "wasm32")]
-mod imp {
-    use super::IoError;
-    use std::path::Path;
-    use std::sync::Mutex;
-    use wasm_bindgen::JsCast;
-
-    async fn fetch_bytes(
-        path: &str,
-        method: &str,
-        body: Option<Vec<u8>>,
-    ) -> Result<Vec<u8>, IoError> {
-        let window = web_sys::window().ok_or(IoError::Backend("无 window".into()))?;
-
-        let mut init = web_sys::RequestInit::new();
-        init.method(method);
-        if let Some(data) = body {
-            let arr = js_sys::Uint8Array::from(data.as_slice());
-            init.body(Some(arr.as_ref()));
-            let headers = js_sys::Object::new();
-            js_sys::Reflect::set(&headers, &"Content-Type".into(), &"application/octet-stream".into())
-                .ok();
-            init.headers(&headers);
-        }
-        let req = web_sys::Request::new_with_str_and_init(path, &init)
-            .map_err(|e| IoError::Backend(format!("Request 构造失败: {e:?}")))?;
-
-        let resp_val = wasm_bindgen_futures::JsFuture::from(window.fetch_with_request(&req))
-            .await
-            .map_err(|e| IoError::Backend(format!("fetch 失败: {e:?}")))?;
-        let resp: web_sys::Response = resp_val
-            .dyn_into()
-            .map_err(|_| IoError::Backend("Response 类型异常".into()))?;
-
-        if !resp.ok() {
-            return Err(IoError::Backend(format!("HTTP {}", resp.status())));
-        }
-        let buf_val = wasm_bindgen_futures::JsFuture::from(resp.array_buffer().map_err(
-            |e| IoError::Backend(format!("array_buffer: {e:?}")),
-        )?)
-        .await
-        .map_err(|e| IoError::Backend(format!("读取响应体失败: {e:?}")))?;
-        Ok(js_sys::Uint8Array::new(&buf_val).to_vec())
-    }
-
-    /// 相对 URL 的基准前缀：与原生 BASE_DIR 对偶（如 `"assets/v3"` 把
-    /// `read("a.bin")` 指到 `页面origin/assets/v3/a.bin`；也可给跨源 CDN
-    /// 完整 URL）。未设置 = 浏览器相对语义（相对页面地址）。
-    static BASE_URL: Mutex<Option<String>> = Mutex::new(None);
-
-    pub fn set_base_dir(dir: &Path) {
-        *BASE_URL.lock().unwrap() = Some(dir.to_string_lossy().into_owned());
-    }
-
-    /// 相对 URL → 基准前缀拼接；绝对 URL / origin 绝对路径原样
-    /// （对齐原生"绝对路径不受影响"：`/` 开头 = origin 绝对，视为绝对）
-    fn resolve_url(path: &str) -> String {
-        if path.starts_with('/')
-            || path.starts_with("http://")
-            || path.starts_with("https://")
-            || path.starts_with("//")
-        {
-            return path.to_string();
-        }
-        match BASE_URL.lock().unwrap().as_deref() {
-            Some(base) => format!("{}/{}", base.trim_end_matches('/'), path),
-            None => path.to_string(),
-        }
-    }
-
-    pub(super) async fn read(path: &str) -> Result<Vec<u8>, IoError> {
-        fetch_bytes(&resolve_url(path), "GET", None).await
-    }
-
-    pub(super) async fn write(path: &str, data: Vec<u8>) -> Result<(), IoError> {
-        fetch_bytes(&resolve_url(path), "POST", Some(data))
-            .await
-            .map(|_| ())
-    }
-
-    pub(super) async fn exists(path: &str) -> Result<bool, IoError> {
-        let url = resolve_url(path);
-        let window = web_sys::window().ok_or(IoError::Backend("无 window".into()))?;
-        let mut init = web_sys::RequestInit::new();
-        init.method("HEAD");
-        let req = web_sys::Request::new_with_str_and_init(&url, &init)
-            .map_err(|e| IoError::Backend(format!("Request 构造失败: {e:?}")))?;
-        let resp_val = wasm_bindgen_futures::JsFuture::from(window.fetch_with_request(&req))
-            .await
-            .map_err(|e| IoError::Backend(format!("fetch 失败: {e:?}")))?;
-        let resp: web_sys::Response = resp_val
-            .dyn_into()
-            .map_err(|_| IoError::Backend("Response 类型异常".into()))?;
-        Ok(resp.ok())
-    }
-}
-
-// ── 公开 API（统一异步；原生阻塞实现 + Web 真异步）──────────────────
-
 /// 设置相对路径的基准（全平台；覆盖写，可重复调用）
 ///
 /// - 原生：`dir` 为目录，相对路径 → `dir.join(path)`。Android 由引擎 `run`
@@ -244,81 +101,35 @@ pub fn set_base_dir(dir: impl AsRef<std::path::Path>) {
     imp::set_base_dir(dir.as_ref())
 }
 
-/// 读取全部字节
+/// 读取全部字节（raw）
 ///
 /// - 原生：std::fs::read（path 为文件路径，相对基准目录/CWD 或绝对）
 /// - Web：`fetch(path)` GET（path 为 URL，相对页面地址或绝对）
-/// - **资源策略**：init_resource 配置了包时 = 包优先查找（runtime 构
-///   建），未命中回落路径；wasm fetch 散文件按密钥解封装（加密资源）
+///
+// ── 纯裸读（**零加密语义**——加密红线定约 2026-11-03：SFXE1/密钥/
+// 哈希/解密全归 starfish-pygame 资源面；io 只做字节搬运）───────────
 
-// ── 资源加密（创建时一次性——密钥/魔数 init 注入；**松散加密文件**
-// 单一形态——单文件包已裁撤：io.read 整文件读语义下包无增益，逐文件
-// 加密即防护本体；wasm 多文件 fetch 同格式，2026-11-01 定约）──
-
-static IO_KEY: std::sync::OnceLock<Option<[u8; 32]>> = std::sync::OnceLock::new();
-static IO_MAGIC: std::sync::OnceLock<[u8; 5]> = std::sync::OnceLock::new();
-
-/// 资源加密 init（宿主创建时调用一次；未调 = 无解密，密文资源读出即
-/// 原始封装字节）：key = 32B 解密密钥；magic = 项目自定义封装魔数
-///（缺省 "SFXE1"——按项目换魔数可让通用扫描器失效，零成本加防护）
-pub fn init_crypto(key: [u8; 32], magic: [u8; 5]) {
-    let _ = IO_KEY.set(Some(key));
-    let _ = IO_MAGIC.set(magic);
-}
-
-pub fn io_key() -> Option<[u8; 32]> {
-    IO_KEY.get().cloned().flatten()
-}
-
-pub fn io_magic() -> [u8; 5] {
-    IO_MAGIC.get().copied().unwrap_or(*b"SFXE1")
-}
-
-/// - **资源加密**：init_crypto 注入密钥/魔数后，读到的加密封装文件
-///   自动解密（明文资源透传，混合无缝）；密钥不符 = 显式报错（密文物
-///   理错误不该静默出垃圾图）
+/// 异步读（raw）：native = 基准目录 fs；wasm = fetch（no-store）。
+/// 返回原始字节——调用方自行判封装（加密层在 starfish-pygame::sfx）。
 pub async fn read(path: &str) -> Result<Vec<u8>, IoError> {
-    if let Some(bytes) = pack_lookup(path) {
-        return Ok(bytes);
-    }
-    let raw = imp::read(path).await?;
-    if let Some(key) = io_key() {
-        return unwrap_envelope(&raw, path, &key, &io_magic())
-            .map_err(IoError::Backend);
-    }
-    Ok(raw)
+    imp::read(path).await
 }
 
-/// 解密封装（SFXE1 格式：magic5 | nonce12 | 密文+tag16）：
-/// AAD = 域常量（完整性与域绑定——**不含路径**：松散文件读路径随
-/// 基准目录变化，路径 AAD 会在换目录/换机时假性失败，2026-11-01 实测）；
-/// magic 探测不匹配 = Ok(透传原字节)——明文/密文混合无缝；
-/// magic 命中但解密失败 = Err（密钥错/被篡改，显式暴露）
-pub(crate) fn unwrap_envelope(
-    raw: &[u8],
-    _aad_path: &str,
-    key: &[u8; 32],
-    magic: &[u8; 5],
-) -> Result<Vec<u8>, String> {
-    use chacha20poly1305::{
-        aead::{Aead, KeyInit, Payload},
-        ChaCha20Poly1305, Key, Nonce,
-    };
-    const DOMAIN_AAD: &[u8] = b"starfish-asset-v1";
-    if raw.len() < 33 || &raw[..5] != magic {
-        return Ok(raw.to_vec()); // 无封装 = 透传（明文资源）
-    }
-    let nonce = Nonce::from_slice(&raw[5..17]); // IETF 12B
-    let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
-    cipher
-        .decrypt(
-            nonce,
-            Payload {
-                msg: &raw[17..],
-                aad: DOMAIN_AAD,
-            },
-        )
-        .map_err(|e| format!("资源解密失败（密钥不匹配或已篡改）: {e:?}"))
+/// 同步读（raw）：native = 基准目录 fs 直读；wasm = 无同步文件系统，
+/// 恒 Err（v1 定约：Web 资源走异步 read）。
+#[cfg(not(target_arch = "wasm32"))]
+pub fn read_sync(path: &str) -> Result<Vec<u8>, IoError> {
+    std::fs::read(resolve(path)).map_err(|e| {
+        IoError::Backend(format!("read {path}: {e}"))
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn read_sync(path: &str) -> Result<Vec<u8>, IoError> {
+    let _ = path;
+    Err(IoError::Backend(
+        "Web 端无同步 io——用 await pygame.io.fetch(path) + load_from_bytes(bytes)".into(),
+    ))
 }
 
 /// 写入全部字节（覆盖）

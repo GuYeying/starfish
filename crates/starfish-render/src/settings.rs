@@ -118,7 +118,7 @@ impl SurfaceSettings {
             Some(requested) if caps.alpha_modes.contains(&requested) => requested,
             Some(requested) => {
                 let fallback = caps.alpha_modes[0];
-                starfish_debug::log_info!(&format!(
+                                starfish_debug::log_warn!(&format!(
                     "[render] alpha mode {requested:?} 不受表面支持，回落 {fallback:?}\
                     （窗口透明需要建窗侧透明合成支持，否则整窗不透明）"
                 ));

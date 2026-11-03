@@ -13,6 +13,10 @@ starfish-we = { workspace = true }
 starfish-time = { workspace = true }
 starfish-permission = { workspace = true }
 starfish-io = { workspace = true }
+# 资源加密面（加密红线 2026-11-03：SFXE1/密钥/哈希/解密唯一归属本 crate
+# ——starfish 其余 crate 零加密语义，io 只做字节搬运）
+chacha20poly1305 = { workspace = true }
+sha2 = "0.10"
 starfish-net = { workspace = true }
 starfish-dialog = { workspace = true }
 starfish-gamepad = { workspace = true }

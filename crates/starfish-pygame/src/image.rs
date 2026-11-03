@@ -73,7 +73,9 @@ impl From<image::ImageError> for ImageError {
 
 /// 从文件路径加载图像为 Surface（桌面文件系统；对位 `pygame.image.load`）
 pub fn load(path: &str) -> Result<Surface, ImageError> {
-    let bytes = std::fs::read(path)?;
+    // 走本 crate 加密面（哈希散文件定位 → 解封装 / 明文透传——加密
+    // 红线 2026-11-03：解密只在此，io 裸读）
+    let bytes = crate::sfx::read_sync(path).map_err(ImageError::Readback)?;
     load_from_bytes(&bytes)
 }
 

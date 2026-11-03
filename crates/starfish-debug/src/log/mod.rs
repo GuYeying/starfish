@@ -328,8 +328,15 @@ impl log::Log for FacadeBridge {
     }
     fn log(&self, record: &log::Record) {
         let t0 = std::time::Instant::now();
+        // 第三方 Info 降位为自家 Debug（wgpu/egui 等内部进展属诊断——
+        // 发行壳 Info 级别下不落盘；dev Debug 级别照常全见），
+        // Warn/Error 原样透传（崩溃取证通道不动）
+        let lvl = match record.level() {
+            log::Level::Info => Level::Debug,
+            l => Level::from(l),
+        };
         __emit(
-            Level::from(record.level()),
+            lvl,
             format_args!("[{}] {}", record.target(), record.args()),
         );
         if let Ok(mut g) = STATE.try_lock() {

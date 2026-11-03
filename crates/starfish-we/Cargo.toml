@@ -64,6 +64,8 @@ libc = "0.2"
 
 [target.'cfg(target_os = "android")'.dependencies]
 android-activity = { workspace = true }
+# 资产/目录句柄移交 starfish-io（资源读取语义归 io 层——we 只做移交，2026-11-02 定约）
+starfish-io = { workspace = true }
 
 # Web（wasm32-unknown-unknown）：DOM 事件 / canvas 接管 / rAF 帧拍
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]

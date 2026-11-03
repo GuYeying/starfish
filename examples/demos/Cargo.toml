@@ -39,7 +39,7 @@ name = "triangle"
 
 [[example]]
 name = "triangle_test"
-path = "triangle.rs"
+path = "examples/triangle.rs"
 
 # ── hello：starfish-we + wgpu 绿屏渲染 ──
 [[example]]
@@ -47,7 +47,7 @@ name = "hello"
 
 [[example]]
 name = "hello_android"
-path = "hello.rs"
+path = "examples/hello.rs"
 crate-type = ["cdylib"]
 
 # ── multi_window：多窗口自检（new_context + 双 new_surface 共享设备族）──
@@ -59,238 +59,202 @@ required-features = ["multi-window"]
 
 # ── pygame render 探针：纹理 quad + 图元 + 文字上屏（P2 验收）──
 [[example]]
-name = "pygame_probe"
-
-[[example]]
-name = "pygame_probe_android"
-path = "pygame_probe.rs"
-crate-type = ["cdylib"]
-
-# ── pygame hello：API 面教程对照（P3 验收）──
-[[example]]
-name = "pygame_hello"
-
-[[example]]
-name = "pygame_hello_android"
-path = "pygame_hello.rs"
-crate-type = ["cdylib"]
-
-# ── pygame image demo：带文字的精灵（P4 验收）──
-[[example]]
 name = "pygame_image_demo"
 
 [[example]]
 name = "pygame_image_demo_android"
-path = "pygame_image_demo.rs"
+path = "examples/pygame_image_demo.rs"
 crate-type = ["cdylib"]
 
 # ── pygame 模块运行测试案例（pygame/；每模块一案例）──
 [[example]]
-name = "pygame_test_rect"
-path = "pygame/rect.rs"
-
-[[example]]
 name = "pygame_test_color"
-path = "pygame/color.rs"
+path = "examples/pygame/color.rs"
 
 [[example]]
 name = "pygame_test_time"
-path = "pygame/time.rs"
-
-[[example]]
-name = "pygame_test_draw"
-path = "pygame/draw.rs"
+path = "examples/pygame/time.rs"
 
 [[example]]
 name = "pygame_test_surface"
-path = "pygame/surface.rs"
+path = "examples/pygame/surface.rs"
 
 [[example]]
 name = "pygame_test_mask"
-path = "pygame/mask.rs"
+path = "examples/pygame/mask.rs"
 
 [[example]]
 name = "pygame_test_display"
-path = "pygame/display.rs"
+path = "examples/pygame/display.rs"
 
 [[example]]
 name = "pygame_test_event"
-path = "pygame/event.rs"
+path = "examples/pygame/event.rs"
 
 [[example]]
 name = "pygame_test_io"
-path = "pygame/io.rs"
+path = "examples/pygame/io.rs"
 
 # ── 上表九案例的 Android 双注册（真机"实际运行能力"验证；统一脚本出包）──
 [[example]]
-name = "pygame_test_rect_android"
-path = "pygame/rect.rs"
-crate-type = ["cdylib"]
-
-[[example]]
 name = "pygame_test_color_android"
-path = "pygame/color.rs"
+path = "examples/pygame/color.rs"
 crate-type = ["cdylib"]
 
 [[example]]
 name = "pygame_test_time_android"
-path = "pygame/time.rs"
-crate-type = ["cdylib"]
-
-[[example]]
-name = "pygame_test_draw_android"
-path = "pygame/draw.rs"
+path = "examples/pygame/time.rs"
 crate-type = ["cdylib"]
 
 [[example]]
 name = "pygame_test_surface_android"
-path = "pygame/surface.rs"
+path = "examples/pygame/surface.rs"
 crate-type = ["cdylib"]
 
 [[example]]
 name = "pygame_test_mask_android"
-path = "pygame/mask.rs"
+path = "examples/pygame/mask.rs"
 crate-type = ["cdylib"]
 
 [[example]]
 name = "pygame_test_display_android"
-path = "pygame/display.rs"
+path = "examples/pygame/display.rs"
 crate-type = ["cdylib"]
 
 [[example]]
 name = "pygame_test_event_android"
-path = "pygame/event.rs"
+path = "examples/pygame/event.rs"
 crate-type = ["cdylib"]
 
 [[example]]
 name = "pygame_test_io_android"
-path = "pygame/io.rs"
+path = "examples/pygame/io.rs"
 crate-type = ["cdylib"]
 
 # ── 扩展模块案例（纯逻辑族 + 硬件族降级自检；pygame 层全模块覆盖）──
 [[example]]
 name = "pygame_test_math"
-path = "pygame/math.rs"
+path = "examples/pygame/math.rs"
 
 [[example]]
 name = "pygame_test_key"
-path = "pygame/key.rs"
+path = "examples/pygame/key.rs"
 
 [[example]]
 name = "pygame_test_mouse"
-path = "pygame/mouse.rs"
+path = "examples/pygame/mouse.rs"
 
 [[example]]
 name = "pygame_test_transform"
-path = "pygame/transform.rs"
+path = "examples/pygame/transform.rs"
 
 [[example]]
 name = "pygame_test_sprite"
-path = "pygame/sprite.rs"
+path = "examples/pygame/sprite.rs"
 
 [[example]]
 name = "pygame_test_font"
-path = "pygame/font.rs"
+path = "examples/pygame/font.rs"
 
 [[example]]
 name = "pygame_test_image"
-path = "pygame/image.rs"
+path = "examples/pygame/image.rs"
 
 [[example]]
 name = "pygame_test_sndarray"
-path = "pygame/sndarray.rs"
+path = "examples/pygame/sndarray.rs"
 
 [[example]]
 name = "pygame_test_video"
-path = "pygame/video.rs"
+path = "examples/pygame/video.rs"
 
 [[example]]
 name = "pygame_test_net"
-path = "pygame/net.rs"
+path = "examples/pygame/net.rs"
 
 [[example]]
 name = "pygame_test_gamepad"
-path = "pygame/gamepad.rs"
+path = "examples/pygame/gamepad.rs"
 
 [[example]]
 name = "pygame_test_touch"
-path = "pygame/touch.rs"
+path = "examples/pygame/touch.rs"
 
 [[example]]
 name = "pygame_test_dialog"
-path = "pygame/dialog.rs"
+path = "examples/pygame/dialog.rs"
 
 [[example]]
 name = "pygame_test_permission"
-path = "pygame/permission.rs"
+path = "examples/pygame/permission.rs"
 
 # ── 上表十四案例的 Android 双注册（统一脚本出包）──
 [[example]]
 name = "pygame_test_math_android"
-path = "pygame/math.rs"
+path = "examples/pygame/math.rs"
 crate-type = ["cdylib"]
 
 [[example]]
 name = "pygame_test_key_android"
-path = "pygame/key.rs"
+path = "examples/pygame/key.rs"
 crate-type = ["cdylib"]
 
 [[example]]
 name = "pygame_test_mouse_android"
-path = "pygame/mouse.rs"
+path = "examples/pygame/mouse.rs"
 crate-type = ["cdylib"]
 
 [[example]]
 name = "pygame_test_transform_android"
-path = "pygame/transform.rs"
+path = "examples/pygame/transform.rs"
 crate-type = ["cdylib"]
 
 [[example]]
 name = "pygame_test_sprite_android"
-path = "pygame/sprite.rs"
+path = "examples/pygame/sprite.rs"
 crate-type = ["cdylib"]
 
 [[example]]
 name = "pygame_test_font_android"
-path = "pygame/font.rs"
+path = "examples/pygame/font.rs"
 crate-type = ["cdylib"]
 
 [[example]]
 name = "pygame_test_image_android"
-path = "pygame/image.rs"
+path = "examples/pygame/image.rs"
 crate-type = ["cdylib"]
 
 [[example]]
 name = "pygame_test_sndarray_android"
-path = "pygame/sndarray.rs"
+path = "examples/pygame/sndarray.rs"
 crate-type = ["cdylib"]
 
 [[example]]
 name = "pygame_test_video_android"
-path = "pygame/video.rs"
+path = "examples/pygame/video.rs"
 crate-type = ["cdylib"]
 
 [[example]]
 name = "pygame_test_net_android"
-path = "pygame/net.rs"
+path = "examples/pygame/net.rs"
 crate-type = ["cdylib"]
 
 [[example]]
 name = "pygame_test_gamepad_android"
-path = "pygame/gamepad.rs"
+path = "examples/pygame/gamepad.rs"
 crate-type = ["cdylib"]
 
 [[example]]
 name = "pygame_test_touch_android"
-path = "pygame/touch.rs"
+path = "examples/pygame/touch.rs"
 crate-type = ["cdylib"]
 
 [[example]]
 name = "pygame_test_dialog_android"
-path = "pygame/dialog.rs"
+path = "examples/pygame/dialog.rs"
 crate-type = ["cdylib"]
 
 [[example]]
 name = "pygame_test_permission_android"
-path = "pygame/permission.rs"
+path = "examples/pygame/permission.rs"
 crate-type = ["cdylib"]
