@@ -69,6 +69,14 @@ surface/mask/key/mouse/math…，桌面与 Android 双形态）。
 | 序列化 | [serde](https://serde.rs/) | 1.0 |
 | 内存映射 | [bytemuck](https://docs.rs/bytemuck/) | 1.23 |
 
+## 🖼️ 第三方美术资源
+
+示例所用素材取自 LearnOpenGL（作者 Joey de Vries，
+https://learnopengl.com ，许可：Creative Commons Attribution 4.0
+International —— CC BY 4.0）；部分测试素材取自
+[SampleLib](https://samplelib.com/zh/)（网站原创测试文件，允许下载、
+修改与使用，按现状提供不提供担保）。
+
 ## 🧩 生态仓库矩阵
 
 | 仓库 | 角色 |
