@@ -241,3 +241,13 @@ starfish = { git = "https://github.com/GuYeying/starfish" }
 ## 📄 许可证
 Apache License 2.0 © 2026 Starfish Lib Authors
 MIT License © 2026 Starfish Lib Authors
+## 🧩 生态仓库矩阵
+
+| 仓库 | 角色 |
+|---|---|
+| [starfish](https://github.com/GuYeying/starfish) | 引擎本体（本仓，纯 Rust 跨平台库，零 Python 资产） |
+| [pygamest](https://github.com/GuYeying/pygamest) | Python 绑定层（RustPython 内嵌 + 原生 pygame 面——次世代 pygame 的 pygame 形态） |
+| [pygamest-dev](https://github.com/GuYeying/pygamest-dev) | 开发解释器（python.exe 形态，零 Rust 工具链） |
+| [pygamest-runtime](https://github.com/GuYeying/pygamest-runtime) | 游戏运行时（玩家单元，入口加密嵌入 + 散文件清单） |
+| [egui-starfish-we](https://github.com/GuYeying/egui-starfish-we) | egui × starfish-we 适配（vendored egui-winit fork） |
+| [rapier-starfish-debug](https://github.com/GuYeying/rapier-starfish-debug) | Rapier 物理适配 + 通用 debug 渲染 |
