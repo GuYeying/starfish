@@ -8,17 +8,20 @@
 //! - [`Texture`]：GPU 纹理（Rgba8Unorm，上传/采样/离屏三位一体）
 //! - [`Screen`] / [`Surface`] / [`DrawTarget`]：绘制终点统一抽象
 //!   （Screen = 交换链背板进程唯一；Surface = 离屏画布 + 空间可放置
-//!   纹理对象——无相机字段，全局相机隐式）
-//! - [`Camera`] / [`CameraState`]：MVP 组装（ortho/perspective 同型，
-//!   唯一上传变换量）+ 全局相机状态机（Auto2d/Auto3d/Manual）
-//! - [`Batch`]：批处理执行体（纹理切换即段边界；即时 API × 延迟提交）
+//!   纹理对象）
+//! - [`Camera`] / [`CameraKind`]：MVP 组装（ortho/perspective 同型，
+//!   唯一上传变换量）+ Auto 兜底形态（Auto2d/Auto3d；**相机选择是
+//!   会话级**——`RenderPass::set_camera`，每会话/每目标独立）
+//! - [`Batch`]：批处理执行体（纹理 × 相机切换即段边界；即时 API ×
+//!   延迟提交；`set_mvp`/`set_model` 绘制状态机）
 //! - [`SpriteMaterial`]（内部）：pygame 固定渲染管线的状态材质（管线
 //!   变体矩阵惰性缓存；不对外暴露——定制管线走 RenderResourceAccess）
 //!
-//! **全局相机定约**：相机 uniform（`@group(0)@binding(0) 64B mat4x4
-//! MVP`）全局唯一——pack 时按 [`CameraState`] 解出（Auto = 按目标尺寸
-//! 隐式；Manual = [`set_default_camera`] override）。sprite/调试线/font 管线
-//! 同构共享；egui 客人经适配层跟随。一处设置、全体生效。
+//! **相机定约（渲染统一 draw 面）**：相机 uniform（`@group(0)@binding(0)
+//! 64B mat4x4 MVP`）**段级**——pack 时按段解出（None 段 = [`CameraKind`]
+//! Auto 按目标尺寸隐式；Some 段 = 会话 `set_camera` override，段边界 =
+//! 纹理 × 相机切换）。sprite/调试线/font 管线同构共享；egui 客人经
+//! 适配层跟随。同一画布多相机 = 会话内多次 `set_camera` 分段绘制。
 //!
 //! GPU 槽（ADR-6 display 全局槽的前置形态）：[`Screen::new`] 建立
 //! 进程级 Gpu 句柄，[`Surface`]/[`Texture`]/pygame::font 等经 [`gpu`]
@@ -32,7 +35,7 @@ pub mod target;
 pub mod texture;
 
 pub use batch::{Batch, BatchTopology, GeometryKind, SpriteVertex};
-pub use camera::{Camera, CameraState};
+pub use camera::{Camera, CameraKind};
 pub use material::{SpriteBlend, SPRITE_MRT_WGSL, SPRITE_WGSL};
 pub use session::{begin_screen, begin_targets, end_screen, end_targets, with_screen,
     with_targets, NoActiveSession};
@@ -67,7 +70,8 @@ use starfish_render::sampler_desc::SamplerDescriptor;
 
 use material::SpriteMaterial;
 
-/// blit 目标坐标（像素，y 向下；左上角为原点）
+/// 画面目标坐标（**中心原点、y 向上**——坐标系正交化定约；仅
+/// clip/scissor 等内部几何消费）
 pub type Coord = (i32, i32);
 
 /// 整型矩形 `[x, y, w, h]`（GPU 几何管线内部用：clip/scissor/blit_area
@@ -77,8 +81,8 @@ pub type Coord = (i32, i32);
 pub type IRect = [i32; 4];
 
 /// 进程级 GPU 句柄：设备/队列 + 资源访问 + 材质 + 默认采样器 + 白纹理
-/// + **全局相机 rig**（全局相机定约：全局唯一 uniform/bind，pack 时按
-/// CameraState 解 MVP——Screen/Surface 无相机字段）
+/// + 默认相机 rig（Auto 兜底 MVP 解算——段级相机 None 段消费；会话
+/// set_camera 的 Some 段自持 MVP，不经 rig）
 pub(crate) struct Gpu {
     pub device: Arc<wgpu::Device>,
     pub queue: Arc<wgpu::Queue>,
@@ -93,10 +97,10 @@ pub(crate) struct Gpu {
     pub offscreen_access: Arc<RenderResourceAccess>,
     /// 固定管线状态材质（cull/blend 创建期愿望定型）
     pub material: SpriteMaterial,
-    /// 全局相机 rig（uniform + bind；mvp 由 pack 按状态现写）
+    /// 默认相机 rig（uniform + bind；mvp 由 pack 按 CameraKind 现写）
     pub camera: RefCell<target::CameraRig>,
-    /// 全局相机状态机（Auto2d / Auto3d / Manual）
-    pub camera_state: RefCell<CameraState>,
+    /// Auto 兜底相机种类（Auto2d / Auto3d——init(dim=) 定型）
+    pub camera_kind: RefCell<CameraKind>,
     /// 默认采样器（linear clamp——pygame 贴图平滑语义）
     pub sampler: Arc<wgpu::Sampler>,
     /// 1×1 白纹理（纯色路径：fill/draw::* 的纹理入端）
@@ -145,19 +149,26 @@ impl RenderWish {
         blend: SpriteBlend::Alpha,
     };
 
-    /// 相机状态初值（Gpu 装配时定型）
-    fn camera_state(&self) -> CameraState {
+    /// Auto 兜底相机种类（Gpu 装配时定型）
+    fn camera_kind(&self) -> CameraKind {
         if self.dim3d {
-            CameraState::Auto3d { fov_deg: self.fov_deg, near: self.near, far: self.far }
+            CameraKind::Auto3d { fov_deg: self.fov_deg, near: self.near, far: self.far }
         } else {
-            CameraState::Auto2d
+            CameraKind::Auto2d
         }
     }
 }
 
-/// 渲染愿望写入（pygame.render.init——set_mode 前配置；整只覆盖）
+/// 渲染愿望写入（pygame.render.init——set_mode 前配置；整只覆盖）。
+/// GPU 槽已装配时**同步更新 Auto 相机种类**（init(dim=) 运行期改维的
+/// 即时生效路径——旧 reset_camera 全局口退役后的承接）
 pub fn store_wish(wish: RenderWish) {
     WISH_SLOT.with(|w| *w.borrow_mut() = wish);
+    GPU_SLOT.with(|slot| {
+        if let Some(g) = slot.borrow().as_ref() {
+            *g.camera_kind.borrow_mut() = wish.camera_kind();
+        }
+    });
 }
 
 /// 当前渲染愿望（含未配置的默认值）
@@ -215,41 +226,21 @@ pub fn gpu_info() -> Option<GpuInfo> {
     })
 }
 
-// ── 全局相机 API（一处设置、全体生效）──────────────────────────────
+// ── Auto 兜底相机（段级相机 None 段的解算源）──────────────────────
 
-/// 全局相机 override（→ Manual：所有后续渲染生效——本帧剩余批次、其它
-/// Surface、后续帧；直到 [`reset_camera`]）。会话形态
-/// `RenderPass::set_default_camera` 同语义转发。
-pub fn set_default_camera(camera: &Camera) {
-    let g = gpu();
-    *g.camera_state.borrow_mut() = CameraState::Manual(*camera);
-}
-
-/// 回自动相机（Auto2d / Auto3d——按创建期愿望）
-pub fn reset_camera() {
-    let g = gpu();
-    *g.camera_state.borrow_mut() = current_wish().camera_state();
-}
-
-/// 当前全局相机状态
-pub fn camera_state() -> CameraState {
-    *gpu().camera_state.borrow()
-}
-
-/// 当前全局 MVP（Auto 状态按主屏尺寸现算——resize 天然跟随；
-/// Manual = 用户相机）
+/// 当前 Auto 兜底 MVP（主屏尺寸现算——resize 天然跟随）。会话级相机
+/// 选择走 `RenderPass::set_camera`（本函数不再承载 override）
 pub fn camera_mvp() -> Mat4 {
     let size = crate::display::get_screen().size();
     camera_mvp_for(size)
 }
 
-/// 按目标尺寸解全局 MVP（客人合成用——Auto 状态按给定尺寸隐式、
-/// Manual = 用户 override 与尺寸无关：与目标层 pack 同一解算，
-/// "一处设置、全体生效"定约的客人侧入口）
+/// 按目标尺寸解 Auto 兜底 MVP（客人合成用——与目标层 pack 的 None 段
+/// 同一解算）
 pub fn camera_mvp_for(size: (u32, u32)) -> Mat4 {
     let g = gpu();
-    let state = *g.camera_state.borrow();
-    state.resolve_mvp((size.0.max(1) as f32, size.1.max(1) as f32))
+    let kind = *g.camera_kind.borrow();
+    kind.resolve_mvp((size.0.max(1) as f32, size.1.max(1) as f32))
 }
 
 impl Gpu {
@@ -259,10 +250,10 @@ impl Gpu {
         access: Arc<RenderResourceAccess>,
         offscreen_access: Arc<RenderResourceAccess>,
     ) -> Self {
-        // 愿望消费（一次定型：剔除/混合进材质，相机维进状态机初值）
+        // 愿望消费（一次定型：剔除/混合进材质，相机维进 Auto 种类初值）
         let wish = current_wish();
         let material = SpriteMaterial::new(&access, wish.cull, wish.blend);
-        let camera_state = RefCell::new(wish.camera_state());
+        let camera_kind = RefCell::new(wish.camera_kind());
         let sampler = Arc::new(
             access.create_sampler("pygame_sampler", &SamplerDescriptor::linear_clamp()),
         );
@@ -273,8 +264,8 @@ impl Gpu {
             .texture_view(0, white.view())
             .sampler(1, sampler.clone())
             .build(Some("pygame_white_bind"));
-        // 全局相机 rig：uniform/bind 全局唯一；mvp 由 pack 按 CameraState
-        // 现写（初始 ortho(1,1) 仅占位）
+        // 默认相机 rig：uniform/bind 唯一（段 None 的布局示例 + Auto MVP
+        // 现写）；会话 set_camera 的 Some 段自建一次性 bind
         let gpu0 = Self {
             device: device.clone(),
             queue: queue.clone(),
@@ -285,7 +276,7 @@ impl Gpu {
                 &device,
                 &access,
             )),
-            camera_state,
+            camera_kind,
             sampler,
             white,
             white_bind,
@@ -295,16 +286,15 @@ impl Gpu {
         gpu0
     }
 
-    /// pack 期相机解算：按当前状态解出目标尺寸的 MVP 写入全局 rig
-    ///（Auto 状态随目标隐式；Manual 与尺寸无关）——返回 rig 的借用
-    /// 供 EncodeCtx 消费。
+    /// pack 期 Auto 兜底 MVP 解算：按当前种类解出目标尺寸的 MVP 写入
+    /// 默认 rig——返回 rig 的借用供 EncodeCtx 消费（None 段用）。
     pub(crate) fn camera_for(
         &self,
         size: (u32, u32),
     ) -> std::cell::RefMut<'_, target::CameraRig> {
         let mut rig = self.camera.borrow_mut();
-        let state = *self.camera_state.borrow();
-        rig.mvp = state.resolve_mvp((size.0.max(1) as f32, size.1.max(1) as f32));
+        let kind = *self.camera_kind.borrow();
+        rig.mvp = kind.resolve_mvp((size.0.max(1) as f32, size.1.max(1) as f32));
         rig
     }
 

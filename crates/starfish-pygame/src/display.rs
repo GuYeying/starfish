@@ -302,11 +302,18 @@ pub fn apply_window_request(size: (u32, u32), flags: u32) {
     }
 }
 
-/// 物理点 → 逻辑点（输入坐标映射；呈现映射的逆变换。display 未就绪 =
-/// 原样透传——事件可先于 set_mode 到达）
+/// 物理点 → **逻辑中心系**点（输入坐标映射的统一收口：物理 → 逻辑
+/// 画布（letterbox 逆映射）→ **y 翻转 + 中心原点化**——坐标系正交化
+/// 定约：脚本坐标 = 中心原点、y 向上，与 3D 透视/物理米制系同构）。
+/// display 未就绪 = 原样透传——事件可先于 set_mode 到达
 pub fn map_point(x: f64, y: f64) -> (f64, f64) {
     SCREEN.with(|s| match s.borrow().as_ref() {
-        Some(screen) => screen.map_point_to_logical(x, y),
+        Some(screen) => {
+            let (lx, ly) = screen.map_point_to_logical(x, y);
+            let (lw, lh) = screen.logical_size();
+            // y 翻转 + 中心原点化（逻辑画布域内：左上 (0,0) → (-w/2, +h/2)）
+            (lx - lw as f64 / 2.0, lh as f64 / 2.0 - ly)
+        }
         None => (x, y),
     })
 }

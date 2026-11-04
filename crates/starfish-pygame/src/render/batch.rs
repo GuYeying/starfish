@@ -1,8 +1,17 @@
 //! 批处理执行体（契约 §六 Batch / ADR-5 即时 API × 延迟提交）
 //!
-//! 即时绘制的 CPU 侧积攒：顶点按**纹理切换**切段（同纹理连续绘制合并，
-//! 切换纹理 = flush 边界），`encode` 时一条 render pass 走完（填充流 +
-//! 线流各一次管线切换）。quad 与 mesh 同路（统一顶点 pos3+uv2+color4）。
+//! 即时绘制的 CPU 侧积攒：顶点按**纹理 × 相机（MVP）切换**切段（同纹理
+//! 同相机连续绘制合并，任一切换 = flush 边界），`encode` 时一条 render
+//! pass 走完（填充流 + 线流各一次管线切换）。quad 与 mesh 同路（统一
+//! 顶点 pos3+uv2+color4）。
+//!
+//! **per-draw 相机/变换（渲染统一 draw 面）**：
+//! - `set_mvp(Some(mvp))` = 会话级相机切换（段边界；`None` = Auto 兜底
+//!   ——pack 时按目标尺寸现算）；group0 相机 bind 从 pass 级降到**段级**
+//!   （先例 = group1 纹理段级切换；material 管线缓存 key 不含相机 bind
+//!   ——bind 仅作布局推导，零膨胀）
+//! - `set_model(m)` = 会话级变换状态机：**CPU 烘顶点**（`blit_transform`
+//!   先例路径——WebGL2 无 push constants，图元/文字顶点量小，零兼容坑）
 //!
 //! 纯色路径（`texture: None`）解析到 Gpu 的 1×1 白纹理——三路（精灵/
 //! 图元/文字图集）同一着色器同一管线族（见 `shader/sprite.wgsl`）。
@@ -12,6 +21,7 @@
 
 use std::sync::Arc;
 
+use glam::Mat4;
 use starfish_gfx::geometry::Geometry;
 use starfish_render::bind_group::bind_group::BindGroup;
 use starfish_render::render_pass::attachments::{ColorAttachment, DepthAttachment};
@@ -54,12 +64,14 @@ impl SpriteVertex {
     pub const SIZE: usize = std::mem::size_of::<Self>();
 }
 
-/// 一个纹理段：同纹理的连续顶点区间（纹理切换 = 段边界）
+/// 一个纹理段：同纹理 + 同相机的连续顶点区间（任一切换 = 段边界）
 ///
-/// `key/view = None` 即纯色段（白纹理，encode 时解析到 [`Gpu::white`]）。
+/// `key/view = None` 即纯色段（白纹理，encode 时解析到 [`Gpu::white`]）；
+/// `mvp = None` 即 Auto 兜底段（encode 时按目标尺寸现算）。
 pub(crate) struct Segment {
     pub key: Option<usize>,
     pub view: Option<Arc<wgpu::TextureView>>,
+    pub mvp: Option<Mat4>,
     pub start: u32,
     pub end: u32,
 }
@@ -83,10 +95,11 @@ impl Stream {
         self.vertices.is_empty()
     }
 
-    /// 顶点组入流（段边界 = 纹理切换；返回本组区间 [start, end)）
+    /// 顶点组入流（段边界 = 纹理切换 ∪ 相机切换；返回本组区间 [start, end)）
     fn push(
         &mut self,
         texture: Option<&Texture>,
+        mvp: Option<Mat4>,
         vs: impl IntoIterator<Item = SpriteVertex>,
     ) -> std::ops::Range<u32> {
         let vs: Vec<_> = vs.into_iter().collect();
@@ -94,11 +107,11 @@ impl Stream {
             let end = self.vertices.len() as u32;
             return end..end;
         }
-        // 段边界判定：纹理切换（含 None ↔ Some）即开新段
+        // 段边界判定：纹理切换 ∪ 相机切换（含 None ↔ Some）即开新段
         let key = texture.map(Texture::cache_key);
-        let need_new = match (self.segments.last(), &key) {
-            (None, _) => true,
-            (Some(last), k) => last.key != *k,
+        let need_new = match (self.segments.last(), &key, &mvp) {
+            (None, _, _) => true,
+            (Some(last), k, m) => last.key != *k || last.mvp != *m,
         };
         let start = self.vertices.len() as u32;
         self.vertices.extend(vs);
@@ -107,6 +120,7 @@ impl Stream {
             self.segments.push(Segment {
                 key,
                 view: texture.map(Texture::view),
+                mvp,
                 start,
                 end,
             });
@@ -129,7 +143,7 @@ impl Stream {
 /// 顶点组拓扑（基层接口的流选择 + 管线解释约定）
 ///
 /// 流按拓扑分仓：Triangles 入填充流（三角形列表管线）、Lines 入线流
-/// （线段列表管线）——同流内段边界只由纹理切换决定。
+/// （线段列表管线）——同流内段边界只由纹理/相机切换决定。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BatchTopology {
     /// 三角列表：vertices 按 **3 个一组**解释（一顶点组 = N 个三角）
@@ -141,10 +155,17 @@ pub enum BatchTopology {
 /// 顶点批处理（pygame 词汇 draw::* 的执行体；base 风格公开面——
 /// 契约 §六 标注 pub(crate)，因验收探针在 examples/ 独立 crate 需要
 /// 公开面，P3 draw::* 仍在其上包 pygame 词汇，见 changelog 批次六）
+///
+/// **绘制状态机（渲染统一 draw 面）**：`set_mvp` / `set_model` 为会话级
+/// 状态（Batch 挂在目标上，状态跨 push 持续；会话开始由 RenderPass 重置
+/// 为 Auto/Identity 兜底）——后续全部 push 按 `cur_mvp`（段边界）分组、
+/// 按 `cur_model` CPU 烘顶点。
 #[derive(Default)]
 pub struct Batch {
     tris: Stream,
     lines: Stream,
+    cur_mvp: Option<Mat4>,
+    cur_model: Mat4,
 }
 
 impl Batch {
@@ -152,7 +173,42 @@ impl Batch {
         Self {
             tris: Stream::new(),
             lines: Stream::new(),
+            cur_mvp: None,
+            cur_model: Mat4::IDENTITY,
         }
+    }
+
+    // ── 绘制状态机（per-draw 相机/变换）────────────────────────────
+
+    /// 会话级相机切换（后续 push 进新段；`None` = Auto 兜底——pack 时按
+    /// 目标尺寸现算）
+    pub fn set_mvp(&mut self, mvp: Option<Mat4>) {
+        self.cur_mvp = mvp;
+    }
+
+    /// 回 Auto 兜底相机
+    pub fn reset_mvp(&mut self) {
+        self.cur_mvp = None;
+    }
+
+    /// 当前相机状态快照（fill 等"恒默认段"语义的保存/恢复口）
+    pub fn mvp_snapshot(&self) -> Option<Mat4> {
+        self.cur_mvp
+    }
+
+    /// 会话级变换（后续 push 的顶点 CPU 烘此矩阵——`pos → model × pos`）
+    pub fn set_model(&mut self, model: Mat4) {
+        self.cur_model = model;
+    }
+
+    /// 回恒等变换
+    pub fn reset_model(&mut self) {
+        self.cur_model = Mat4::IDENTITY;
+    }
+
+    /// 当前 model 矩阵（调用方组合用：`cur_model × local` 的便捷入口）
+    pub fn model(&self) -> Mat4 {
+        self.cur_model
     }
 
     /// 是否无待提交绘制
@@ -160,38 +216,52 @@ impl Batch {
         self.tris.is_empty() && self.lines.is_empty()
     }
 
-    /// 清空（present/flush 后由目标调用）
+    /// 清空（present/flush 后由目标调用；**状态不清**——跨 pack 的绘制
+    /// 状态机持续，会话开始由 RenderPass 显式重置）
     pub fn clear(&mut self) {
         self.tris.clear();
         self.lines.clear();
     }
 
+    /// model 变换一个点（收集层 CPU 烘的单点入口）
+    fn bake(&self, x: f32, y: f32, z: f32) -> [f32; 3] {
+        let p = self.cur_model.transform_point3(glam::Vec3::new(x, y, z));
+        [p.x, p.y, p.z]
+    }
+
     // ── 基层接口：顶点组直入 ────────────────────────────────────────
     // quad/triangle/线段/几何 全部经此入流——上层只负责把图元展开成
-    // 顶点组；纹理切段、拓扑分仓、打包上屏由流统一处理。
+    // 顶点组；纹理切段、相机切段、拓扑分仓、打包上屏由流统一处理。
 
-    /// 顶点组直入（基层接口）。
+    /// 顶点组直入（基层接口；顶点按 `cur_model` 烘、按 `cur_mvp` 分段）。
     ///
     /// - `topo`：Triangles = 每 **3** 顶点一三角（三角形列表管线）；
     ///   Lines = 每 **2** 顶点一线段。不对齐尾组会被管线丢弃——上层
     ///   展开时保证整组。
     /// - `texture`：None = 1×1 白纹理（纯色路径）。
-    /// - 段边界：同流内纹理切换；返回本组流内区间（诊断/高级用法）。
-    ///
-    /// 便利层（`push_quad*` / `push_geometry`）全部是本接口的展开糖。
+    /// - 段边界：同流内纹理/相机切换；返回本组流内区间（诊断/高级用法）。
     pub fn push_vertices(
         &mut self,
         topo: BatchTopology,
         texture: Option<&Texture>,
         vertices: &[SpriteVertex],
     ) -> std::ops::Range<u32> {
+        let mvp = self.cur_mvp;
+        let baked: Vec<SpriteVertex> = vertices
+            .iter()
+            .map(|v| {
+                let p = self.bake(v.pos[0], v.pos[1], v.pos[2]);
+                SpriteVertex { pos: p, ..*v }
+            })
+            .collect();
         match topo {
-            BatchTopology::Triangles => self.tris.push(texture, vertices.iter().copied()),
-            BatchTopology::Lines => self.lines.push(texture, vertices.iter().copied()),
+            BatchTopology::Triangles => self.tris.push(texture, mvp, baked),
+            BatchTopology::Lines => self.lines.push(texture, mvp, baked),
         }
     }
 
-    /// 矩形 quad（x/y/w/h 像素，y 向下；全 uv）——blit 的执行原语
+    /// 矩形 quad（x/y/w/h，中心原点坐标系；全 uv）——位置由
+    /// `cur_model` 承载（`set_transform` 的执行原语）
     ///
     /// `texture = None` → 1×1 白纹理（纯色路径）
     pub fn push_quad(
@@ -239,7 +309,7 @@ impl Batch {
         );
     }
 
-    /// 任意四角 quad（transform 旋转/镜像等仿射变形的执行原语；
+    /// 任意四角 quad（2D 形态——仿射变形的执行原语；
     /// 角序 TL/TR/BR/BL，两三角 (0,1,2)(0,2,3)）——基层展开糖
     pub fn push_quad_corners(
         &mut self,
@@ -248,29 +318,13 @@ impl Batch {
         color: [f32; 4],
         texture: Option<&Texture>,
     ) {
-        let v = |p: [f32; 2], t: [f32; 2]| SpriteVertex {
-            pos: [p[0], p[1], 0.0],
-            uv: t,
-            color,
-        };
-        let [c0, c1, c2, c3] = corners;
-        let [u0, u1, u2, u3] = uvs;
-        self.push_vertices(
-            BatchTopology::Triangles,
-            texture,
-            &[
-                v(c0, u0),
-                v(c1, u1),
-                v(c2, u2),
-                v(c0, u0),
-                v(c2, u2),
-                v(c3, u3),
-            ],
-        );
+        let corners3: [[f32; 3]; 4] = corners.map(|p| [p[0], p[1], 0.0]);
+        self.push_quad_corners_3d(corners3, uvs, color, texture);
     }
 
-    /// 任意四角 quad（**3D 形态**——角带 z；blit_transform 模型矩阵
-    /// 空间放置的执行原语；角序 TL/TR/BR/BL，两三角 (0,1,2)(0,2,3)）
+    /// 任意四角 quad（**3D 形态**——角带 z；顶点再按 `cur_model` 烘——
+    /// 两级变换复合：调用方局部放置 × 会话 transform。角序 TL/TR/BR/BL，
+    /// 两三角 (0,1,2)(0,2,3)）
     pub fn push_quad_corners_3d(
         &mut self,
         corners: [[f32; 3]; 4],
@@ -279,7 +333,7 @@ impl Batch {
         texture: Option<&Texture>,
     ) {
         let v = |p: [f32; 3], t: [f32; 2]| SpriteVertex {
-            pos: p,
+            pos: self.bake(p[0], p[1], p[2]),
             uv: t,
             color,
         };
@@ -299,7 +353,8 @@ impl Batch {
         );
     }
 
-    /// base 图元几何入批（`shape2d` 家族产出；z 透传、颜色烘焙为调用色）
+    /// base 图元几何入批（`shape2d` 家族产出；顶点先按 `cur_model` 烘
+    /// （[`Geometry::transformed`] 复用）、z 透传、颜色烘焙为调用色）
     ///
     /// **GLES 兼容（批次二十四）**：三角形以“退化四边形”入队——每三角形
     /// (a,b,c) 展开为 quad_corners [a,b,c,c]（第二三角 acc 退化零面积），
@@ -312,6 +367,15 @@ impl Batch {
         offset: [f32; 2],
         color: [f32; 4],
     ) {
+        // 会话 transform 烘进几何（恒等时零拷贝快路径——transformed 返回新
+        // Vec，恒等判断跳过分配）
+        let owned;
+        let geometry = if self.cur_model == Mat4::IDENTITY {
+            geometry
+        } else {
+            owned = geometry.transformed(&self.cur_model);
+            &owned
+        };
         let v = |sv: &starfish_gfx::ShapeVertex| SpriteVertex {
             pos: [sv.pos[0] + offset[0], sv.pos[1] + offset[1], sv.pos[2]],
             // 白纹理全域白，uv 取值不影响纯色输出
@@ -411,6 +475,23 @@ pub(crate) fn scissor_from(clip: crate::IRect, size: (u32, u32)) -> Option<[u32;
     Some([x0, y0, w, h])
 }
 
+/// 段相机 bind（一次性 uniform + bind——段数 = 纹理 × 相机组合，量小；
+/// 与 "每 pack 一次性 buffer" 同款防覆盖定约，按段复制使各段命令引用
+/// 各自独立数据）
+fn seg_cam_bind(gpu: &Gpu, mvp: &Mat4) -> BindGroup {
+    let cam_buf = Arc::new(gpu.device.create_buffer_init(
+        &wgpu::util::BufferInitDescriptor {
+            label: Some("pygame_camera_mvp_seg"),
+            contents: bytemuck::bytes_of(&mvp.to_cols_array_2d()),
+            usage: wgpu::BufferUsages::UNIFORM,
+        },
+    ));
+    gpu.access
+        .bind_group_builder()
+        .uniform_raw(0, cam_buf, 64)
+        .build(Some("pygame_camera_bind_seg"))
+}
+
 /// 批 → 命令缓冲（一条 render pass：填充流 + 线流）。空批返回 None。
 ///
 /// 深度格式恒 Depth24Plus（base SurfaceSettings 默认同源）；
@@ -419,26 +500,6 @@ pub(crate) fn encode(batch: &Batch, ctx: &mut EncodeCtx) -> Option<wgpu::Command
     if batch.is_empty() {
         return None;
     }
-    // 相机 MVP = **每 pack 一次性 uniform buffer + bind**（与下方 vbo
-    // 同一定约，批次九坑的相机版修复：主屏多次 pack 挂 pending 统一
-    // 提交，而 write_buffer 即時——共享 buffer 时正交/透视交替 pack
-    // 互相覆盖，后写者对全部 pass 生效[3D 卡片飞出屏]。一次性副本
-    // 使各 pass 命令引用各自独立数据，天然免疫）。
-    let cam_buf = Arc::new(
-        ctx.gpu
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("pygame_camera_mvp"),
-                contents: bytemuck::bytes_of(&ctx.camera.mvp.to_cols_array_2d()),
-                usage: wgpu::BufferUsages::UNIFORM,
-            }),
-    );
-    let cam_bind = ctx
-        .gpu
-        .access
-        .bind_group_builder()
-        .uniform_raw(0, cam_buf, 64)
-        .build(Some("pygame_camera_bind_pack"));
 
     // 纹理 bind group 预建（段级，按纹理指针缓存；纯色段 = 白纹理本体直引）
     for seg in batch.tris.segments.iter().chain(&batch.lines.segments) {
@@ -468,22 +529,16 @@ pub(crate) fn encode(batch: &Batch, ctx: &mut EncodeCtx) -> Option<wgpu::Command
         pass.set_scissor_rect(x, y, w, h);
     }
     if !batch.tris.is_empty() {
-        draw_stream(&mut pass, &batch.tris, false, ctx, &cam_bind);
+        draw_stream(&mut pass, &batch.tris, false, ctx);
     }
     if !batch.lines.is_empty() {
-        draw_stream(&mut pass, &batch.lines, true, ctx, &cam_bind);
+        draw_stream(&mut pass, &batch.lines, true, ctx);
     }
     pass.end();
     Some(encoder.finish())
 }
 
-fn draw_stream(
-    pass: &mut RenderPass,
-    stream: &Stream,
-    lines: bool,
-    ctx: &EncodeCtx,
-    cam_bind: &BindGroup,
-) {
+fn draw_stream(pass: &mut RenderPass, stream: &Stream, lines: bool, ctx: &EncodeCtx) {
     let depth = ctx.depth.is_some();
     let pipeline = if ctx.colors.len() > 1 {
         ctx.gpu
@@ -500,9 +555,6 @@ fn draw_stream(
         )
     };
     pass.set_pipeline(&pipeline);
-    // 本 pack 的相机 MVP（一次性 bind——见 encode 头注释；布局与
-    // rig 常驻 bind 同构）
-    pass.set_bind_group(0, cam_bind);
     // 顶点数据内联一次性 buffer：命令缓冲引用各自独立的数据，天然免疫
     // "同帧多次 pack 的 write_buffer 互相覆盖"（批次九实测坑）。
     // P3 优化位：append-only arena + slice 偏移（需 base RenderPass 支持）。
@@ -518,6 +570,10 @@ fn draw_stream(
     pass.set_vertex_buffer(0, &buf);
     let binds = ctx.gpu.binds.borrow();
     for seg in &stream.segments {
+        // 相机 bind 段级（渲染统一 draw 面）：None = Auto 兜底（pack 时
+        // 按目标尺寸现算的 ctx.camera.mvp）；Some = 会话 set_camera
+        let seg_bind = seg_cam_bind(ctx.gpu, seg.mvp.as_ref().unwrap_or(&ctx.camera.mvp));
+        pass.set_bind_group(0, &seg_bind);
         match (&seg.key, &seg.view) {
             (Some(key), _) => {
                 if let Some(b) = binds.get(key) {
@@ -639,5 +695,41 @@ mod batch_tests {
             expect_tris * 6,
             "每三角退化展开为 6 顶点（零面积第二三角）"
         );
+    }
+
+    #[test]
+    fn mvp_switch_splits_segment() {
+        // 相机切换 = 段边界（渲染统一 draw 面）——同纹理不同 MVP 分两段
+        let mut b = Batch::new();
+        b.push_vertices(BatchTopology::Triangles, None, &quad_verts(0.0, 0.0));
+        b.set_mvp(Some(Mat4::from_translation(glam::Vec3::ONE)));
+        b.push_vertices(BatchTopology::Triangles, None, &quad_verts(50.0, 0.0));
+        assert_eq!(b.tris.segments.len(), 2, "MVP 切换开新段");
+        b.reset_mvp();
+        b.push_vertices(BatchTopology::Triangles, None, &quad_verts(100.0, 0.0));
+        assert_eq!(b.tris.segments.len(), 3, "回 Auto 又一段");
+        // 同 MVP 续段
+        b.push_vertices(BatchTopology::Triangles, None, &quad_verts(150.0, 0.0));
+        assert_eq!(b.tris.segments.len(), 3, "同 MVP 同纹理续段");
+    }
+
+    #[test]
+    fn model_bakes_into_vertices() {
+        // 会话 transform = CPU 烘顶点（渲染统一 draw 面）——平移 +100 落进
+        // 顶点 pos
+        let mut b = Batch::new();
+        b.set_model(Mat4::from_translation(glam::Vec3::new(100.0, 0.0, 0.0)));
+        b.push_vertices(BatchTopology::Triangles, None, &quad_verts(0.0, 0.0));
+        let first = b.tris.vertices.first().expect("顶点已入流");
+        assert_eq!(first.pos, [100.0, 0.0, 0.0], "model 烘进顶点");
+    }
+
+    #[test]
+    fn model_identity_is_zero_cost() {
+        // 恒等 model 下 push_quad 与旧路径逐位一致（零拷贝快路径）
+        let mut b = Batch::new();
+        b.push_quad(10.0, 20.0, 30.0, 40.0, WHITE, None);
+        let first = b.tris.vertices.first().expect("顶点已入流");
+        assert_eq!(first.pos, [10.0, 20.0, 0.0]);
     }
 }

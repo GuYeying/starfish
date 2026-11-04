@@ -36,7 +36,7 @@ use crate::{Color, IRect};
 use super::batch::{encode, Batch, BatchTopology, EncodeCtx, GeometryKind, SpriteVertex};
 use super::camera::Camera;
 use super::texture::Texture;
-use super::{init_gpu, gpu, set_default_camera, Coord, Gpu};
+use super::{init_gpu, gpu, Coord, Gpu};
 use starfish_gfx::{Geometry, ShapeVertex};
 
 /// 纯色路径的顶点色（白纹理 × 白色 = 原色）
@@ -56,84 +56,96 @@ fn rgba(c: impl Into<Color>) -> [f32; 4] {
 /// ——不是即时上屏。需要显式打包边界用 [`Screen::render`] /
 /// [`Surface::render`]（Rust 版 with 语法）。
 pub trait DrawTarget {
-    /// 填充整个目标
+    /// 填充整个目标（恒用 Auto 兜底相机——盖满语义不受会话相机影响）
     fn fill(&self, color: impl Into<Color>);
-    /// 把离屏面画到目标 `(x, y)` 处（**左上角锚**——按层定约：blit/draw
-    /// = 左上、Sprite = 中心；源自动 flush）
-    fn blit(&self, src: &Surface, dest: impl Into<Coord>);
-    /// 中心锚 blit（便利口：pos = center − size/2）
+    /// 画一张离屏面（渲染统一 draw 面的 texture 通道）：源面 quad
+    /// (0,0)-(sw,sh) 按 **会话 transform**（`set_transform` 的 cur_model）
+    /// 变换放置——2D 仿射（平移/旋转/缩放/镜像）与 3D 空间放置（四角
+    /// 带 z，深度会话下正确遮挡）同一口；相机 = 会话 cur_mvp（段）。
+    /// 源自动 flush。
     ///
-    /// 旋转帧等"中心对位"场景的正典——blit 的左上角锚 + 尺寸随角度
-    /// 变化的产物会造成视觉中心漂移（transform 套件实测）；
-    /// Sprite 路径的 `centered=true` 内建同语义
-    fn blit_centered(&self, src: &Surface, center: (i32, i32)) {
-        let (w, h) = src.size();
-        self.blit(src, (center.0 - w as i32 / 2, center.1 - h as i32 / 2))
-    }
-    /// 变换 blit（**单接口收拢——Mat4 承载一切变换**）：源面四角
-    /// (0,0,0)(w,0,0)(w,h,0)(0,h,0) 统一 `transform_point3`——
-    /// 2D 用法 = 矩阵只含 xy 仿射（z 恒 0，零拷贝旋转/缩放/镜像，
-    /// 替代 transform 烘焙）；3D 空间放置 = 模型矩阵（四角带 z，
-    /// `render_depth` 会话下与 3D 场景正确遮挡）。源自动 flush。
-    ///
-    /// 默认管线 cull=none——镜像矩阵（det<0）绕序天然安全；用户经
-    /// `render.init(cull=...)` 开剔除后镜像 quad 背面消失属物理正确。
-    fn blit_transform(&self, src: &Surface, mat: Mat4, tint: Option<impl Into<Color>>) {
+    /// 默认管线 cull=none——镜像矩阵（det<0）绕序天然安全。
+    fn draw_surface(&self, src: &Surface) {
         src.flush();
-        let (sw, sh) = (src.size().0 as f32, src.size().1 as f32);
-        let mut color = src.blit_tint();
-        if let Some(t) = tint {
-            let t = rgba(t);
-            color = [color[0] * t[0], color[1] * t[1], color[2] * t[2], color[3] * t[3]];
-        }
-        let corner = |x: f32, y: f32| mat.transform_point3(glam::Vec3::new(x, y, 0.0));
-        let c = [
-            corner(0.0, 0.0),
-            corner(sw, 0.0),
-            corner(sw, sh),
-            corner(0.0, sh),
-        ];
-        let corners = [
-            [c[0].x, c[0].y, c[0].z],
-            [c[1].x, c[1].y, c[1].z],
-            [c[2].x, c[2].y, c[2].z],
-            [c[3].x, c[3].y, c[3].z],
-        ];
-        let uvs = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+        let (sw, sh) = src.size32();
         self.with_batch(|b| {
-            b.push_quad_corners_3d(corners, uvs, color, Some(&src.texture))
+            b.push_quad_corners_3d(
+                [
+                    [0.0, 0.0, 0.0],
+                    [sw, 0.0, 0.0],
+                    [sw, sh, 0.0],
+                    [0.0, sh, 0.0],
+                ],
+                [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+                src.blit_tint(),
+                Some(&src.texture),
+            );
         });
     }
-    /// area blit（pygame blit 的 area 语义）：src 的像素子区域一次
-    /// 四边形贴入 dest，绘制尺寸 = area 尺寸。
-    /// 源面先 flush（未提交 batch 先上 GPU 再采样——与 blit 同保险）
-    fn blit_area(
-        &self,
-        src: &Surface,
-        dest: impl Into<Coord>,
-        area: IRect,
-        tint: impl Into<Color>,
-    ) {
-        let (x, y) = dest.into();
-        let (sw, sh) = src.size32();
-        let uv = [
-            area[0] as f32 / sw,
-            area[1] as f32 / sh,
-            (area[0] + area[2]) as f32 / sw,
-            (area[1] + area[3]) as f32 / sh,
-        ];
+    /// 中心锚画面（便利口：quad 中心对位 `center`——旋转帧等"中心对位"
+    /// 场景的正典；仍按会话 transform 复合变换）
+    fn draw_surface_centered(&self, src: &Surface, center: (f32, f32)) {
         src.flush();
-        let tint = rgba(tint);
+        let (sw, sh) = src.size32();
+        let (cx, cy) = center;
+        let (hw, hh) = (sw * 0.5, sh * 0.5);
         self.with_batch(|b| {
-            b.push_quad_uv(
-                x as f32,
-                y as f32,
-                area[2] as f32,
-                area[3] as f32,
-                uv,
-                tint,
+            b.push_quad_corners_3d(
+                [
+                    [cx - hw, cy - hh, 0.0],
+                    [cx + hw, cy - hh, 0.0],
+                    [cx + hw, cy + hh, 0.0],
+                    [cx - hw, cy + hh, 0.0],
+                ],
+                [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+                src.blit_tint(),
                 Some(&src.texture),
-            )
+            );
+        });
+    }
+    /// 子区域画面（area 语义）：src 的 uv 子矩形贴为 `aw×ah` quad
+    ///（aw/ah = 子区域像素尺寸），按会话 transform 放置。源自动 flush。
+    fn draw_surface_uv(&self, src: &Surface, uv: [f32; 4], tint: impl Into<Color>) {
+        src.flush();
+        let (sw, sh) = src.size32();
+        let (aw, ah) = ((uv[2] - uv[0]) * sw, (uv[3] - uv[1]) * sh);
+        let mut color = src.blit_tint();
+        let t = rgba(tint);
+        color = [color[0] * t[0], color[1] * t[1], color[2] * t[2], color[3] * t[3]];
+        self.with_batch(|b| {
+            b.push_quad_corners_3d(
+                [
+                    [0.0, 0.0, 0.0],
+                    [aw, 0.0, 0.0],
+                    [aw, ah, 0.0],
+                    [0.0, ah, 0.0],
+                ],
+                [[uv[0], uv[1]], [uv[2], uv[1]], [uv[2], uv[3]], [uv[0], uv[3]]],
+                color,
+                Some(&src.texture),
+            );
+        });
+    }
+    /// 显式矩阵画面（**非会话状态机形态**——矩阵全权承载放置，不复合
+    /// 会话 transform；绑定层 PySurface 离屏对离屏贴图用）。源自动 flush。
+    fn draw_surface_tf(&self, src: &Surface, mat: Mat4, tint: Option<[f32; 4]>) {
+        src.flush();
+        let (sw, sh) = src.size32();
+        let mut color = src.blit_tint();
+        if let Some(t) = tint {
+            color = [color[0] * t[0], color[1] * t[1], color[2] * t[2], color[3] * t[3]];
+        }
+        let corner = |x: f32, y: f32| {
+            let p = mat.transform_point3(glam::Vec3::new(x, y, 0.0));
+            [p.x, p.y, p.z]
+        };
+        self.with_batch(|b| {
+            b.push_quad_corners_3d(
+                [corner(0.0, 0.0), corner(sw, 0.0), corner(sw, sh), corner(0.0, sh)],
+                [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+                color,
+                Some(&src.texture),
+            );
         });
     }
     /// 点集直入 batch（topo 任选；z=0、uv 取中心、统一色）——过程式
@@ -180,6 +192,12 @@ pub trait DrawTarget {
     /// batch 级绘制入口（`draw::*` / 自定义图元的执行通道；
     /// Screen 实现内含首帧自动 begin）
     fn with_batch(&self, f: impl FnOnce(&mut Batch));
+
+    /// 当前会话变换矩阵（调用方组合用：`model() × local` 的便捷入口；
+    /// 默认 = 恒等——各实现转发 batch 状态）
+    fn model(&self) -> Mat4 {
+        Mat4::IDENTITY
+    }
 }
 
 /// 相机 rig：uniform 缓冲 + bind group + 当前 MVP（**全局唯一**——
@@ -917,19 +935,32 @@ impl DrawTarget for Screen {
         // pack 时统一过呈现映射（正交(物理) × 平移 × 缩放），故必须
         // 用逻辑尺寸：桌面逻辑==物理恒等不受影响；Android 窗口化
         // 逻辑<物理，用物理尺寸会把 letterbox 右/下黑边一起涂成
-        // 画布色（真机实测：黑边只剩左侧半条）
+        // 画布色（真机实测：黑边只剩左侧半条）。
+        // **恒用 Auto 兜底段**（盖满语义不受会话相机影响——保存/恢复）
         let (w, h) = self.logical_size();
         self.with_batch(|b| {
+            let saved = b.mvp_snapshot();
+            b.reset_mvp();
             b.push_quad(0.0, 0.0, w as f32, h as f32, rgba(color), None);
+            b.set_mvp(saved);
         });
     }
 
-    fn blit(&self, src: &Surface, dest: impl Into<Coord>) {
-        let (x, y) = dest.into();
-        let (sw, sh) = src.size32();
+    fn draw_surface(&self, src: &Surface) {
         src.flush();
+        let (sw, sh) = src.size32();
         self.with_batch(|b| {
-            b.push_quad(x as f32, y as f32, sw, sh, src.blit_tint(), Some(&src.texture));
+            b.push_quad_corners_3d(
+                [
+                    [0.0, 0.0, 0.0],
+                    [sw, 0.0, 0.0],
+                    [sw, sh, 0.0],
+                    [0.0, sh, 0.0],
+                ],
+                [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+                src.blit_tint(),
+                Some(&src.texture),
+            );
         });
     }
 
@@ -940,6 +971,12 @@ impl DrawTarget for Screen {
     fn with_batch(&self, f: impl FnOnce(&mut Batch)) {
         // 显式走 inherent 方法（含 ensure_begun 的首帧自动 begin）
         Screen::with_batch(self, f);
+    }
+
+    fn model(&self) -> Mat4 {
+        let mut out = Mat4::IDENTITY;
+        self.with_batch(|b| out = b.model());
+        out
     }
 }
 
@@ -976,11 +1013,35 @@ enum PassKind<'a> {
 
 impl<'a> RenderPass<'a> {
     fn screen(target: &'a Screen, depth: bool) -> Self {
-        Self { kind: PassKind::Screen(target), depth }
+        let p = Self { kind: PassKind::Screen(target), depth };
+        p.reset_draw_state();
+        p
     }
 
     fn surface(target: &'a Surface, depth: bool) -> Self {
-        Self { kind: PassKind::Surface(target), depth }
+        let p = Self { kind: PassKind::Surface(target), depth };
+        p.reset_draw_state();
+        p
+    }
+
+    /// 会话开始重置绘制状态（Auto 兜底相机 + 恒等变换——新会话新状态，
+    /// 不残留上一会话的 set_camera/set_transform）
+    fn reset_draw_state(&self) {
+        match &self.kind {
+            PassKind::Screen(s) => s.with_batch(|b| {
+                b.reset_mvp();
+                b.reset_model();
+            }),
+            PassKind::Surface(s) => s.with_batch(|b| {
+                b.reset_mvp();
+                b.reset_model();
+            }),
+            PassKind::Mrt { batch, .. } => {
+                let mut b = batch.borrow_mut();
+                b.reset_mvp();
+                b.reset_model();
+            }
+        }
     }
 
     /// 显式完成指令打包（按值消费——结束后不可再画，类型级保证）
@@ -1034,10 +1095,31 @@ impl<'a> RenderPass<'a> {
         batch.borrow_mut().clear();
     }
 
-    /// 替换相机（**全局语义**——转发 [`super::set_default_camera`]：所有后续
-    /// 渲染生效直到 `reset_camera`；三形态（Screen/Surface/MRT）无差别）
-    pub fn set_default_camera(&self, camera: &Camera) {
-        set_default_camera(camera);
+    // ── 绘制状态机（渲染统一 draw 面：per-draw 相机/变换）──────────
+    //
+    // 会话级状态——每目标（Screen/Surface/MRT）独立持有，互不串线；
+    // 旧全局 `set_default_camera`（CameraState::Manual）随此接口退役。
+
+    /// 会话相机切换（后续 push 进新段；影响本会话剩余绘制——**仅本
+    /// 会话/本目标**，其他会话与其他目标不受影响）
+    pub fn set_camera(&self, camera: &Camera) {
+        self.with_batch(|b| b.set_mvp(Some(camera.mvp())));
+    }
+
+    /// 回 Auto 兜底相机（按目标尺寸现算——resize 天然跟随）
+    pub fn reset_camera(&self) {
+        self.with_batch(|b| b.reset_mvp());
+    }
+
+    /// 会话变换（后续 push 的顶点 CPU 烘此矩阵——位置/旋转/缩放/3D
+    /// 放置统一入口）
+    pub fn set_transform(&self, model: Mat4) {
+        self.with_batch(|b| b.set_model(model));
+    }
+
+    /// 回恒等变换
+    pub fn reset_transform(&self) {
+        self.with_batch(|b| b.reset_model());
     }
 
     /// 会话级延迟叠加（**通用客人直绘的会话形态**，2026-10-24——"画到
@@ -1086,9 +1168,16 @@ impl<'a> RenderPass<'a> {
         DrawTarget::fill(self, color)
     }
 
-    /// blit（= [`DrawTarget::blit`]）
-    pub fn blit(&self, src: &Surface, dest: impl Into<Coord>) {
-        DrawTarget::blit(self, src, dest)
+    /// 画离屏面（= [`DrawTarget::draw_surface`]）
+    pub fn draw_surface(&self, src: &Surface) {
+        DrawTarget::draw_surface(self, src)
+    }
+
+    /// 当前会话变换矩阵（调用方组合用：`model() × local` 的便捷入口）
+    pub fn model(&self) -> Mat4 {
+        let mut out = Mat4::IDENTITY;
+        self.with_batch(|b| out = b.model());
+        out
     }
 }
 
@@ -1105,23 +1194,38 @@ impl DrawTarget for RenderPass<'_> {
             PassKind::Surface(s) => s.fill(color),
             PassKind::Mrt { .. } => {
                 // MRT：全部绘制走会话自己的 batch（一次 pass 写所有目标）——
-                // 不可绕道各 Surface 的 fill（各自 batch 会被后续 blit 的
-                // 自动 flush 二次提交，覆盖 MRT pass 输出，批次十五实测）
+                // 不可绕道各 Surface 的 fill（各自 batch 会被后续 draw_surface
+                // 的自动 flush 二次提交，覆盖 MRT pass 输出，批次十五实测）。
+                // 恒默认段（盖满语义）
                 let (w, h) = (self.size().0 as f32, self.size().1 as f32);
-                self.with_batch(|b| b.push_quad(0.0, 0.0, w, h, rgba(color), None));
+                self.with_batch(|b| {
+                    let saved = b.mvp_snapshot();
+                    b.reset_mvp();
+                    b.push_quad(0.0, 0.0, w, h, rgba(color), None);
+                    b.set_mvp(saved);
+                });
             }
         }
     }
-    fn blit(&self, src: &Surface, dest: impl Into<Coord>) {
-        let d: Coord = dest.into();
+    fn draw_surface(&self, src: &Surface) {
         match &self.kind {
-            PassKind::Screen(s) => s.blit(src, d),
-            PassKind::Surface(s) => s.blit(src, d),
+            PassKind::Screen(s) => s.draw_surface(src),
+            PassKind::Surface(s) => s.draw_surface(src),
             PassKind::Mrt { .. } => {
                 src.flush();
                 let (sw, sh) = src.size32();
                 self.with_batch(|b| {
-                    b.push_quad(d.0 as f32, d.1 as f32, sw, sh, src.blit_tint(), Some(&src.texture));
+                    b.push_quad_corners_3d(
+                        [
+                            [0.0, 0.0, 0.0],
+                            [sw, 0.0, 0.0],
+                            [sw, sh, 0.0],
+                            [0.0, sh, 0.0],
+                        ],
+                        [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+                        src.blit_tint(),
+                        Some(&src.texture),
+                    );
                 });
             }
         }
@@ -1139,6 +1243,12 @@ impl DrawTarget for RenderPass<'_> {
             PassKind::Surface(s) => s.with_batch(f),
             PassKind::Mrt { batch, .. } => f(&mut batch.borrow_mut()),
         }
+    }
+
+    fn model(&self) -> Mat4 {
+        let mut out = Mat4::IDENTITY;
+        self.with_batch(|b| out = b.model());
+        out
     }
 }
 
@@ -1249,7 +1359,7 @@ impl Surface {
     }
 
     /// blit 顶点色（白 × 表面 alpha）
-    pub(crate) fn blit_tint(&self) -> [f32; 4] {
+    pub fn blit_tint(&self) -> [f32; 4] {
         [1.0, 1.0, 1.0, self.alpha.get() as f32 / 255.0]
     }
 
@@ -1430,6 +1540,13 @@ impl Surface {
         f(&mut self.batch.borrow_mut());
     }
 
+    /// 当前变换矩阵（调用方组合用：`model() × local` 的便捷入口）
+    pub fn model(&self) -> Mat4 {
+        let mut out = Mat4::IDENTITY;
+        self.with_batch(|b| out = b.model());
+        out
+    }
+
     // ── 固有形态（教程代码免 trait 导入）──
 
     // /// 填充（= [`DrawTarget::fill`]）
@@ -1442,7 +1559,7 @@ impl Surface {
     //     DrawTarget::blit(self, src, dest)
     // }
 
-    pub(crate) fn size32(&self) -> (f32, f32) {
+    pub fn size32(&self) -> (f32, f32) {
         (self.size.0 as f32, self.size.1 as f32)
     }
 
@@ -1456,16 +1573,30 @@ impl Surface {
 impl DrawTarget for Surface {
     fn fill(&self, color: impl Into<Color>) {
         let (w, h) = self.size32();
-        self.with_batch(|b| b.push_quad(0.0, 0.0, w, h, rgba(color), None));
+        self.with_batch(|b| {
+            let saved = b.mvp_snapshot();
+            b.reset_mvp();
+            b.push_quad(0.0, 0.0, w, h, rgba(color), None);
+            b.set_mvp(saved);
+        });
     }
 
-    fn blit(&self, src: &Surface, dest: impl Into<Coord>) {
+    fn draw_surface(&self, src: &Surface) {
         self.assert_not_self(src);
-        let (x, y) = dest.into();
-        let (sw, sh) = src.size32();
         src.flush();
+        let (sw, sh) = src.size32();
         self.with_batch(|b| {
-            b.push_quad(x as f32, y as f32, sw, sh, src.blit_tint(), Some(&src.texture));
+            b.push_quad_corners_3d(
+                [
+                    [0.0, 0.0, 0.0],
+                    [sw, 0.0, 0.0],
+                    [sw, sh, 0.0],
+                    [0.0, sh, 0.0],
+                ],
+                [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+                src.blit_tint(),
+                Some(&src.texture),
+            );
         });
     }
 
@@ -1475,6 +1606,12 @@ impl DrawTarget for Surface {
 
     fn with_batch(&self, f: impl FnOnce(&mut Batch)) {
         Surface::with_batch(self, f);
+    }
+
+    fn model(&self) -> Mat4 {
+        let mut out = Mat4::IDENTITY;
+        self.with_batch(|b| out = b.model());
+        out
     }
 }
 

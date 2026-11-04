@@ -1,7 +1,8 @@
 //! pygame::render::Camera —— MVP 组装（契约 ADR-4：唯一抽象，camera 即 MVP）
 //!
-//! 单一通用管线的变换源：2D = 正交（像素坐标 y 向下），3D = 透视（y 向上、
-//! 右手系、wgpu 零一深度）。`mvp()` 是唯一上传的变换量——用户不手写矩阵。
+//! 单一通用管线的变换源：2D = 正交（**中心原点、y 向上**——wgpu NDC
+//! 同向，与 3D 透视/物理米制系三方同构），3D = 透视（y 向上、右手系、
+//! wgpu 零一深度）。`mvp()` 是唯一上传的变换量——用户不手写矩阵。
 
 use glam::Mat4;
 use glam::camera::rh::proj::directx as proj;
@@ -14,19 +15,20 @@ pub struct Camera {
 }
 
 impl Camera {
-    /// 2D 正交相机：像素坐标直入——`(0,0)` 左上、`(w,h)` 右下（y 向下，
-    /// ADR-8 对齐 pygame）；深度关闭（画家算法按提交序）
+    /// 2D 正交相机：**中心原点**——`(0,0)` 屏幕中心、x 右 y 上（wgpu NDC
+    /// 同向；与 3D 透视/物理米制系三方同构）。视野 = 整个目标
+    /// （`(-w/2, -h/2)` 左下 .. `(w/2, h/2)` 右上）；深度关闭（画家算法
+    /// 按提交序）
     pub fn ortho(width: f32, height: f32) -> Self {
+        let (w, h) = (width.max(1.0) * 0.5, height.max(1.0) * 0.5);
         Self {
             view: Mat4::IDENTITY,
-            // y 轴翻转：bottom=height / top=0（directx = wgpu 0..1 深度约定；
-            // 本管线深度关闭，z 映射不参与）
-            projection: proj::orthographic(0.0, width, height, 0.0, 0.0, 1.0),
+            projection: proj::orthographic(-w, w, -h, h, 0.0, 1.0),
         }
     }
 
-    /// 3D 透视相机（v2 内容先行铺路）：fov 度数制（y 向视野）、右手系、
-    /// 相机看向 -Z；位姿用 [`Self::with_view`] 施加
+    /// 3D 透视相机：fov 度数制（y 向视野）、右手系、相机看向 -Z；
+    /// 位姿用 [`Self::with_view`] 施加
     pub fn perspective(fov_y_degrees: f32, aspect: f32, near: f32, far: f32) -> Self {
         Self {
             view: Mat4::IDENTITY,
@@ -46,34 +48,31 @@ impl Camera {
     }
 }
 
-/// 全局相机状态机（相机全局化定约：Screen/Surface 无相机字段，
-/// 全局唯一 rig 按状态解 MVP——`set_default_camera` 进 Manual，`reset_camera`
-/// 回 Auto；Auto 状态随目标尺寸隐式跟随，零配置）
+/// 默认相机种类（Auto 兜底形态——`init(dim=3)` 定型；**会话级
+/// `set_camera` 的语义取代旧全局 Manual override**——每会话自持，
+/// 互不串线）
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum CameraState {
-    /// 自动 2D（默认）：按各目标自身尺寸正交——像素坐标直入
+pub enum CameraKind {
+    /// 自动 2D（默认）：按各目标自身尺寸正交——中心原点像素坐标直入
     Auto2d,
     /// 自动 3D（`init(dim=3)` 定型）：按目标宽高比透视 × identity 视图
-    ///（fov 度数制；位姿经 `set_default_camera` 手动接管）
+    ///（fov 度数制）
     Auto3d {
         fov_deg: f32,
         near: f32,
         far: f32,
     },
-    /// 手动：`set_default_camera` 全局 override（与目标尺寸无关）
-    Manual(Camera),
 }
 
-impl CameraState {
-    /// 按目标尺寸解出 MVP（Manual 与尺寸无关；Auto 隐式跟随目标）
+impl CameraKind {
+    /// 按目标尺寸解出 MVP（Auto 隐式跟随目标）
     pub fn resolve_mvp(&self, size: (f32, f32)) -> Mat4 {
         match self {
-            CameraState::Auto2d => Camera::ortho(size.0.max(1.0), size.1.max(1.0)).mvp(),
-            CameraState::Auto3d { fov_deg, near, far } => {
+            CameraKind::Auto2d => Camera::ortho(size.0.max(1.0), size.1.max(1.0)).mvp(),
+            CameraKind::Auto3d { fov_deg, near, far } => {
                 let aspect = (size.0 / size.1.max(1.0)).max(1e-4);
                 Camera::perspective(*fov_deg, aspect, *near, *far).mvp()
             }
-            CameraState::Manual(camera) => camera.mvp(),
         }
     }
 }
@@ -89,16 +88,16 @@ mod tests {
     }
 
     #[test]
-    fn ortho_maps_pixels_to_ndc_y_down() {
+    fn ortho_maps_center_origin_y_up() {
         let m = Camera::ortho(800.0, 600.0).mvp();
-        // 左上 (0,0) → NDC (-1, +1)；右下 (w,h) → (+1, -1)——y 向下
+        // 中心 (0,0) → NDC (0,0)；右上角 (+w/2, +h/2) → (+1, +1)——y 向上
         let (x, y) = ndc(m, 0.0, 0.0);
-        assert!((x + 1.0).abs() < 1e-5 && (y - 1.0).abs() < 1e-5);
-        let (x, y) = ndc(m, 800.0, 600.0);
-        assert!((x - 1.0).abs() < 1e-5 && (y + 1.0).abs() < 1e-5);
-        // 中心 → 原点
-        let (x, y) = ndc(m, 400.0, 300.0);
         assert!(x.abs() < 1e-5 && y.abs() < 1e-5);
+        let (x, y) = ndc(m, 400.0, 300.0);
+        assert!((x - 1.0).abs() < 1e-5 && (y - 1.0).abs() < 1e-5);
+        // 左下 (-w/2, -h/2) → (-1, -1)
+        let (x, y) = ndc(m, -400.0, -300.0);
+        assert!((x + 1.0).abs() < 1e-5 && (y + 1.0).abs() < 1e-5);
     }
 
     #[test]
