@@ -858,13 +858,14 @@ impl OverlayCtx {
             uv: [u, t],
             color: tint,
         };
+        let (hw, hh) = (sw * 0.5, sh * 0.5);
         let verts = [
-            v(0.0, 0.0, 0.0, 0.0),
-            v(sw, 0.0, 1.0, 0.0),
-            v(sw, sh, 1.0, 1.0),
-            v(0.0, 0.0, 0.0, 0.0),
-            v(sw, sh, 1.0, 1.0),
-            v(0.0, sh, 0.0, 1.0),
+            v(-hw, -hh, 0.0, 0.0),
+            v(hw, -hh, 1.0, 0.0),
+            v(hw, hh, 1.0, 1.0),
+            v(-hw, -hh, 0.0, 0.0),
+            v(hw, hh, 1.0, 1.0),
+            v(-hw, hh, 0.0, 1.0),
         ];
         let vbo = self.gpu.device.create_buffer_init(
             &wgpu::util::BufferInitDescriptor {
@@ -941,7 +942,7 @@ impl DrawTarget for Screen {
         self.with_batch(|b| {
             let saved = b.mvp_snapshot();
             b.reset_mvp();
-            b.push_quad(0.0, 0.0, w as f32, h as f32, rgba(color), None);
+            b.push_quad(-(w as f32) / 2.0, -(h as f32) / 2.0, w as f32, h as f32, rgba(color), None);
             b.set_mvp(saved);
         });
     }
@@ -1201,7 +1202,7 @@ impl DrawTarget for RenderPass<'_> {
                 self.with_batch(|b| {
                     let saved = b.mvp_snapshot();
                     b.reset_mvp();
-                    b.push_quad(0.0, 0.0, w, h, rgba(color), None);
+                    b.push_quad(-w / 2.0, -h / 2.0, w, h, rgba(color), None);
                     b.set_mvp(saved);
                 });
             }
@@ -1576,7 +1577,7 @@ impl DrawTarget for Surface {
         self.with_batch(|b| {
             let saved = b.mvp_snapshot();
             b.reset_mvp();
-            b.push_quad(0.0, 0.0, w, h, rgba(color), None);
+            b.push_quad(-w / 2.0, -h / 2.0, w, h, rgba(color), None);
             b.set_mvp(saved);
         });
     }
