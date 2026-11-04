@@ -290,7 +290,7 @@ impl Batch {
     ) {
         let v = |px: f32, py: f32, u: f32, t: f32| SpriteVertex {
             pos: [px, py, 0.0],
-            uv: [u, t],
+            uv: [u, 1.0 - t], // v 翻：y up 世界 BL 角配纹理底（调用方 uv = 旧 TL 序）
             color,
         };
         let (x1, y1) = (x + w, y + h);
@@ -334,7 +334,7 @@ impl Batch {
     ) {
         let v = |p: [f32; 3], t: [f32; 2]| SpriteVertex {
             pos: self.bake(p[0], p[1], p[2]),
-            uv: t,
+            uv: [t[0], 1.0 - t[1]], // v 翻：y up 世界 BL 角配纹理底（调用方 uv = 旧 TL 序）
             color,
         };
         let [c0, c1, c2, c3] = corners;
@@ -596,7 +596,7 @@ mod batch_tests {
     fn quad_verts(x: f32, y: f32) -> [SpriteVertex; 6] {
         let vx = |px: f32, py: f32, u: f32, t: f32| SpriteVertex {
             pos: [px, py, 0.0],
-            uv: [u, t],
+            uv: [u, 1.0 - t], // v 翻后语义（与 push_quad 内翻一致）
             color: WHITE,
         };
         [

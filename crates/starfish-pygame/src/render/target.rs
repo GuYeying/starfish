@@ -855,7 +855,7 @@ impl OverlayCtx {
             .build(Some("overlay_camera_bind"));
         let v = |x: f32, y: f32, u: f32, t: f32| SpriteVertex {
             pos: [x, y, 0.0],
-            uv: [u, t],
+            uv: [u, 1.0 - t], // v 翻：egui 中间面（NDC y down 内容）合成到 y up 世界
             color: tint,
         };
         let (hw, hh) = (sw * 0.5, sh * 0.5);

@@ -107,8 +107,16 @@ fn warped(
 /// 2026-10-12 transform 套件像素取证暴露：六个变换产物全透明）
 fn warped_corners(out: &Surface, s: &Surface, corners: [[f32; 2]; 4], uvs: [[f32; 2]; 4]) {
     s.flush();
+    // 输出面坐标正交化：像素域 (0,0) 左上（y 向下旧语义）→ 中心原点 y 向上
+    let (ow, oh) = out.size32();
+    let centered: [[f32; 2]; 4] = corners
+        .iter()
+        .map(|p| [p[0] - ow / 2.0, oh / 2.0 - p[1]])
+        .collect::<Vec<_>>()
+        .try_into()
+        .expect("四角四元素");
     let f = out.render();
-    f.with_batch(|b| b.push_quad_corners(corners, uvs, [1.0; 4], Some(s.texture())));
+    f.with_batch(|b| b.push_quad_corners(centered, uvs, [1.0; 4], Some(s.texture())));
     f.end(); // Surface 会话：打包 = 提交
 }
 
