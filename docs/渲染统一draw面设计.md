@@ -80,14 +80,16 @@
 
 ### 2.5 坐标系正交化（camera.rs）
 
-- `Camera::ortho` 去 y 翻转：`orthographic(0.0, width, 0.0, height,
-  0.0, 1.0)`——y 向上、原点左下（wgpu NDC 同向，与 physics 米制系
-  方向一致）
-- **联动翻 y 的位置**（泵层一次翻转，语义保持"屏幕坐标"）：
+- `Camera::ortho` 重定义：`orthographic(-w/2, w/2, -h/2, h/2, 0, 1)`
+  ——**y 向上、原点在屏幕中心**（wgpu NDC 同向；与 3D 透视相机
+  看向原点、`pygame_physics` 米制系"原点在视口中心"**三方同构**，
+  2D/3D/物理一个坐标系，调试线直接对齐）
+- **联动换算的坐标**（泵层一次换算，语义 = 中心系屏幕坐标）：
   - `mouse::get_pos` / `set_pos`、`touch` 的 x/y、`Event.x/y`
-    ——OS 事件 y 向下，泵层翻成 y 向上（`y = height - y`）
-  - 现有 2D 脚本/教程/demo 的 y 全翻（demo 重写覆盖）
-- letterbox `fit_ndc` 不动（对 y 翻转不敏感——上下对称）
+    ——OS 事件左上原点 y 向下，泵层换算
+    （`x - w/2`、`h/2 - y`）
+  - 现有 2D 脚本/教程/demo 坐标全改中心系（demo 重写覆盖）
+- letterbox `fit_ndc` 不动（对称变换，原点无关）
 
 ### 2.6 绑定层（pygame-rs src/rpy/pygame/）
 
@@ -121,6 +123,6 @@
 - 同一 `with screen.render():` 块内：set_camera(ortho) 画球 +
   set_camera(perspective) 画球，同屏双投影 ✓
 - `draw_surface(文字, transform)` 深度会话内进 3D 世界（游戏内 id）✓
-- 2D 坐标 y 向上（(0,0) 左下）；鼠标事件 y 与绘制一致 ✓
+- 2D 坐标 y 向上、原点屏幕中心（与 3D/物理同构）；鼠标事件与绘制一致 ✓
 - 现有 gfxdraw 图元不 set_camera 时 Auto2d 兜底，行为仅 y 向翻转 ✓
 - wasm 构建 + 桌面 0 错误 ✓
