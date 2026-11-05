@@ -344,8 +344,8 @@ impl Batch {
         texture: Option<&Texture>,
     ) {
         let v = |p: [f32; 3], t: [f32; 2]| SpriteVertex {
-            pos: self.bake(p[0], p[1], p[2]),
-            uv: [t[0], 1.0 - t[1]], // v 翻：y up 世界 BL 角配纹理底（调用方 uv = 旧 TL 序）
+            pos: p, // 不在这里烘——push_vertices 统一 bake（双烘 = 矩阵平方 = 镜像抵消/旋转加倍 bug）
+            uv: [t[0], 1.0 - t[1]], // v 翻：y up 世界 BL 角配纹理底
             color,
         };
         let [c0, c1, c2, c3] = corners;
