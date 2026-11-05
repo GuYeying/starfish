@@ -67,14 +67,14 @@ pub trait DrawTarget {
     /// 默认管线 cull=none——镜像矩阵（det<0）绕序天然安全。
     fn draw_surface(&self, src: &Surface) {
         src.flush();
-        let (sw, sh) = src.size32();
+        let (hw, hh) = (src.size32().0 * 0.5, src.size32().1 * 0.5);
         self.with_batch(|b| {
             b.push_quad_corners_3d(
                 [
-                    [0.0, 0.0, 0.0],
-                    [sw, 0.0, 0.0],
-                    [sw, sh, 0.0],
-                    [0.0, sh, 0.0],
+                    [-hw, -hh, 0.0],
+                    [hw, -hh, 0.0],
+                    [hw, hh, 0.0],
+                    [-hw, hh, 0.0],
                 ],
                 [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
                 src.blit_tint(),
@@ -85,10 +85,10 @@ pub trait DrawTarget {
     /// 中心锚画面（便利口：quad 中心对位 `center`——旋转帧等"中心对位"
     /// 场景的正典；仍按会话 transform 复合变换）
     fn draw_surface_centered(&self, src: &Surface, center: (f32, f32)) {
+        // 中心锚后 draw_surface 本身就是中心对位的——只需额外平移到 center
         src.flush();
-        let (sw, sh) = src.size32();
+        let (hw, hh) = (src.size32().0 * 0.5, src.size32().1 * 0.5);
         let (cx, cy) = center;
-        let (hw, hh) = (sw * 0.5, sh * 0.5);
         self.with_batch(|b| {
             b.push_quad_corners_3d(
                 [
@@ -109,16 +109,17 @@ pub trait DrawTarget {
         src.flush();
         let (sw, sh) = src.size32();
         let (aw, ah) = ((uv[2] - uv[0]) * sw, (uv[3] - uv[1]) * sh);
+        let (hw, hh) = (aw * 0.5, ah * 0.5);
         let mut color = src.blit_tint();
         let t = rgba(tint);
         color = [color[0] * t[0], color[1] * t[1], color[2] * t[2], color[3] * t[3]];
         self.with_batch(|b| {
             b.push_quad_corners_3d(
                 [
-                    [0.0, 0.0, 0.0],
-                    [aw, 0.0, 0.0],
-                    [aw, ah, 0.0],
-                    [0.0, ah, 0.0],
+                    [-hw, -hh, 0.0],
+                    [hw, -hh, 0.0],
+                    [hw, hh, 0.0],
+                    [-hw, hh, 0.0],
                 ],
                 [[uv[0], uv[1]], [uv[2], uv[1]], [uv[2], uv[3]], [uv[0], uv[3]]],
                 color,
@@ -131,6 +132,7 @@ pub trait DrawTarget {
     fn draw_surface_tf(&self, src: &Surface, mat: Mat4, tint: Option<[f32; 4]>) {
         src.flush();
         let (sw, sh) = src.size32();
+        let (hw, hh) = (sw * 0.5, sh * 0.5);
         let mut color = src.blit_tint();
         if let Some(t) = tint {
             color = [color[0] * t[0], color[1] * t[1], color[2] * t[2], color[3] * t[3]];
@@ -141,7 +143,7 @@ pub trait DrawTarget {
         };
         self.with_batch(|b| {
             b.push_quad_corners_3d(
-                [corner(0.0, 0.0), corner(sw, 0.0), corner(sw, sh), corner(0.0, sh)],
+                [corner(-hw, -hh), corner(hw, -hh), corner(hw, hh), corner(-hw, hh)],
                 [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
                 color,
                 Some(&src.texture),
@@ -973,10 +975,10 @@ impl DrawTarget for Screen {
         self.with_batch(|b| {
             b.push_quad_corners_3d(
                 [
-                    [0.0, 0.0, 0.0],
-                    [sw, 0.0, 0.0],
-                    [sw, sh, 0.0],
-                    [0.0, sh, 0.0],
+                    [-sw / 2.0, -sh / 2.0, 0.0],
+                    [sw / 2.0, -sh / 2.0, 0.0],
+                    [sw / 2.0, sh / 2.0, 0.0],
+                    [-sw / 2.0, sh / 2.0, 0.0],
                 ],
                 [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
                 src.blit_tint(),
@@ -1238,10 +1240,10 @@ impl DrawTarget for RenderPass<'_> {
                 self.with_batch(|b| {
                     b.push_quad_corners_3d(
                         [
-                            [0.0, 0.0, 0.0],
-                            [sw, 0.0, 0.0],
-                            [sw, sh, 0.0],
-                            [0.0, sh, 0.0],
+                            [-sw / 2.0, -sh / 2.0, 0.0],
+                            [sw / 2.0, -sh / 2.0, 0.0],
+                            [sw / 2.0, sh / 2.0, 0.0],
+                            [-sw / 2.0, sh / 2.0, 0.0],
                         ],
                         [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
                         src.blit_tint(),
@@ -1609,10 +1611,10 @@ impl DrawTarget for Surface {
         self.with_batch(|b| {
             b.push_quad_corners_3d(
                 [
-                    [0.0, 0.0, 0.0],
-                    [sw, 0.0, 0.0],
-                    [sw, sh, 0.0],
-                    [0.0, sh, 0.0],
+                    [-sw / 2.0, -sh / 2.0, 0.0],
+                    [sw / 2.0, -sh / 2.0, 0.0],
+                    [sw / 2.0, sh / 2.0, 0.0],
+                    [-sw / 2.0, sh / 2.0, 0.0],
                 ],
                 [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
                 src.blit_tint(),
