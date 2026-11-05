@@ -248,6 +248,77 @@ pub fn smootherstep(e0: f32, e1: f32, x: f32) -> f32 {
     t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
 }
 
+// ── 视锥剔除（starfish 扩展；CPU 烘批架构的天然主场）───────────────
+
+/// 视锥（六归一化平面，Gribb-Hartmann 行提取）。
+///
+/// 平面定约 `[nx, ny, nz, d]`：signed distance = n·p + d，≥ 0 在内侧。
+/// **保守语义**：只把"确定在外"判负——跨界/相切物体一律放行，零误剔
+/// （渲染剔除的 安全方向：漏剔多画一帧，误剔物体凭空消失）。
+#[derive(Clone, Copy, Debug)]
+pub struct Frustum {
+    planes: [[f32; 4]; 6],
+}
+
+impl Frustum {
+    /// VP（或 MVP——模型空间剔除）→ 六平面（列主存储下行组合：
+    /// `row3 ± row_i` 归一化）。
+    ///
+    /// letterbox 注意：呈现拟合（fit_ndc）未乘的裸 VP 给出**包含**可见
+    /// 区域的超集视锥——剔除安全方向；要精确画布子矩形传 `fit × VP`。
+    pub fn from_mvp(m: &Mat4) -> Self {
+        let row = |i: usize| -> Vector4 {
+            Vector4::new(m.x_axis[i], m.y_axis[i], m.z_axis[i], m.w_axis[i])
+        };
+        let (r0, r1, r2, r3) = (row(0), row(1), row(2), row(3));
+        let mk = |p: Vector4| -> [f32; 4] {
+            let len = p.truncate().length();
+            if len <= f32::EPSILON {
+                return [p.x, p.y, p.z, p.w];
+            }
+            [p.x / len, p.y / len, p.z / len, p.w / len]
+        };
+        Self {
+            planes: [
+                mk(r3 + r0), // left
+                mk(r3 - r0), // right
+                mk(r3 + r1), // bottom
+                mk(r3 - r1), // top
+                mk(r3 + r2), // near
+                mk(r3 - r2), // far
+            ],
+        }
+    }
+
+    /// 点在视锥内（含边界）。
+    pub fn contains_point(&self, p: [f32; 3]) -> bool {
+        self.planes
+            .iter()
+            .all(|pl| pl[0] * p[0] + pl[1] * p[1] + pl[2] * p[2] + pl[3] >= 0.0)
+    }
+
+    /// 球与视锥相交（跨界球放行——保守；`r ≥ 0`）。
+    pub fn intersects_sphere(&self, c: [f32; 3], r: f32) -> bool {
+        self.planes
+            .iter()
+            .all(|pl| pl[0] * c[0] + pl[1] * c[1] + pl[2] * c[2] + pl[3] >= -r)
+    }
+
+    /// AABB 与视锥相交（p-vertex 精确判外：任一平面的正顶点在外 →
+    /// 整盒在外；其余保守相交）。`min ≤ max` 分量序由调用方保证。
+    pub fn intersects_aabb(&self, min: [f32; 3], max: [f32; 3]) -> bool {
+        for pl in &self.planes {
+            let px = if pl[0] >= 0.0 { max[0] } else { min[0] };
+            let py = if pl[1] >= 0.0 { max[1] } else { min[1] };
+            let pz = if pl[2] >= 0.0 { max[2] } else { min[2] };
+            if pl[0] * px + pl[1] * py + pl[2] * pz + pl[3] < 0.0 {
+                return false;
+            }
+        }
+        true
+    }
+}
+
 // ── 测试（零平台依赖，P1 验收口径：单元测试纯逻辑）──────────────
 
 #[cfg(test)]
@@ -363,5 +434,61 @@ mod tests {
         assert!(close(smootherstep(0.0, 1.0, 0.0), 0.0));
         assert!(close(smootherstep(0.0, 1.0, 1.0), 1.0));
         assert!(close(inv_lerp(1.0, 1.0, 0.5), 0.0)); // 除零保护
+    }
+
+    #[test]
+    fn frustum_ortho_membership() {
+        // 中心原点正交（engine Camera::ortho 同构）：±400 × ±300
+        let m = Mat4::orthographic_rh_gl(-400.0, 400.0, -300.0, 300.0, 0.0, 1.0);
+        let fr = Frustum::from_mvp(&m);
+        assert!(fr.contains_point([0.0, 0.0, 0.0]));
+        assert!(fr.contains_point([399.0, 299.0, -0.5])); // 边界内侧
+        assert!(!fr.contains_point([401.0, 0.0, 0.0])); // 右外
+        assert!(!fr.contains_point([0.0, -301.0, 0.0])); // 下外
+        assert!(!fr.contains_point([0.0, 0.0, -2.0])); // 远外（f=1）
+    }
+
+    #[test]
+    fn frustum_perspective_membership() {
+        // 右手系看向 -Z：前方在内、背后/超远在外
+        let m = Mat4::perspective_rh(45f32.to_radians(), 4.0 / 3.0, 0.1, 100.0);
+        let fr = Frustum::from_mvp(&m);
+        assert!(fr.contains_point([0.0, 0.0, -5.0]));
+        assert!(!fr.contains_point([0.0, 0.0, 5.0])); // 背后（near 外）
+        assert!(!fr.contains_point([0.0, 0.0, -200.0])); // 超远
+        // fov45 / z=-5：半高 ≈2.07 半宽 ≈2.76——边缘点夹缝判定
+        assert!(fr.contains_point([2.5, 1.9, -5.0]));
+        assert!(!fr.contains_point([3.5, 0.0, -5.0]));
+    }
+
+    #[test]
+    fn frustum_sphere_straddle_passes() {
+        let m = Mat4::orthographic_rh_gl(-400.0, 400.0, -300.0, 300.0, 0.0, 1.0);
+        let fr = Frustum::from_mvp(&m);
+        // 球心在外 10、半径 20 → 跨界放行
+        assert!(fr.intersects_sphere([410.0, 0.0, 0.0], 20.0));
+        // 球整体在外（心在外 100、半径 5）→ 剔除
+        assert!(!fr.intersects_sphere([500.0, 0.0, 0.0], 5.0));
+        assert!(fr.intersects_sphere([0.0, 0.0, 0.0], 1.0)); // 深居
+    }
+
+    #[test]
+    fn frustum_aabb_p_vertex() {
+        let m = Mat4::orthographic_rh_gl(-400.0, 400.0, -300.0, 300.0, 0.0, 1.0);
+        let fr = Frustum::from_mvp(&m);
+        assert!(fr.intersects_aabb([-10.0, -10.0, -0.5], [10.0, 10.0, -0.6])); // 全内
+        assert!(fr.intersects_aabb([390.0, -5.0, -0.5], [410.0, 5.0, -0.6])); // 跨右界
+        assert!(!fr.intersects_aabb([500.0, -5.0, -0.5], [600.0, 5.0, -0.6])); // 全外
+        // 斜跨对角（p-vertex 与 naive 8 角点测试的分歧位：盒仅角触界）
+        assert!(fr.intersects_aabb([350.0, 250.0, -0.5], [450.0, 350.0, -0.6]));
+    }
+
+    #[test]
+    fn frustum_identity_is_ndc_cube() {
+        // VP = 恒等 → 视锥恰为 NDC 立方 [-1,1]³（数学自洽性）
+        let fr = Frustum::from_mvp(&Mat4::IDENTITY);
+        assert!(fr.contains_point([0.9, 0.9, 0.9]));
+        assert!(fr.contains_point([-1.0, 0.0, 0.0])); // 含边界
+        assert!(!fr.contains_point([1.1, 0.0, 0.0]));
     }
 }
