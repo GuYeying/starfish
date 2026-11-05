@@ -198,6 +198,7 @@ impl Batch {
 
     /// 会话级变换（后续 push 的顶点 CPU 烘此矩阵——`pos → model × pos`）
     pub fn set_model(&mut self, model: Mat4) {
+
         self.cur_model = model;
     }
 
@@ -234,6 +235,7 @@ impl Batch {
     /// model 变换一个点（收集层 CPU 烘的单点入口）
     fn bake(&self, x: f32, y: f32, z: f32) -> [f32; 3] {
         let p = self.cur_model.transform_point3(glam::Vec3::new(x, y, z));
+
         [p.x, p.y, p.z]
     }
 
