@@ -638,6 +638,7 @@ impl Screen {
             let mut ctx = EncodeCtx {
                 gpu: &self.gpu,
                 camera: &camera,
+                fit: fit_ndc, // 段级 set_camera 相机同一 letterbox（draw_stream 左乘）
                 colors: vec![ColorAttachment {
                     view,
                     load: wgpu::LoadOp::Load, // 清屏由目标层负责（begin_frame）
@@ -1111,6 +1112,7 @@ impl<'a> RenderPass<'a> {
             let mut ctx = EncodeCtx {
                 gpu,
                 camera: &camera,
+                fit: Mat4::IDENTITY, // MRT 渲染目标逻辑==物理
                 colors: targets
                     .iter()
                     .map(|t| ColorAttachment {
@@ -1551,6 +1553,7 @@ impl Surface {
             let mut ctx = EncodeCtx {
                 gpu: &self.gpu,
                 camera: &camera,
+                fit: Mat4::IDENTITY, // 离屏 Surface 逻辑==物理
                 colors: vec![ColorAttachment {
                     view: self.view.clone(),
                     load: wgpu::LoadOp::Load, // 承接已绘内容（透明底画布）

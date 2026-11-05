@@ -498,6 +498,10 @@ impl Batch {
 pub(crate) struct EncodeCtx<'a> {
     pub gpu: &'a Gpu,
     pub camera: &'a super::target::CameraRig,
+    /// 段级自定义相机（set_camera）的呈现拟合：draw_stream 统一左乘，
+    /// 与 Auto 兜底（pack 已把 fit 组合进 camera.mvp）同一 letterbox
+    /// 映射。离屏 Surface / MRT 逻辑==物理 → 恒 identity
+    pub fit: Mat4,
     /// 颜色附件（1 个 = 普通 pass；N 个 = MRT）
     pub colors: Vec<ColorAttachment>,
     /// 颜色附件格式（平行数组——管线选取用）
@@ -618,8 +622,14 @@ fn draw_stream(pass: &mut RenderPass, stream: &Stream, lines: bool, ctx: &Encode
     let binds = ctx.gpu.binds.borrow();
     for seg in &stream.segments {
         // 相机 bind 段级（渲染统一 draw 面）：None = Auto 兜底（pack 时
-        // 按目标尺寸现算的 ctx.camera.mvp）；Some = 会话 set_camera
-        let seg_bind = seg_cam_bind(ctx.gpu, seg.mvp.as_ref().unwrap_or(&ctx.camera.mvp));
+        // 按目标尺寸现算的 ctx.camera.mvp）；Some = 会话 set_camera——
+        // 统一左乘呈现拟合收进画布子矩形（相机一律按逻辑画布构造，
+        // Android 窗口化下与 Auto 同一 letterbox；桌面/离屏 fit 恒等）
+        let mvp = match &seg.mvp {
+            Some(custom) => ctx.fit * *custom,
+            None => ctx.camera.mvp,
+        };
+        let seg_bind = seg_cam_bind(ctx.gpu, &mvp);
         pass.set_bind_group(0, &seg_bind);
         match (&seg.key, &seg.view) {
             (Some(key), _) => {
