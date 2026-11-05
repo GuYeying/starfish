@@ -107,11 +107,13 @@ fn warped(
 /// 2026-10-12 transform 套件像素取证暴露：六个变换产物全透明）
 fn warped_corners(out: &Surface, s: &Surface, corners: [[f32; 2]; 4], uvs: [[f32; 2]; 4]) {
     s.flush();
-    // 输出面坐标正交化：像素域 (0,0) 左上（y 向下旧语义）→ 中心原点 y 向上
+    // 输出面坐标正交化：像素域中心平移（不翻 y——rotozoom 角序在 y-down
+    // 域的 (-h) 经简单平移后在 y-up 中心系仍为下方，与 UV 假设的
+    // [BL,BR,TR,TL] 角序自然对齐；翻 y 反而导致 [TL,TR,BR,BL] ↔ UV 错位）
     let (ow, oh) = out.size32();
     let centered: [[f32; 2]; 4] = corners
         .iter()
-        .map(|p| [p[0] - ow / 2.0, oh / 2.0 - p[1]])
+        .map(|p| [p[0] - ow / 2.0, p[1] - oh / 2.0])
         .collect::<Vec<_>>()
         .try_into()
         .expect("四角四元素");
