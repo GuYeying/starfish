@@ -220,6 +220,23 @@ pub trait DrawTarget {
     fn reset_transform(&self) {
         self.with_batch(|b| b.reset_model());
     }
+
+    /// 当前 gfxdraw 绘制色（one-shot 状态；默认紫色）
+    fn current_draw_color(&self) -> [f32; 4] {
+        let mut out = super::batch::DEFAULT_DRAW_COLOR;
+        self.with_batch(|b| out = b.cur_color);
+        out
+    }
+
+    /// 设置 gfxdraw 绘制色（one-shot——下一次图元 draw 用此色，随后重置回紫色）
+    fn set_draw_color(&self, color: [f32; 4]) {
+        self.with_batch(|b| b.set_color(color));
+    }
+
+    /// 设置线框模式（one-shot——下一次图元 draw 渲染为三角网格边线）
+    fn set_draw_wireframe(&self, enabled: bool) {
+        self.with_batch(|b| b.set_wireframe(enabled));
+    }
 }
 
 /// 相机 rig：uniform 缓冲 + bind group + 当前 MVP（**全局唯一**——

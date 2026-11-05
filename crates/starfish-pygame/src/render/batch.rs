@@ -166,7 +166,14 @@ pub struct Batch {
     lines: Stream,
     cur_mvp: Option<Mat4>,
     cur_model: Mat4,
+    /// one-shot 线框模式（true = 下一次 draw 渲染为三角网格边线）
+    pub cur_wireframe: bool,
+    /// one-shot 绘制色（gfxdraw 图元用；默认紫色，draw 后重置）
+    pub cur_color: [f32; 4],
 }
+
+/// gfxdraw 图元默认色（调试紫——开发者忘 set_color 时一眼可辨）
+pub const DEFAULT_DRAW_COLOR: [f32; 4] = [0.5, 0.0, 0.5, 1.0];
 
 impl Batch {
     pub fn new() -> Self {
@@ -175,6 +182,8 @@ impl Batch {
             lines: Stream::new(),
             cur_mvp: None,
             cur_model: Mat4::IDENTITY,
+            cur_wireframe: false,
+            cur_color: DEFAULT_DRAW_COLOR,
         }
     }
 
@@ -207,6 +216,17 @@ impl Batch {
         self.cur_model = Mat4::IDENTITY;
     }
 
+    /// one-shot 线框模式（下一次 draw 渲染为三角网格边线——呈现原始
+    /// 三角化的边，是什么形式就是什么形式）
+    pub fn set_wireframe(&mut self, enabled: bool) {
+        self.cur_wireframe = enabled;
+    }
+
+    /// one-shot 绘制色（下一次 gfxdraw 图元用此色；draw 后重置回紫色）
+    pub fn set_color(&mut self, color: [f32; 4]) {
+        self.cur_color = color;
+    }
+
     /// 当前 model 矩阵（调用方组合用：`cur_model × local` 的便捷入口）
     pub fn model(&self) -> Mat4 {
         self.cur_model
@@ -230,6 +250,8 @@ impl Batch {
     /// 级语义：一个会话一个视角，多视角靠 set_camera 分段）。
     fn end_draw(&mut self) {
         self.cur_model = Mat4::IDENTITY;
+        self.cur_wireframe = false;
+        self.cur_color = DEFAULT_DRAW_COLOR;
     }
 
     /// model 变换一个点（收集层 CPU 烘的单点入口）
@@ -257,13 +279,25 @@ impl Batch {
         vertices: &[SpriteVertex],
     ) -> std::ops::Range<u32> {
         let mvp = self.cur_mvp;
-        let baked: Vec<SpriteVertex> = vertices
+        let mut baked: Vec<SpriteVertex> = vertices
             .iter()
             .map(|v| {
                 let p = self.bake(v.pos[0], v.pos[1], v.pos[2]);
                 SpriteVertex { pos: p, ..*v }
             })
             .collect();
+        // one-shot 线框：三角形 → 三条边（6 顶点入线流）
+        if self.cur_wireframe && topo == BatchTopology::Triangles {
+            let mut edges: Vec<SpriteVertex> = Vec::with_capacity(baked.len() * 2);
+            for tri in baked.chunks(3) {
+                if tri.len() == 3 {
+                    edges.push(tri[0]); edges.push(tri[1]);
+                    edges.push(tri[1]); edges.push(tri[2]);
+                    edges.push(tri[2]); edges.push(tri[0]);
+                }
+            }
+            return self.lines.push(texture, mvp, edges);
+        }
         match topo {
             BatchTopology::Triangles => self.tris.push(texture, mvp, baked),
             BatchTopology::Lines => self.lines.push(texture, mvp, baked),

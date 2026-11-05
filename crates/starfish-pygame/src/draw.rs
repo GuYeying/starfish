@@ -1,6 +1,7 @@
 //! pygame.draw 对应物（契约 §七：接受任何绘制终点；即时语义、batch 执行）
 //!
-//! 签名 = `fn(t: &impl DrawTarget, color, …, width: u32)`——**无返回值**
+//! 签名 = `fn(t: &impl DrawTarget, …, width: u32)`——**无返回值、无色参**
+//! （颜色经 Batch 状态机 `set_color`/`set_wireframe` one-shot 设置）
 //! （GPU 全帧 present 无脏矩形概念；pygame 的"受影响 Rect"返回随 Rect
 //! 类型一并退役——碰撞/触发器归物理引擎）。`screen`（交换链背板）与
 //! `Surface`（纹理背板）同一签名，教程形态保真
@@ -17,21 +18,16 @@ use starfish_gfx::geometry::shape2d;
 use crate::render::{Batch, DrawTarget, GeometryKind, IRect};
 use crate::Color;
 
-fn rgba(c: impl Into<Color>) -> [f32; 4] {
-    let (r, g, b, a) = c.into().normalize();
-    [r, g, b, a]
-}
-
-fn line_outline(t: &impl DrawTarget, color: [f32; 4], g: &starfish_gfx::geometry::Geometry) {
-    t.with_batch(|b: &mut Batch| b.push_geometry(GeometryKind::Line, g, [0.0, 0.0], color));
+fn line_outline(t: &impl DrawTarget, c: [f32; 4], g: &starfish_gfx::geometry::Geometry) {
+    t.with_batch(|b: &mut Batch| b.push_geometry(GeometryKind::Line, g, [0.0, 0.0], c));
 }
 
 /// 矩形（width=0 填充，>0 描边）——契约 §七 正典：
 /// `draw.rect(screen, [0, 200, 90], (10, 10, 60, 40), 0)`
 ///
 /// 描边 width>1 = 四条实心边带（真粗边；1px 细边走线流）。
-pub fn rect(t: &impl DrawTarget, color: impl Into<Color>, r: IRect, width: u32) {
-    let c = rgba(color);
+pub fn rect(t: &impl DrawTarget, r: IRect, width: u32) {
+    let c = t.current_draw_color();
     let (x, y) = (r[0] as f32, r[1] as f32);
     let (w, h) = (r[2] as f32, r[3] as f32);
     if width == 0 {
@@ -56,14 +52,13 @@ pub fn rect(t: &impl DrawTarget, color: impl Into<Color>, r: IRect, width: u32) 
 /// 方向扫到 stop；width 恒 1px——v1 描边简化）
 pub fn arc(
     t: &impl DrawTarget,
-    color: impl Into<Color>,
     r: IRect,
     start_angle: f32,
     stop_angle: f32,
     width: u32,
 ) {
     let _ = width; // v1 恒 1px
-    let c = rgba(color);
+    let c = t.current_draw_color();
     let (x, y) = (r[0] as f32, r[1] as f32);
     let (w, h) = (r[2] as f32, r[3] as f32);
     let (cx, cy) = (x + w / 2.0, y + h / 2.0);
@@ -83,13 +78,12 @@ pub fn arc(
 /// 线段（1px）
 pub fn line(
     t: &impl DrawTarget,
-    color: impl Into<Color>,
     start: (i32, i32),
     end: (i32, i32),
     width: u32,
 ) {
     let _ = width; // v1 恒 1px
-    let c = rgba(color);
+    let c = t.current_draw_color();
     let g = shape2d::line([start.0 as f32, start.1 as f32].into(), [end.0 as f32, end.1 as f32].into(), c);
     line_outline(t, c, &g);
 }
@@ -97,7 +91,6 @@ pub fn line(
 /// 折线 / 多边形轮廓（closed 自动闭合；1px）
 pub fn lines(
     t: &impl DrawTarget,
-    color: impl Into<Color>,
     closed: bool,
     points: &[(i32, i32)],
     width: u32,
@@ -106,7 +99,7 @@ pub fn lines(
     if points.len() < 2 {
         return;
     }
-    let c = rgba(color);
+    let c = t.current_draw_color();
     let pts: Vec<glam::Vec2> = points.iter().map(|p| [p.0 as f32, p.1 as f32].into()).collect();
     let g = shape2d::polyline(&pts, closed, c);
     line_outline(t, c, &g);
@@ -115,12 +108,11 @@ pub fn lines(
 /// 圆（width=0 填充扇形三角化，>0 描边；段数随半径自适应）
 pub fn circle(
     t: &impl DrawTarget,
-    color: impl Into<Color>,
     center: (i32, i32),
     radius: u32,
     width: u32,
 ) {
-    let c = rgba(color);
+    let c = t.current_draw_color();
     let ctr = [center.0 as f32, center.1 as f32].into();
     let segments = (radius.max(12)).clamp(24, 64);
     let g = if width == 0 {
@@ -136,8 +128,8 @@ pub fn circle(
 }
 
 /// 椭圆（内切于 rect；width=0 填充，>0 描边）
-pub fn ellipse(t: &impl DrawTarget, color: impl Into<Color>, r: IRect, width: u32) {
-    let c = rgba(color);
+pub fn ellipse(t: &impl DrawTarget, r: IRect, width: u32) {
+    let c = t.current_draw_color();
     let (x, y) = (r[0] as f32, r[1] as f32);
     let (w, h) = (r[2] as f32, r[3] as f32);
     let center = [x + w / 2.0, y + h / 2.0].into();
@@ -162,11 +154,11 @@ pub fn ellipse(t: &impl DrawTarget, color: impl Into<Color>, r: IRect, width: u3
 }
 
 /// 任意简单多边形（耳切三角化，凹多边形支持；width=0 填充，>0 描边）
-pub fn polygon(t: &impl DrawTarget, color: impl Into<Color>, points: &[(i32, i32)], width: u32) {
+pub fn polygon(t: &impl DrawTarget, points: &[(i32, i32)], width: u32) {
     if points.len() < 3 {
         return;
     }
-    let c = rgba(color);
+    let c = t.current_draw_color();
     let pts: Vec<glam::Vec2> = points.iter().map(|p| [p.0 as f32, p.1 as f32].into()).collect();
     let g = if width == 0 {
         shape2d::polygon(&pts, c)
