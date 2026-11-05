@@ -223,6 +223,14 @@ impl Batch {
         self.lines.clear();
     }
 
+    /// draw 消费收口：**one-shot transform**——顶层绘制口执行完自动回
+    /// 恒等（物体级变换零泄漏：忘 set 不会复用上一个物体的矩阵；同变换
+    /// 多物体就重复 set——64B 矩阵写，廉价）。camera **不在此清**（视角
+    /// 级语义：一个会话一个视角，多视角靠 set_camera 分段）。
+    fn end_draw(&mut self) {
+        self.cur_model = Mat4::IDENTITY;
+    }
+
     /// model 变换一个点（收集层 CPU 烘的单点入口）
     fn bake(&self, x: f32, y: f32, z: f32) -> [f32; 3] {
         let p = self.cur_model.transform_point3(glam::Vec3::new(x, y, z));
@@ -307,6 +315,7 @@ impl Batch {
                 v(x, y1, u0, v1),
             ],
         );
+        self.end_draw();
     }
 
     /// 任意四角 quad（2D 形态——仿射变形的执行原语；
@@ -351,6 +360,7 @@ impl Batch {
                 v(c3, u3),
             ],
         );
+        self.end_draw();
     }
 
     /// base 图元几何入批（`shape2d` 家族产出；顶点先按 `cur_model` 烘
@@ -429,6 +439,7 @@ impl Batch {
                 self.push_vertices(BatchTopology::Lines, None, &verts);
             }
         }
+        self.end_draw();
     }
 
     /// 待提交 quad 数（诊断用；图元按 3 顶点折算）
@@ -722,6 +733,20 @@ mod batch_tests {
         b.push_vertices(BatchTopology::Triangles, None, &quad_verts(0.0, 0.0));
         let first = b.tris.vertices.first().expect("顶点已入流");
         assert_eq!(first.pos, [100.0, 0.0, 0.0], "model 烘进顶点");
+    }
+
+    #[test]
+    fn model_is_one_shot_per_draw() {
+        // one-shot transform：draw 消费后自动回恒等（零泄漏——
+        // 第二个 draw 忘 set 不会复用上一个物体的矩阵）
+        let mut b = Batch::new();
+        b.set_model(Mat4::from_translation(glam::Vec3::new(100.0, 0.0, 0.0)));
+        b.push_quad(0.0, 0.0, 10.0, 10.0, WHITE, None);
+        let first = b.tris.vertices.first().expect("顶点已入流");
+        assert_eq!(first.pos, [100.0, 0.0, 0.0], "第一次 draw 吃到 model");
+        b.push_quad(0.0, 0.0, 10.0, 10.0, WHITE, None);
+        let second_v = &b.tris.vertices[6];
+        assert_eq!(second_v.pos, [0.0, 0.0, 0.0], "第二次 draw 已回恒等（one-shot 消费）");
     }
 
     #[test]

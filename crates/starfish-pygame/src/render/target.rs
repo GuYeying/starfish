@@ -198,6 +198,26 @@ pub trait DrawTarget {
     fn model(&self) -> Mat4 {
         Mat4::IDENTITY
     }
+
+    /// 会话相机切换（渲染统一 draw 面——per-draw 相机段；默认转发 batch）
+    fn set_camera(&self, camera: &Camera) {
+        self.with_batch(|b| b.set_mvp(Some(camera.mvp())));
+    }
+
+    /// 回 Auto 兜底相机
+    fn reset_camera(&self) {
+        self.with_batch(|b| b.reset_mvp());
+    }
+
+    /// 会话变换（后续绘制顶点 CPU 烘此矩阵）
+    fn set_transform(&self, model: Mat4) {
+        self.with_batch(|b| b.set_model(model));
+    }
+
+    /// 回恒等变换
+    fn reset_transform(&self) {
+        self.with_batch(|b| b.reset_model());
+    }
 }
 
 /// 相机 rig：uniform 缓冲 + bind group + 当前 MVP（**全局唯一**——
