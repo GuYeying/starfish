@@ -206,6 +206,21 @@ pub fn set_caption(title: &str) {
     with_window(|w| w.set_title(title));
 }
 
+/// 鼠标事件穿透开关（点击落到下层窗口——桌宠形态配套；2026-11-07
+/// 穿透设计稿 M1。Win32 实装；不支持平台 Err——能力位垫底原则）
+pub fn set_click_through(enable: bool) -> Result<(), String> {
+    match with_window(|w| w.set_click_through(enable)) {
+        Some(Ok(())) => Ok(()),
+        Some(Err(e)) => Err(e.to_string()),
+        None => Err("display 未初始化（须先 set_mode）".into()),
+    }
+}
+
+/// 窗口当前是否鼠标穿透（OS ex-style 位读回）
+pub fn get_click_through() -> bool {
+    with_window(|w| w.is_click_through()).unwrap_or(false)
+}
+
 /// 窗口请求运行时生效（批次 O + 尺寸扩展——真身窗口由宿主壳先行装配，
 /// 桌面 letterbox 复现钩子（诊断用）：`STARFISH_DESKTOP_LETTERBOX=宽x高`
 /// 环境变量生效时，窗口实测尺寸钉为该值、逻辑恒 = set_mode 请求——

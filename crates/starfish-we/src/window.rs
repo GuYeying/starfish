@@ -335,6 +335,39 @@ impl Window {
         self.inner.is_always_on_top()
     }
 
+    /// Mouse click-through toggle: hit-testing skips this window (events
+    /// fall to windows beneath) — desktop-pet companion capability.
+    /// 鼠标事件穿透开关（点击落到下层窗口——桌宠形态配套；2026-11-07
+    /// 穿透设计稿 M1）。OS 位 = 状态真值（`is_click_through` 读回式
+    /// 查询）。不支持平台 Err（能力位垫底原则，与 ALWAYS_ON_TOP 同族）。
+    pub fn set_click_through(&self, enable: bool) -> Result<(), WindowError> {
+        #[cfg(target_os = "windows")]
+        {
+            self.inner.set_click_through(enable);
+            Ok(())
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = enable;
+            Err(WindowError::OsError(
+                "click-through: platform backend not implemented".into(),
+            ))
+        }
+    }
+
+    /// Whether mouse events pass through this window.
+    /// 窗口当前是否鼠标穿透（OS ex-style 位读回）。
+    pub fn is_click_through(&self) -> bool {
+        #[cfg(target_os = "windows")]
+        {
+            self.inner.is_click_through()
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            false
+        }
+    }
+
     /// Minimizes the window.
     /// 最小化窗口。
     pub fn minimize(&self) {
