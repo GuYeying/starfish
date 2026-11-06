@@ -62,6 +62,7 @@ pub use starfish_render::texture::{Texture as RenderTexture, ViewKey as RenderTe
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use glam::Mat4;
@@ -107,10 +108,21 @@ pub(crate) struct Gpu {
     pub white: Texture,
     /// 白纹理 bind 本体（管线布局推导示例；不进缓存表）
     pub white_bind: BindGroup,
-    /// 纹理 bind 缓存（texture 0 + sampler 1；按纹理指针键控）
+    /// 纹理 bind 缓存（texture 0 + sampler 1；按纹理指针键控）。
+    /// ⚠️ 容量上限 + FIFO 淘汰（2026-11-06 泄漏修复）：字体每帧 render
+    /// 产新纹理 = 每次绘制新缓存条目——无淘汰时缓存无界增长（实测
+    /// font 渲染循环 ~46 allocs/帧 恒涨，live_alloc 线性陡升）。上限
+    /// 4096 足纳热集；被逐条目 = wgpu BindGroup 释放（含 View→纹理引
+    /// 用链），纹理可回收；被逐纹理再用时重建（builder 廉价）。
     binds: RefCell<HashMap<usize, BindGroup>>,
+    /// 插入序（FIFO 淘汰用——与 binds 同步维护）
+    bind_order: RefCell<VecDeque<usize>>,
     white_key: usize,
 }
+
+/// 纹理 bind 缓存容量上限（FIFO 淘汰；热集远小于此——4096 个 1080²
+/// 纹理引用链也才 ~几十 MB，正常游戏触及不到）
+const BIND_CACHE_CAP: usize = 4096;
 
 // GPU 槽 = 线程局部（主线程契约的类型级表达）：wasm 的 wgpu 类型非
 // Send/Sync（Rc 底座），静态槽过不了 Sync 界；桌面/Android/web 三平台
@@ -281,6 +293,7 @@ impl Gpu {
             white,
             white_bind,
             binds: RefCell::new(HashMap::new()),
+            bind_order: RefCell::new(VecDeque::new()),
             white_key,
         };
         gpu0
@@ -299,7 +312,8 @@ impl Gpu {
     }
 
     /// 纹理 bind group 缓存（texture 0 + sampler 1；按纹理指针键控。
-    /// 白纹理 bind 不入表——本体常驻 [`Gpu::white_bind`] 字段）
+    /// 白纹理 bind 不入表——本体常驻 [`Gpu::white_bind`] 字段）。
+    /// FIFO 淘汰见 [`Gpu::binds`] 文档（2026-11-06 泄漏修复）。
     pub(crate) fn ensure_bind_view(&self, key: usize, view: Arc<wgpu::TextureView>) {
         let mut binds = self.binds.borrow_mut();
         if let Entry::Vacant(e) = binds.entry(key) {
@@ -310,6 +324,12 @@ impl Gpu {
                     .sampler(1, self.sampler.clone())
                     .build(Some("pygame_tex_bind")),
             );
+            let mut order = self.bind_order.borrow_mut();
+            order.push_back(key);
+            while order.len() > BIND_CACHE_CAP {
+                let evict = order.pop_front().expect("order 非空（len > cap）");
+                binds.remove(&evict);
+            }
         }
     }
 
