@@ -284,7 +284,14 @@ impl RenderSurface{
                     | wgpu::CurrentSurfaceTexture::Occluded) => {
                         last_reason = "Timeout/Occluded";
                     }
-                    Ok(wgpu::CurrentSurfaceTexture::Validation) => panic!("渲染验证错误"),
+                    // Validation（configure 校验错被错误槽吞后面留在解配置
+                    // 态——如合成链 ResizeBuffers "window is in use"）：
+                    // 同 Err 家族可自愈——重 configure 后重试（在途帧被
+                    // DWM 释放后即恢复；耗尽走"本帧跳过"软着陆，不硬崩）
+                    Ok(wgpu::CurrentSurfaceTexture::Validation) => {
+                        last_reason = "acquire Validation（重 configure 重试）";
+                        self.surface.configure(&self.device, &self.config);
+                    }
                 }
             }
             let Some(frame) = frame else {
