@@ -150,6 +150,36 @@ pub trait DrawTarget {
             );
         });
     }
+    /// 任意带贴图三角网格（通用 draw 面——外部动画运行时适配层
+    /// spine/Live2D/ozz 蒙皮等的消费形态）：positions/uvs 扁平 f32
+    /// （uv = 纹理域直传——翻转语义由调用方自管），indices 三角索引按
+    /// 3 展开为顶点三元组（z 恒 0——2D batch 域）；纹理 = 另一 Surface
+    /// （其 CPU 脏区由本方法 flush）。
+    fn draw_mesh(
+        &self,
+        texture: &Surface,
+        positions: &[f32],
+        uvs: &[f32],
+        indices: &[u16],
+        color: [f32; 4],
+    ) {
+        texture.flush();
+        let mut verts: Vec<SpriteVertex> = Vec::with_capacity(indices.len());
+        for tri in indices.chunks_exact(3) {
+            for &i in tri {
+                let vi = i as usize * 2;
+                verts.push(SpriteVertex {
+                    pos: [positions[vi], positions[vi + 1], 0.0],
+                    uv: [uvs[vi], uvs[vi + 1]],
+                    color,
+                });
+            }
+        }
+        self.with_batch(|b| {
+            b.push_vertices(BatchTopology::Triangles, Some(texture.texture()), &verts);
+        });
+    }
+
     /// 点集直入 batch（topo 任选；z=0、uv 取中心、统一色）——过程式
     /// 几何的快速通道
     fn push_points(
@@ -1184,6 +1214,22 @@ impl<'a> RenderPass<'a> {
         }
     }
 
+    /// 会话级叠加通道——**立即形态**（镜像 [`Screen::with_overlay`]）：
+    /// 闭包当场执行、encoder finish 即提交——先于本会话 batch 的 pack
+    /// （调用点在绘制会话内时，客人产物**同帧**即可被本会话后续绘制
+    /// 采样；live2d 蒙版中间面的采样时序前提）。
+    pub fn with_overlay(&self, f: impl FnOnce(&mut OverlayCtx)) {
+        match &self.kind {
+            PassKind::Screen(s) => s.with_overlay(f),
+            PassKind::Surface(s) => s.with_overlay(f),
+            PassKind::Mrt { .. } => {
+                starfish_debug::log_warn!(
+                    "[session] with_overlay：MRT 会话暂不支持客人叠加（v1）",
+                );
+            }
+        }
+    }
+
     /// 裁剪矩形（会话内后续绘制生效；None = 解除）。
     /// MRT v1 无裁剪面（随 v2 自定义材质开放），静默忽略。
     pub fn set_clip(&self, clip: Option<IRect>) {
@@ -1437,6 +1483,12 @@ impl Surface {
         &self.texture
     }
 
+    /// 裸 wgpu 纹理句柄（GPU 回读取证 / 外接管线直引用用——与
+    /// [`Self::texture_view`] 同级的原生出口）
+    pub fn raw_texture(&self) -> Arc<wgpu::Texture> {
+        self.texture.raw.clone()
+    }
+
     /// 背板纹理视图（**Rust 内部缝**——绑定层 ResourceAccess.bind_group
     /// 的 "texture" 绑定取样用；wgpu 裸对象不出 Python 界）
     pub fn texture_view(&self) -> Arc<wgpu::TextureView> {
@@ -1491,6 +1543,13 @@ impl Surface {
     /// 本面 pack 清后的深度——3D 客人管线 depth=true 用）。
     pub fn defer_overlay(&self, f: impl FnOnce(&mut OverlayCtx) + 'static) {
         self.pending_overlays.borrow_mut().push(Box::new(f));
+    }
+
+    /// 叠加渲染通道——**立即形态**（Surface 版，镜像 [`Screen::
+    /// with_overlay`]）：闭包当场执行、encoder finish 即提交（先于本面
+    /// batch 的 pack——绘制会话内调用时客人产物同帧可采样）。
+    pub fn with_overlay(&self, f: impl FnOnce(&mut OverlayCtx)) {
+        self.run_overlay(f);
     }
 
     /// 叠加执行体（镜像 [`Screen::run_overlay`]；无 begin/present 概念
