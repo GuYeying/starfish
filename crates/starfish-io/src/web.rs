@@ -90,14 +90,20 @@ pub(super) async fn read(path: &str) -> Result<Vec<u8>, IoError> {
 /// Condvar::wait panic，三端测试 2026-11-07 实测）。同步 XHR 是主线程
 /// 一次性资源装载的唯一同步通道（加载期阻塞 + 主线程弃用警告可接受
 /// ——语义与原生 fs 直读对齐，spine/ozz/live2d 路径装载器的依赖口）。
-/// 缓存语义：浏览器默认（v1 同步口不追 no-store——读的是模型/图集等
-/// 一次性资产，启发式缓存无害；载荷类热更新走异步 read）。
+/// **零自建缓存**：每次调用都打真请求；缓存策略 = no-cache 强制重验证
+/// （与异步 fetch 的 no-store 对齐——资源读恒新鲜）。
 pub(super) fn read_sync(path: &str) -> Result<Vec<u8>, IoError> {
     let url = resolve_url(path);
     let xhr = web_sys::XmlHttpRequest::new()
         .map_err(|e| IoError::Backend(format!("XHR 构造失败: {e:?}")))?;
     xhr.open_with_async("GET", &url, false)
         .map_err(|e| IoError::Backend(format!("XHR open 失败: {e:?}")))?;
+    // 缓存策略与异步 fetch 的 no-store 对齐（资源读恒新鲜——开发期改
+    // 资产免吃浏览器启发式缓存，fetch_bytes 同款实测坑）。no-cache =
+    // 用前强制重验证（浏览器可存但不直出）；same-origin 无预检副作用，
+    // 跨源 CDN 场景需服务端放行该头（同步 XHR 本就限同源优先）。
+    xhr.set_request_header("Cache-Control", "no-cache")
+        .map_err(|e| IoError::Backend(format!("XHR 头设置失败: {e:?}")))?;
     // 同步 XHR（document 环境）**禁设 responseType**（浏览器硬约束，
     // InvalidAccessError 实测）——二进制取回走 x-user-defined 字节映射
     // （历史 binary XHR 技法：byte<0x80 原样、≥0x80 → U+F780+(b-0x80)，
