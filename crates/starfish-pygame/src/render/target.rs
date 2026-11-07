@@ -1388,6 +1388,18 @@ pub struct Surface {
     pending_overlays: RefCell<Vec<Box<dyn FnOnce(&mut OverlayCtx)>>>,
 }
 
+impl Drop for Surface {
+    /// 纹理销毁即从 GPU bind 缓存摘除（2026-11-07 泄漏根治二段）：
+    /// 每帧临时纹理（font.render 等）死亡即出缓存——缓存条目数 =
+    /// 当前活纹理数（零填充期/零淘汰压力），GPU 纹理即时可回收。
+    /// 被摘 BindGroup 的 wgpu 生命周期由命令缓冲引用保障（已编码
+    /// 命令不受影响）；batch 内未编码的 push 持 view Arc，encode 时
+    /// miss-重建自愈。
+    fn drop(&mut self) {
+        self.gpu.unbind_texture(self.texture.cache_key());
+    }
+}
+
 impl Surface {
     /// 透明底离屏面（须先建立 GPU 槽——`Screen::new` / P3 `set_mode`）
     pub fn new(size: (u32, u32)) -> Self {

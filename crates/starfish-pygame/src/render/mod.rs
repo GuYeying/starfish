@@ -333,6 +333,20 @@ impl Gpu {
         }
     }
 
+    /// 纹理销毁时从 bind 缓存摘除（Surface Drop 调用——2026-11-07
+    /// 泄漏根治二段）：每帧临时纹理（font.render/粒子表面）死亡即出
+    /// 缓存——缓存条目数 = 当前活纹理数，零填充期、零淘汰压力；长期
+    /// 纹理（背景/角色图集）永驻缓存不受影响。被摘 BindGroup 的 wgpu
+    /// 生命周期由命令缓冲引用保障（已编码命令不受摘除影响）。
+    pub(crate) fn unbind_texture(&self, key: usize) {
+        if self.binds.borrow_mut().remove(&key).is_some() {
+            let mut order = self.bind_order.borrow_mut();
+            if let Some(i) = order.iter().position(|k| *k == key) {
+                order.remove(i);
+            }
+        }
+    }
+
     pub(crate) fn white_key(&self) -> usize {
         self.white_key
     }
