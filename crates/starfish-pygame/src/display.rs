@@ -247,8 +247,19 @@ pub fn get_skip_taskbar() -> bool {
 /// 平铺菜单；左键=Tray 点击事件、右键=弹菜单、菜单点击=Tray 菜单事件，
 /// 均经 `event::get` 上浮。⚠️ feature `tray` 门控——未启用 = 编译期即
 /// 知不支持。`surface` 须为离屏 Surface（Screen 背板不回读）——图标
-/// 回读走 image::readback_rgba（image.save 同款慢路径））
-#[cfg(feature = "tray")]
+/// 回读走 image::readback_rgba（image.save 同款慢路径）。
+/// wasm 拆分：无阻塞模型（block_on 不存在）且平台本就 Err 站桩——
+/// 直接 Err 兜底，不进回读）
+#[cfg(all(feature = "tray", target_arch = "wasm32"))]
+pub fn set_tray(
+    _surface: &crate::render::Surface,
+    _tooltip: &str,
+    _menu: &[(String, String)],
+) -> Result<(), String> {
+    Err("tray: web 平台不支持（浏览器沙箱）".into())
+}
+
+#[cfg(all(feature = "tray", not(target_arch = "wasm32")))]
 pub fn set_tray(
     surface: &crate::render::Surface,
     tooltip: &str,

@@ -84,12 +84,18 @@ pub struct TrayEvent {
 
 /// Non-blocking tray event drain — called by each desktop platform's
 /// `poll_event` after its message pump. Appends [`Event::Tray`] entries to
-/// `pending`. Compiled only with feature `tray` (the backend crate is
-/// target-gated to the three desktop platforms).
+/// `pending`. Compiled with feature `tray` **on the three desktop targets
+/// only** (the backend crate is target-gated; enabling the feature on
+/// web/mobile keeps the facade types + Err stubs without linking the
+/// backend).
 /// 非阻塞托盘事件排水——各桌面平台 `poll_event` 消息泵后调用；把
-/// [`Event::Tray`] 追加进 `pending`。仅 feature `tray` 编译（后端 crate
-/// 按目标平台门控——仅三桌面）。
-#[cfg(feature = "tray")]
+/// [`Event::Tray`] 追加进 `pending`。仅 feature `tray` **且三桌面目标**
+/// 编译（后端 crate 按目标平台门控；web/mobile 上启用 feature 时保留
+/// 门面类型 + Err 站桩，后端不链接）。
+#[cfg(all(
+    feature = "tray",
+    any(target_os = "windows", target_os = "macos", target_os = "linux")
+))]
 pub fn drain_events(pending: &mut VecDeque<Event>) {
     use tray_icon::TrayIconEvent as Tie;
 
@@ -113,7 +119,10 @@ pub fn drain_events(pending: &mut VecDeque<Event>) {
 /// Icon event conversion (hover noise dropped; a click counts on release
 /// so press+release is one event).
 /// 图标事件转换（悬停噪声丢弃；按下+抬起折算一次——抬起才算点击）。
-#[cfg(feature = "tray")]
+#[cfg(all(
+    feature = "tray",
+    any(target_os = "windows", target_os = "macos", target_os = "linux")
+))]
 fn convert_icon_event(ev: tray_icon::TrayIconEvent) -> Option<TrayEvent> {
     use tray_icon::{MouseButtonState as Tbs, TrayIconEvent as Tie};
 
@@ -151,7 +160,10 @@ fn convert_icon_event(ev: tray_icon::TrayIconEvent) -> Option<TrayEvent> {
 
 /// tray-icon button → pygame button code (1 = left, 2 = middle, 3 = right).
 /// tray-icon 按键 → pygame 编号（1=左 2=中 3=右）。
-#[cfg(feature = "tray")]
+#[cfg(all(
+    feature = "tray",
+    any(target_os = "windows", target_os = "macos", target_os = "linux")
+))]
 fn button_code(button: tray_icon::MouseButton) -> u8 {
     match button {
         tray_icon::MouseButton::Left => 1,
