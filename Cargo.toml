@@ -89,6 +89,7 @@ web-sys = { version = "0.3", features = [
     "Blob", "Url", "Location", "Navigator", "MediaDevices", "MediaStreamConstraints",
     "MediaStream", "MediaStreamAudioSourceNode", "AudioContext", "ScriptProcessorNode",
     "AudioProcessingEvent", "AudioBuffer", "AudioDestinationNode",
+    "XmlHttpRequest",
 ] }
 
 # ── 平台窗口 / 视频后端 ──

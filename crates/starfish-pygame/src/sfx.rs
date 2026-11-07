@@ -144,6 +144,23 @@ pub async fn read(path: &str) -> Result<Vec<u8>, String> {
     unwrap_envelope(&raw, &key, &io_magic())
 }
 
+/// 阻塞式资源读（**绑定层同步路径装载专用口——平台分流唯一事实源**，
+/// spine/ozz/live2d 路径装载器走此口）：native = block_on(异步 read)
+///（哈希定位→io→解封装全链同 async）；wasm = 同步 XHR（web 无阻塞
+/// 模型——异步 executor 在同步 Rust 栈内不可能驱动真 fetch，block_on
+/// 系于 wasm 必然 Condvar::wait panic，三端测试 2026-11-07 实测定约；
+/// 主线程一次性装载期阻塞可接受）。
+pub fn read_block(path: &str) -> Result<Vec<u8>, String> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        read_sync(path)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        starfish_std::app::block_on(read(path))
+    }
+}
+
 /// Android 资产展开编排（**清单解密在本层**——加密红线）：读
 /// `_manifest.sfx`（APK assets 根，固定名）→ 解包 → io 原始展开原语
 /// （裸复制到 data_dir 根——展开后目录镜像源项目结构，与二进制同级）。

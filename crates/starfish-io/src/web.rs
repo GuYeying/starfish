@@ -83,6 +83,43 @@ pub(super) async fn read(path: &str) -> Result<Vec<u8>, IoError> {
     fetch_bytes(&resolve_url(path), "GET", None).await
 }
 
+/// 同步裸读（wasm 形态 = **同步 XHR**）。
+///
+/// 存在理由：web 无阻塞模型——异步 executor 在同步 Rust 栈内**不可能**
+/// 驱动真 fetch（JS 事件循环不重入，pollster 系 block_on 于 wasm 必然
+/// Condvar::wait panic，三端测试 2026-11-07 实测）。同步 XHR 是主线程
+/// 一次性资源装载的唯一同步通道（加载期阻塞 + 主线程弃用警告可接受
+/// ——语义与原生 fs 直读对齐，spine/ozz/live2d 路径装载器的依赖口）。
+/// 缓存语义：浏览器默认（v1 同步口不追 no-store——读的是模型/图集等
+/// 一次性资产，启发式缓存无害；载荷类热更新走异步 read）。
+pub(super) fn read_sync(path: &str) -> Result<Vec<u8>, IoError> {
+    let url = resolve_url(path);
+    let xhr = web_sys::XmlHttpRequest::new()
+        .map_err(|e| IoError::Backend(format!("XHR 构造失败: {e:?}")))?;
+    xhr.open_with_async("GET", &url, false)
+        .map_err(|e| IoError::Backend(format!("XHR open 失败: {e:?}")))?;
+    // 同步 XHR（document 环境）**禁设 responseType**（浏览器硬约束，
+    // InvalidAccessError 实测）——二进制取回走 x-user-defined 字节映射
+    // （历史 binary XHR 技法：byte<0x80 原样、≥0x80 → U+F780+(b-0x80)，
+    // &0xFF 逆映射无损还原）
+    xhr.override_mime_type("text/plain; charset=x-user-defined")
+        .map_err(|e| IoError::Backend(format!("XHR mime 覆写失败: {e:?}")))?;
+    xhr.send()
+        .map_err(|e| IoError::Backend(format!("XHR send 失败: {e:?}")))?;
+    // 同步形态：send() 返回即装载完成
+    let status = xhr
+        .status()
+        .map_err(|e| IoError::Backend(format!("XHR status 失败: {e:?}")))?;
+    if !(200..300).contains(&status) {
+        return Err(IoError::Backend(format!("read {path}: HTTP {status}")));
+    }
+    let text = xhr
+        .response_text()
+        .map_err(|e| IoError::Backend(format!("XHR response_text 失败: {e:?}")))?
+        .ok_or_else(|| IoError::Backend("XHR 无响应文本".into()))?;
+    Ok(text.chars().map(|c| (c as u32 & 0xFF) as u8).collect())
+}
+
 pub(super) async fn write(path: &str, data: Vec<u8>) -> Result<(), IoError> {
     fetch_bytes(&resolve_url(path), "POST", Some(data))
         .await

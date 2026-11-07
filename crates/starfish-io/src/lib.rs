@@ -115,8 +115,10 @@ pub async fn read(path: &str) -> Result<Vec<u8>, IoError> {
     imp::read(path).await
 }
 
-/// 同步读（raw）：native = 基准目录 fs 直读；wasm = 无同步文件系统，
-/// 恒 Err（v1 定约：Web 资源走异步 read）。
+/// 同步读（raw）：native = 基准目录 fs 直读；wasm = **同步 XHR**
+///（主线程一次性资源装载——v2 定约升级 2026-11-07：web 无阻塞模型下
+/// 异步 executor 不可能在同步栈内驱动真 fetch，同步 XHR 是路径装载器
+/// （spine/ozz/live2d）的唯一同步通道）。
 #[cfg(not(target_arch = "wasm32"))]
 pub fn read_sync(path: &str) -> Result<Vec<u8>, IoError> {
     std::fs::read(resolve(path)).map_err(|e| {
@@ -126,10 +128,7 @@ pub fn read_sync(path: &str) -> Result<Vec<u8>, IoError> {
 
 #[cfg(target_arch = "wasm32")]
 pub fn read_sync(path: &str) -> Result<Vec<u8>, IoError> {
-    let _ = path;
-    Err(IoError::Backend(
-        "Web 端无同步 io——用 await pygame.io.fetch(path) + load_from_bytes(bytes)".into(),
-    ))
+    imp::read_sync(path)
 }
 
 /// 写入全部字节（覆盖）
