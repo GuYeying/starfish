@@ -93,6 +93,15 @@ use crate::window::WindowOptions;
 
 pub(crate) mod translate;
 
+// Tray icon handle slot (feature "tray"): the icon lives as long as the
+// stored handle (ksni backend manages its own worker thread internally).
+// 托盘图标句柄槽（feature "tray"）：图标随句柄存活（ksni 后端内部
+// 自持 worker 线程）。
+#[cfg(feature = "tray")]
+thread_local! {
+    static TRAY: std::cell::RefCell<Option<tray_icon::TrayIcon>> = const { std::cell::RefCell::new(None) };
+}
+
 // ── Wayland state ───────────────────────────────────────────────────
 
 /// Everything the sctk handlers touch. Handlers run inside
@@ -482,6 +491,15 @@ impl WindowInner {
 
     pub(crate) fn poll_event(&self) -> Option<Event> {
         let mut core = self.lock_core();
+        // Tray drain (feature "tray") before any return path: the ksni
+        // backend delivers via the global channel independent of the
+        // Wayland socket — moved into the local queue here so the fast
+        // path returns them with zero socket work.
+        // 托盘排水（feature "tray"）置于一切返回路径之前：ksni 后端经
+        // 全局 channel 递送、与 Wayland socket 无关——搬进本地队列后
+        // 快路径零 socket 工作即可出队。
+        #[cfg(feature = "tray")]
+        crate::tray::drain_events(&mut core.state.pending);
         if core.dead {
             return core.state.pending.pop_front();
         }
@@ -771,6 +789,69 @@ impl WindowInner {
     #[cfg(feature = "click-through")]
     pub(crate) fn is_click_through(&self) -> bool {
         false
+    }
+
+    // ── Taskbar hiding (feature "skip-taskbar") / 任务栏隐藏 ──────────
+
+    /// Stub: the Linux backend is Wayland-only, and the Wayland standard
+    /// protocols give clients no way to control taskbar membership (the
+    /// compositor decides). Revisit when an X11 backend exists
+    /// (`_NET_WM_STATE_SKIP_TASKBAR` via `XChangeProperty`).
+    /// 站桩：Linux 后端是 Wayland-only，而 Wayland 标准协议不向客户端
+    /// 提供任务栏成员控制（由合成器决定）。X11 后端建成后可补
+    /// （`XChangeProperty` 写 `_NET_WM_STATE_SKIP_TASKBAR`）。
+    #[cfg(feature = "skip-taskbar")]
+    pub(crate) fn set_skip_taskbar(&self, enable: bool) -> Result<(), WindowError> {
+        let _ = enable;
+        Err(WindowError::OsError(
+            "skip-taskbar: Linux 站桩预留——Wayland 标准协议不控制任务栏；X11 后端建成后可补 _NET_WM_STATE_SKIP_TASKBAR".into(),
+        ))
+    }
+
+    #[cfg(feature = "skip-taskbar")]
+    pub(crate) fn is_skip_taskbar(&self) -> bool {
+        false
+    }
+
+    // ── System tray (feature "tray") / 系统托盘 ────────────────────────
+
+    /// Installs (or replaces) the tray icon — ksni backend (pure D-Bus,
+    /// StatusNotifierItem; the backend manages its own worker thread, the
+    /// facade is identical to the other desktop platforms).
+    /// 安装（或替换）托盘图标——ksni 后端（纯 D-Bus，StatusNotifierItem；
+    /// 后端自持 worker 线程，门面与其他桌面平台一致）。
+    #[cfg(feature = "tray")]
+    pub(crate) fn set_tray(&self, spec: crate::tray::TraySpec) -> Result<(), WindowError> {
+        let icon = tray_icon::Icon::from_rgba(spec.icon_rgba, spec.icon_w, spec.icon_h)
+            .map_err(|e| WindowError::OsError(format!("tray icon: {e}")))?;
+        let mut menu = tray_icon::menu::Menu::new();
+        for (id, label) in &spec.menu {
+            let item =
+                tray_icon::menu::MenuItem::with_id(id.clone(), label.clone(), true, None);
+            menu.append(&item)
+                .map_err(|e| WindowError::OsError(format!("tray menu: {e}")))?;
+        }
+        let mut builder = tray_icon::TrayIconBuilder::new().with_icon(icon);
+        if !spec.tooltip.is_empty() {
+            builder = builder.with_tooltip(&spec.tooltip);
+        }
+        let tray = builder
+            .with_menu(Box::new(menu))
+            // 左键 = 点击事件上浮、右键 = 弹出菜单（桌宠惯例）
+            .with_menu_on_left_click(false)
+            .with_menu_on_right_click(true)
+            .build()
+            .map_err(|e| WindowError::OsError(format!("tray: {e}")))?;
+        TRAY.with(|t| *t.borrow_mut() = Some(tray));
+        Ok(())
+    }
+
+    #[cfg(feature = "tray")]
+    pub(crate) fn remove_tray(&self) -> Result<(), WindowError> {
+        TRAY.with(|t| {
+            *t.borrow_mut() = None; // Drop = 摘除图标
+        });
+        Ok(())
     }
 
     pub(crate) fn minimize(&self) {

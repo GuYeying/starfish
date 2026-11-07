@@ -99,6 +99,9 @@ mod event;
 pub mod flags;
 mod handle;
 mod platform;
+// 系统托盘数据面（feature "tray" 的类型无条件存在——Event::Tray 载荷；
+// 排水与后端交互在 cfg 门控内）
+mod tray;
 
 // 嵌入式宿主门面（2026-10-26）：外部 Surface 注入/事件注入/解除——嵌入式运行时（ pygame-rs-dev 的 Android 売）的小暴露面
 #[cfg(all(target_os = "android", feature = "embedded"))]
@@ -114,6 +117,7 @@ pub use error::WindowError;
 pub use event::{Event, KeyCode, Modifiers, MouseButton, TouchPhase, UserEvent};
 pub use flags::WindowFlags;
 pub use handle::RawWindowHandle;
+pub use tray::{TrayEvent, TrayKind, TraySpec};
 #[cfg(feature = "wgpu-auto")]
 pub use wgpu_auto::{AutoSurface, AutoSurfaceError};
 pub use window::Window;

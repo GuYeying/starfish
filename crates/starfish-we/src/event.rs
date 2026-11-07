@@ -593,4 +593,10 @@ pub enum Event {
     /// `EventProxy`).
     /// 宿主注入的自定义事件（`push_event` / `EventProxy` 的派发形态）。
     User(UserEvent),
+    /// A tray interaction (feature "tray"; desktop platforms only — the
+    /// variant exists unconditionally, mobile/web never produce it, same
+    /// convention as `Touch`/`Suspended`).
+    /// 托盘交互（feature "tray"；仅桌面平台产生——变体无条件存在，
+    /// mobile/web 永不产生，与 `Touch`/`Suspended` 同惯例）。
+    Tray(crate::tray::TrayEvent),
 }

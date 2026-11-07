@@ -70,6 +70,15 @@ static PENDING: Mutex<VecDeque<Event>> = Mutex::new(VecDeque::new());
 /// 最近一次已知客户区尺寸（物理像素），由委托的 `windowDidResize` 维护。
 static SIZE: Mutex<(u32, u32)> = Mutex::new((0, 0));
 
+// Tray icon handle slot (feature "tray"): the icon lives as long as the
+// stored handle — thread-local matching the main-thread affinity contract.
+// 托盘图标句柄槽（feature "tray"）：图标随句柄存活——thread-local 与
+// 主线程亲和契约配套。
+#[cfg(feature = "tray")]
+thread_local! {
+    static TRAY: std::cell::RefCell<Option<tray_icon::TrayIcon>> = const { std::cell::RefCell::new(None) };
+}
+
 pub(crate) struct WindowInner {
     /// Captured at creation; also makes `WindowInner` `!Send`, enforcing
     /// the main-thread contract at the type level.
@@ -340,10 +349,16 @@ impl WindowInner {
                 self.app.sendEvent(&event);
             }
         }
-        PENDING
+        let mut pending = PENDING
             .lock()
-            .expect("PENDING poisoned / PENDING 锁中毒")
-            .pop_front()
+            .expect("PENDING poisoned / PENDING 锁中毒");
+        // Tray drain (feature "tray"): tray-icon's macOS events land in the
+        // global channels during the pump above.
+        // 托盘排水（feature "tray"）：tray-icon 的 macOS 事件经上方泵
+        // 落入全局 channel。
+        #[cfg(feature = "tray")]
+        crate::tray::drain_events(&mut pending);
+        pending.pop_front()
     }
 
     pub(crate) fn size(&self) -> (u32, u32) {
@@ -510,6 +525,86 @@ impl WindowInner {
     #[cfg(feature = "click-through")]
     pub(crate) fn is_click_through(&self) -> bool {
         false
+    }
+
+    // ── Taskbar/Dock hiding (feature "skip-taskbar") / 任务栏隐藏 ──────
+
+    /// Dock hiding: app-level `setActivationPolicy(.accessory/.regular)` —
+    /// macOS has no per-window taskbar concept (the Dock shows the app,
+    /// not windows); desktop-pet semantics = the whole app leaves/restores
+    /// the Dock.
+    /// Dock 隐藏：app 级 `setActivationPolicy(.accessory/.regular)` 切换
+    /// ——macOS 无 per-window 任务栏概念（Dock 展示的是 app 而非窗口）；
+    /// 桌宠语义 = app 整体隐藏/恢复 Dock 图标。
+    #[cfg(feature = "skip-taskbar")]
+    pub(crate) fn set_skip_taskbar(&self, enable: bool) -> Result<(), WindowError> {
+        use objc2_app_kit::NSApplicationActivationPolicy;
+        let policy = if enable {
+            NSApplicationActivationPolicy::Accessory
+        } else {
+            NSApplicationActivationPolicy::Regular
+        };
+        // SAFETY: main-thread AppKit call (MainThreadMarker contract).
+        // SAFETY: 主线程 AppKit 调用（MainThreadMarker 契约）。
+        let accepted = unsafe { self.app.setActivationPolicy(policy) };
+        if accepted {
+            Ok(())
+        } else {
+            Err(WindowError::OsError(
+                "skip-taskbar: setActivationPolicy 被系统拒绝（app 转场窗口期重试）".into(),
+            ))
+        }
+    }
+
+    #[cfg(feature = "skip-taskbar")]
+    pub(crate) fn is_skip_taskbar(&self) -> bool {
+        use objc2_app_kit::NSApplicationActivationPolicy;
+        // SAFETY: main-thread AppKit call. / SAFETY: 主线程 AppKit 调用。
+        unsafe { self.app.activationPolicy() == NSApplicationActivationPolicy::Accessory }
+    }
+
+    // ── System tray (feature "tray") / 系统托盘 ────────────────────────
+
+    /// Installs (or replaces) the tray icon — same shape as the Windows
+    /// backend. Left click = `Event::Tray` click event, right click =
+    /// popup menu. Caveat: create the tray after the window is up (the
+    /// AppKit event loop must be alive — our pump runs from the first
+    /// frame).
+    /// 安装（或替换）托盘图标——与 Windows 后端同形态。左键 =
+    /// `Event::Tray` 点击事件、右键 = 弹菜单。注意：窗口起来后再创建
+    /// 托盘（AppKit 事件循环须已存活——本库泵自首帧即跑）。
+    #[cfg(feature = "tray")]
+    pub(crate) fn set_tray(&self, spec: crate::tray::TraySpec) -> Result<(), WindowError> {
+        let icon = tray_icon::Icon::from_rgba(spec.icon_rgba, spec.icon_w, spec.icon_h)
+            .map_err(|e| WindowError::OsError(format!("tray icon: {e}")))?;
+        let mut menu = tray_icon::menu::Menu::new();
+        for (id, label) in &spec.menu {
+            let item =
+                tray_icon::menu::MenuItem::with_id(id.clone(), label.clone(), true, None);
+            menu.append(&item)
+                .map_err(|e| WindowError::OsError(format!("tray menu: {e}")))?;
+        }
+        let mut builder = tray_icon::TrayIconBuilder::new().with_icon(icon);
+        if !spec.tooltip.is_empty() {
+            builder = builder.with_tooltip(&spec.tooltip);
+        }
+        let tray = builder
+            .with_menu(Box::new(menu))
+            // 左键 = 点击事件上浮、右键 = 弹出菜单（桌宠惯例）
+            .with_menu_on_left_click(false)
+            .with_menu_on_right_click(true)
+            .build()
+            .map_err(|e| WindowError::OsError(format!("tray: {e}")))?;
+        TRAY.with(|t| *t.borrow_mut() = Some(tray));
+        Ok(())
+    }
+
+    #[cfg(feature = "tray")]
+    pub(crate) fn remove_tray(&self) -> Result<(), WindowError> {
+        TRAY.with(|t| {
+            *t.borrow_mut() = None; // Drop = 摘除图标
+        });
+        Ok(())
     }
 
     pub(crate) fn minimize(&self) {

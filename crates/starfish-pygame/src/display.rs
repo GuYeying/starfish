@@ -224,6 +224,64 @@ pub fn get_click_through() -> bool {
     with_window(|w| w.is_click_through()).unwrap_or(false)
 }
 
+/// 任务栏（Dock）隐藏开关（桌宠形态配套：Win=WS_EX_TOOLWINDOW 位切换
+/// ——Alt+Tab 一并隐藏；macOS=Dock 级 setActivationPolicy 切换；Linux
+/// Wayland 站桩 Err。⚠️ feature `skip-taskbar` 门控——未启用 = 编译期
+/// 即知不支持）
+#[cfg(feature = "skip-taskbar")]
+pub fn set_skip_taskbar(enable: bool) -> Result<(), String> {
+    match with_window(|w| w.set_skip_taskbar(enable)) {
+        Some(Ok(())) => Ok(()),
+        Some(Err(e)) => Err(e.to_string()),
+        None => Err("display 未初始化（须先 set_mode）".into()),
+    }
+}
+
+/// 窗口当前是否任务栏隐藏（OS 状态读回；stub 平台恒 false）
+#[cfg(feature = "skip-taskbar")]
+pub fn get_skip_taskbar() -> bool {
+    with_window(|w| w.is_skip_taskbar()).unwrap_or(false)
+}
+
+/// 安装（或替换）系统托盘图标（桌宠形态配套：RGBA 图标 + 悬停提示 +
+/// 平铺菜单；左键=Tray 点击事件、右键=弹菜单、菜单点击=Tray 菜单事件，
+/// 均经 `event::get` 上浮。⚠️ feature `tray` 门控——未启用 = 编译期即
+/// 知不支持。`surface` 须为离屏 Surface（Screen 背板不回读）——图标
+/// 回读走 image::readback_rgba（image.save 同款慢路径））
+#[cfg(feature = "tray")]
+pub fn set_tray(
+    surface: &crate::render::Surface,
+    tooltip: &str,
+    menu: &[(String, String)],
+) -> Result<(), String> {
+    use crate::render::DrawTarget as _; // surface.size()（DrawTarget trait 方法）
+    let read = starfish_std::app::block_on(crate::image::readback_rgba(surface))
+        .map_err(|e| format!("tray 图标回读失败: {e}"))?;
+    let (icon_w, icon_h) = surface.size();
+    let spec = starfish_we::TraySpec {
+        icon_rgba: read,
+        icon_w,
+        icon_h,
+        tooltip: tooltip.to_string(),
+        menu: menu.to_vec(),
+    };
+    match with_window(|w| w.set_tray(spec)) {
+        Some(Ok(())) => Ok(()),
+        Some(Err(e)) => Err(e.to_string()),
+        None => Err("display 未初始化（须先 set_mode）".into()),
+    }
+}
+
+/// 移除托盘图标（未安装时空操作）
+#[cfg(feature = "tray")]
+pub fn remove_tray() -> Result<(), String> {
+    match with_window(|w| w.remove_tray()) {
+        Some(Ok(())) => Ok(()),
+        Some(Err(e)) => Err(e.to_string()),
+        None => Err("display 未初始化（须先 set_mode）".into()),
+    }
+}
+
 /// 窗口请求运行时生效（批次 O + 尺寸扩展——真身窗口由宿主壳先行装配，
 /// 桌面 letterbox 复现钩子（诊断用）：`STARFISH_DESKTOP_LETTERBOX=宽x高`
 /// 环境变量生效时，窗口实测尺寸钉为该值、逻辑恒 = set_mode 请求——

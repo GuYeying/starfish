@@ -23,6 +23,15 @@ multi-window = []
 # 鼠标事件穿透（桌宠形态配套；穿透设计稿 M1——Win32 实装，
 # macos/linux 站桩预留，各平台模块各自实装；web/mobile 无此概念 Err 垫底）
 click-through = []
+# 任务栏/Dock 隐藏（桌宠配套——Win=WS_EX_TOOLWINDOW 位切换、
+# macOS=Dock 级 setActivationPolicy 切换；Linux Wayland 无任务栏协议
+# 站桩 Err，X11 后端建成后可补；web/mobile 无此概念 Err 垫底）
+skip-taskbar = []
+# 系统托盘图标+菜单（tray-icon 三桌面通吃——Win/macOS 默认后端、
+# Linux ksni 纯 D-Bus 免 GTK；菜单 API 走 tray_icon::menu 再导出，
+# 刻意不单独直依赖 muda——防双 muda 版本 MenuEvent receiver 错位；
+# web/mobile 无此概念 Err 垫底）
+tray = ["dep:tray-icon"]
 
 [dependencies]
 starfish-debug = { workspace = true }
@@ -39,11 +48,15 @@ raw-window-handle = { workspace = true, features = ["wasm-bindgen-0-2"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true }
+# 系统托盘（feature tray；MSRV 1.90——workspace toolchain ≥ 1.90 前提）
+tray-icon = { version = "0.26", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { workspace = true }
 objc2-app-kit = { workspace = true }
 objc2-foundation = { workspace = true }
+# 系统托盘（feature tray；objc2 后端——主线程 = 窗口线程亲和正合）
+tray-icon = { version = "0.26", optional = true }
 
 [target.'cfg(target_os = "ios")'.dependencies]
 objc2 = { workspace = true }
@@ -64,6 +77,11 @@ sctk-adwaita = { workspace = true }
 # 事件泵的零超时可读探测（libwayland wl_display_read_events 无数据时
 # 阻塞，须先 poll(POLLIN, 0)——树内既有传递依赖，零新增体积）
 libc = "0.2"
+# 系统托盘（feature tray；ksni 纯 D-Bus 后端——免 GTK 系统依赖，
+# Ubuntu 自带 AppIndicator 扩展可显示 StatusNotifierItem）
+tray-icon = { version = "0.26", optional = true, default-features = false, features = [
+    "ksni",
+] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 android-activity = { workspace = true }

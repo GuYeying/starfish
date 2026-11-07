@@ -355,6 +355,56 @@ impl Window {
         self.inner.is_click_through()
     }
 
+    /// Taskbar (Dock) hiding toggle — desktop-pet companion capability.
+    /// 任务栏（Dock）隐藏开关（桌宠形态配套）。
+    ///
+    /// **feature `skip-taskbar` 门控**：
+    /// - 未启用 feature = 方法不存在（编译期即知平台不支持）；
+    /// - 启用后按平台分发：Windows = `WS_EX_TOOLWINDOW` 位切换（注意：
+    ///   Alt+Tab 一并隐藏——工具窗语义）；macOS = Dock 级
+    ///   `setActivationPolicy(.accessory/.regular)`（app 整体隐藏/恢复
+    ///   Dock 图标——macOS 无 per-window 任务栏概念）；Linux = 站桩
+    ///   （Wayland 标准协议不控制任务栏）；web/mobile = Err 垫底。
+    #[cfg(feature = "skip-taskbar")]
+    pub fn set_skip_taskbar(&self, enable: bool) -> Result<(), WindowError> {
+        self.inner.set_skip_taskbar(enable)
+    }
+
+    /// Whether the window is hidden from the taskbar (OS state readback;
+    /// stub platforms always false).
+    /// 窗口当前是否任务栏隐藏（OS 状态读回；stub 平台恒 false）。
+    #[cfg(feature = "skip-taskbar")]
+    pub fn is_skip_taskbar(&self) -> bool {
+        self.inner.is_skip_taskbar()
+    }
+
+    /// Installs (or replaces) the system tray icon: RGBA icon + tooltip +
+    /// flat menu. Desktop-pet companion capability.
+    /// 安装（或替换）系统托盘图标：RGBA 图标 + 提示文本 + 平铺菜单
+    /// （桌宠形态配套）。
+    ///
+    /// **feature `tray` 门控**：
+    /// - 未启用 feature = 方法不存在（编译期即知平台不支持）；
+    /// - 启用后按平台分发：Windows/macOS = tray-icon 默认后端；Linux =
+    ///   ksni 纯 D-Bus 后端（Ubuntu 自带 AppIndicator 扩展可显示）；
+    ///   web/mobile = Err 垫底。
+    ///
+    /// Menu item clicks / icon clicks surface as
+    /// [`Event::Tray`](crate::Event::Tray) via [`poll_event`](Self::poll_event).
+    /// 菜单/图标点击经 [`poll_event`](Self::poll_event) 以
+    /// [`Event::Tray`](crate::Event::Tray) 上浮。
+    #[cfg(feature = "tray")]
+    pub fn set_tray(&self, spec: crate::tray::TraySpec) -> Result<(), WindowError> {
+        self.inner.set_tray(spec)
+    }
+
+    /// Removes the tray icon (no-op when none installed).
+    /// 移除托盘图标（未安装时空操作）。
+    #[cfg(feature = "tray")]
+    pub fn remove_tray(&self) -> Result<(), WindowError> {
+        self.inner.remove_tray()
+    }
+
     /// Minimizes the window.
     /// 最小化窗口。
     pub fn minimize(&self) {

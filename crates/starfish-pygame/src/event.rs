@@ -50,6 +50,20 @@ pub enum Event {
     /// Rust 侧 `Any` 载荷经 starfish-window 直取；Python 侧的附加
     /// 字段由 pygame-rs 包裹层自理（PyObject 不跨此层）
     User { code: u32 },
+    /// 托盘交互（feature "tray"；starfish-we `Event::Tray` 的透传——
+    /// 菜单项点击 / 图标单击 / 图标双击。变体无条件存在——仅桌面平台
+    /// 产生，与 Touch/Suspend 同惯例）
+    Tray {
+        /// 交互类别（starfish-we `TrayKind`：Menu/Click/DoubleClick）
+        kind: starfish_we::TrayKind,
+        /// Menu = 菜单项 id；Click/DoubleClick = 托盘图标 id
+        id: String,
+        /// 按键编号（1=左 2=中 3=右；Menu 恒 0）
+        button: u8,
+        /// 屏幕物理坐标（Menu 恒 0）
+        x: f64,
+        y: f64,
+    },
     /// 未翻译变体兜底（RedrawRequested 等不丢不炸）
     Other,
 }
@@ -272,6 +286,14 @@ fn translate(e: WindowEvent) -> Option<Event> {
         // 自定义事件透传（code 上浮；Any 载荷留在窗口层——Rust 消费者
         // 经 starfish-window 直取，Python 载荷由 pygame-rs 包裹层附加）
         WindowEvent::User(ue) => Some(Event::User { code: ue.code }),
+        // 托盘交互透传（feature "tray" 产生路径；变体无条件存在）
+        WindowEvent::Tray(t) => Some(Event::Tray {
+            kind: t.kind,
+            id: t.id,
+            button: t.button,
+            x: t.x,
+            y: t.y,
+        }),
         // RedrawRequested 不上报（循环恒每帧 present）
         _ => Some(Event::Other),
     }

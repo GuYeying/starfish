@@ -9,6 +9,12 @@ description = "pygame 兼容层：接口形态 1:1 对齐 pygame，执行 GPU �
 # 鼠标事件穿透（桌宠形态配套；穿透设计稿 M1——starfish-we click-through
 # 能力位透传；Win32 实装，macos/linux 站桩，web/mobile Err 垫底）
 click-through = ["starfish-we/click-through"]
+# 任务栏/Dock 隐藏（桌宠配套——starfish-we skip-taskbar 能力位透传；
+# Win32/macOS 实装，Linux Wayland 站桩，web/mobile Err 垫底）
+skip-taskbar = ["starfish-we/skip-taskbar"]
+# 系统托盘（starfish-we tray 能力位透传——tray-icon 三桌面后端）；
+# 事件经 poll_event 以 Event::Tray 上浮
+tray = ["starfish-we/tray"]
 
 # 依赖单向（契约硬性规则）：本层可直用各引擎 crate 类型；引擎 crate 永不感知本层。
 [dependencies]

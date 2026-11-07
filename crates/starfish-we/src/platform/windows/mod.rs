@@ -53,6 +53,15 @@ use crate::window::WindowOptions;
 /// 窗口类名；进程内只注册一次。
 const CLASS_NAME: &str = "starfish-we";
 
+// Tray icon handle slot (feature "tray"): the icon lives as long as the
+// stored handle — thread-local matching the window thread affinity.
+// 托盘图标句柄槽（feature "tray"）：图标随句柄存活——thread-local
+// 与窗口线程亲和配套。
+#[cfg(feature = "tray")]
+thread_local! {
+    static TRAY: std::cell::RefCell<Option<tray_icon::TrayIcon>> = const { std::cell::RefCell::new(None) };
+}
+
 pub(crate) struct WindowInner {
     hwnd: HWND,
     /// The state block shared with [`wndproc`] via `GWLP_USERDATA`
@@ -139,6 +148,11 @@ impl WindowInner {
                 wm::TranslateMessage(&msg);
                 wm::DispatchMessageW(&msg);
             }
+            // Tray drain: the pump above already dispatched tray-icon's
+            // hidden-window messages — collect the translated events.
+            // 托盘排水：上方泵已派发 tray-icon 隐藏窗口消息——收取翻译后的事件。
+            #[cfg(feature = "tray")]
+            crate::tray::drain_events(&mut (*state).pending);
             (*state).pending.pop_front()
         }
     }
@@ -437,6 +451,99 @@ impl WindowInner {
             let ex = wm::GetWindowLongW(self.hwnd, wm::GWL_EXSTYLE) as u32;
             (ex & wm::WS_EX_TRANSPARENT) != 0
         }
+    }
+
+    /// Taskbar hiding: `WS_EX_TOOLWINDOW` bit toggle — the same ex-style
+    /// idiom as click-through; OS bit = state truth (readback-style query).
+    /// Side effect: the window also leaves the Alt+Tab list (tool-window
+    /// semantics — normally exactly what a desktop pet wants).
+    /// 任务栏隐藏：`WS_EX_TOOLWINDOW` 位切换（与穿透同款 ex-style 习语；
+    /// OS 位 = 状态真值读回式查询）。副作用：Alt+Tab 一并隐藏（工具窗
+    /// 语义——桌宠场景通常正合预期）。运行时切换补一刀
+    /// `SetWindowPos(SWP_FRAMECHANGED)` 让 Shell 立即重估。
+    #[cfg(feature = "skip-taskbar")]
+    pub(crate) fn set_skip_taskbar(&self, enable: bool) -> Result<(), WindowError> {
+        // SAFETY: hwnd is valid for the window's lifetime. / hwnd 在窗口存活期内有效。
+        unsafe {
+            let ex = wm::GetWindowLongW(self.hwnd, wm::GWL_EXSTYLE) as u32;
+            let next = if enable {
+                ex | wm::WS_EX_TOOLWINDOW
+            } else {
+                ex & !wm::WS_EX_TOOLWINDOW
+            };
+            if next != ex {
+                wm::SetWindowLongW(self.hwnd, wm::GWL_EXSTYLE, next as i32);
+                // Frame-changed nudge so the shell re-evaluates the taskbar
+                // button immediately (style-only changes can lag).
+                // 框架变更通知——Shell 立即重估任务栏按钮（只改样式可能滞后）。
+                wm::SetWindowPos(
+                    self.hwnd,
+                    ptr::null_mut(),
+                    0,
+                    0,
+                    0,
+                    0,
+                    wm::SWP_NOMOVE
+                        | wm::SWP_NOSIZE
+                        | wm::SWP_NOZORDER
+                        | wm::SWP_NOACTIVATE
+                        | wm::SWP_FRAMECHANGED,
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "skip-taskbar")]
+    pub(crate) fn is_skip_taskbar(&self) -> bool {
+        // SAFETY: hwnd is valid for the window's lifetime. / hwnd 在窗口存活期内有效。
+        unsafe {
+            let ex = wm::GetWindowLongW(self.hwnd, wm::GWL_EXSTYLE) as u32;
+            (ex & wm::WS_EX_TOOLWINDOW) != 0
+        }
+    }
+
+    /// Installs (or replaces) the tray icon. The `TrayIcon` handle must stay
+    /// alive for the icon to persist — kept in a thread-local matching the
+    /// window thread-affinity model. Left click = [`Event::Tray`] click
+    /// event, right click = popup menu, menu clicks = [`Event::Tray`] menu
+    /// events (drained in `poll_event`).
+    /// 安装（或替换）托盘图标。`TrayIcon` 句柄须常活图标才在——存
+    /// thread-local（与窗口线程亲和模型配套）。左键 = [`Event::Tray`]
+    /// 点击事件、右键 = 弹菜单、菜单项点击 = [`Event::Tray`] 菜单事件
+    /// （poll_event 内排水）。
+    #[cfg(feature = "tray")]
+    pub(crate) fn set_tray(&self, spec: crate::tray::TraySpec) -> Result<(), WindowError> {
+        let icon = tray_icon::Icon::from_rgba(spec.icon_rgba, spec.icon_w, spec.icon_h)
+            .map_err(|e| WindowError::OsError(format!("tray icon: {e}")))?;
+        let mut menu = tray_icon::menu::Menu::new();
+        for (id, label) in &spec.menu {
+            let item =
+                tray_icon::menu::MenuItem::with_id(id.clone(), label.clone(), true, None);
+            menu.append(&item)
+                .map_err(|e| WindowError::OsError(format!("tray menu: {e}")))?;
+        }
+        let mut builder = tray_icon::TrayIconBuilder::new().with_icon(icon);
+        if !spec.tooltip.is_empty() {
+            builder = builder.with_tooltip(&spec.tooltip);
+        }
+        let tray = builder
+            .with_menu(Box::new(menu))
+            // 左键 = 点击事件上浮、右键 = 弹出菜单（桌宠惯例）
+            .with_menu_on_left_click(false)
+            .with_menu_on_right_click(true)
+            .build()
+            .map_err(|e| WindowError::OsError(format!("tray: {e}")))?;
+        TRAY.with(|t| *t.borrow_mut() = Some(tray));
+        Ok(())
+    }
+
+    #[cfg(feature = "tray")]
+    pub(crate) fn remove_tray(&self) -> Result<(), WindowError> {
+        TRAY.with(|t| {
+            *t.borrow_mut() = None; // Drop = 摘除图标
+        });
+        Ok(())
     }
 
     pub(crate) fn minimize(&self) {

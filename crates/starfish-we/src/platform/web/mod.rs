@@ -390,6 +390,36 @@ impl WindowInner {
         false
     }
 
+    // Taskbar / tray stubs: no such concepts in the browser sandbox.
+    // 任务栏 / 托盘站桩：浏览器沙箱无此概念——Err 垫底。
+    #[cfg(feature = "skip-taskbar")]
+    pub(crate) fn set_skip_taskbar(&self, enable: bool) -> Result<(), WindowError> {
+        let _ = enable;
+        Err(WindowError::OsError(
+            "skip-taskbar: web 平台不支持（浏览器沙箱）".into(),
+        ))
+    }
+
+    #[cfg(feature = "skip-taskbar")]
+    pub(crate) fn is_skip_taskbar(&self) -> bool {
+        false
+    }
+
+    #[cfg(feature = "tray")]
+    pub(crate) fn set_tray(&self, spec: crate::tray::TraySpec) -> Result<(), WindowError> {
+        let _ = spec;
+        Err(WindowError::OsError(
+            "tray: web 平台不支持（浏览器沙箱）".into(),
+        ))
+    }
+
+    #[cfg(feature = "tray")]
+    pub(crate) fn remove_tray(&self) -> Result<(), WindowError> {
+        Err(WindowError::OsError(
+            "tray: web 平台不支持（浏览器沙箱）".into(),
+        ))
+    }
+
     pub(crate) fn minimize(&self) {
         Self::warn_once(
             "minimize",
