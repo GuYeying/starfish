@@ -5,6 +5,11 @@ edition.workspace = true
 rust-version.workspace = true
 description = "pygame 兼容层：接口形态 1:1 对齐 pygame，执行 GPU 化（GPU 路线 Surface + 单一通用渲染管线，camera 即 MVP）"
 
+[features]
+# 鼠标事件穿透（桌宠形态配套；穿透设计稿 M1——starfish-we click-through
+# 能力位透传；Win32 实装，macos/linux 站桩，web/mobile Err 垫底）
+click-through = ["starfish-we/click-through"]
+
 # 依赖单向（契约硬性规则）：本层可直用各引擎 crate 类型；引擎 crate 永不感知本层。
 [dependencies]
 starfish-std = { workspace = true }

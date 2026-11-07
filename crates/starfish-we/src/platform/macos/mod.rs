@@ -496,6 +496,22 @@ impl WindowInner {
         self.window.level() == NSFloatingWindowLevel
     }
 
+    /// Click-through stub（穿透设计稿 M2 站桩预留）：实装路径 =
+    /// `self.window.setIgnoresMouseEvents(enable)`（objc 一行——与本
+    /// 模块 setLevel 同一桥）。各平台模块各自实装的定约见 window.rs。
+    #[cfg(feature = "click-through")]
+    pub(crate) fn set_click_through(&self, enable: bool) -> Result<(), WindowError> {
+        let _ = enable;
+        Err(WindowError::OsError(
+            "click-through: macOS 站桩预留——待 NSWindow.setIgnoresMouseEvents 实装".into(),
+        ))
+    }
+
+    #[cfg(feature = "click-through")]
+    pub(crate) fn is_click_through(&self) -> bool {
+        false
+    }
+
     pub(crate) fn minimize(&self) {
         // SAFETY: AppKit call on the main thread.
         // SAFETY: 主线程上的 AppKit 调用。

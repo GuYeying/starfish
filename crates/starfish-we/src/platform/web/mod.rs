@@ -376,6 +376,20 @@ impl WindowInner {
         false
     }
 
+    /// Click-through stub：web 无窗口穿透概念（浏览器沙箱）——Err 垫底。
+    #[cfg(feature = "click-through")]
+    pub(crate) fn set_click_through(&self, enable: bool) -> Result<(), WindowError> {
+        let _ = enable;
+        Err(WindowError::OsError(
+            "click-through: web 平台不支持（浏览器沙箱）".into(),
+        ))
+    }
+
+    #[cfg(feature = "click-through")]
+    pub(crate) fn is_click_through(&self) -> bool {
+        false
+    }
+
     pub(crate) fn minimize(&self) {
         Self::warn_once(
             "minimize",

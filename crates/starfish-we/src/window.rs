@@ -337,35 +337,22 @@ impl Window {
 
     /// Mouse click-through toggle: hit-testing skips this window (events
     /// fall to windows beneath) — desktop-pet companion capability.
-    /// 鼠标事件穿透开关（点击落到下层窗口——桌宠形态配套；2026-11-07
-    /// 穿透设计稿 M1）。OS 位 = 状态真值（`is_click_through` 读回式
-    /// 查询）。不支持平台 Err（能力位垫底原则，与 ALWAYS_ON_TOP 同族）。
+    /// 鼠标事件穿透开关（点击落到下层窗口——桌宠形态配套）。
+    ///
+    /// **feature `click-through` 门控**（2026-11-07 feature 化定约）：
+    /// - 未启用 feature = 方法不存在（编译期即知平台不支持）；
+    /// - 启用后按平台分发：Win32 实装；macOS/Linux = 各自平台模块的
+    ///   **站桩预留**（Err——各自模块后续自行实装）；web/mobile = Err 垫底。
+    #[cfg(feature = "click-through")]
     pub fn set_click_through(&self, enable: bool) -> Result<(), WindowError> {
-        #[cfg(target_os = "windows")]
-        {
-            self.inner.set_click_through(enable);
-            Ok(())
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            let _ = enable;
-            Err(WindowError::OsError(
-                "click-through: platform backend not implemented".into(),
-            ))
-        }
+        self.inner.set_click_through(enable)
     }
 
     /// Whether mouse events pass through this window.
-    /// 窗口当前是否鼠标穿透（OS ex-style 位读回）。
+    /// 窗口当前是否鼠标穿透（OS ex-style 位读回；stub 平台恒 false）。
+    #[cfg(feature = "click-through")]
     pub fn is_click_through(&self) -> bool {
-        #[cfg(target_os = "windows")]
-        {
-            self.inner.is_click_through()
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            false
-        }
+        self.inner.is_click_through()
     }
 
     /// Minimizes the window.

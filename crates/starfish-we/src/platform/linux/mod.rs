@@ -756,6 +756,23 @@ impl WindowInner {
         false
     }
 
+    /// Click-through stub（穿透设计稿 M2 站桩预留）：实装路径 = X11
+    /// `XShapeCombineRectangles(ShapeInput, 空区)`（resize 后需重挂）/
+    /// Wayland `wl_surface.set_input_region(empty)`（合成器支持度参差
+    /// ——文档标注平台差异）。各平台模块各自实装的定约见 window.rs。
+    #[cfg(feature = "click-through")]
+    pub(crate) fn set_click_through(&self, enable: bool) -> Result<(), WindowError> {
+        let _ = enable;
+        Err(WindowError::OsError(
+            "click-through: Linux 站桩预留——待 X11 XShape / Wayland input region 实装".into(),
+        ))
+    }
+
+    #[cfg(feature = "click-through")]
+    pub(crate) fn is_click_through(&self) -> bool {
+        false
+    }
+
     pub(crate) fn minimize(&self) {
         self.lock_core().state.window.set_minimized();
     }

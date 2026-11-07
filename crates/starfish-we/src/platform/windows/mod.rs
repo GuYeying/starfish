@@ -412,8 +412,9 @@ impl WindowInner {
     /// 鼠标事件穿透开关（点击落到下层窗口——桌宠形态配套）。透明窗
     /// （WS_EX_NOREDIRECTIONBITMAP）兼容：只改命中测试，不影响 DWM
     /// 合成呈现（2026-11-07 穿透设计稿 M1）。OS 位 = 状态真值（读回
-    /// 式查询，零状态同步问题）。
-    pub(crate) fn set_click_through(&self, enable: bool) {
+    /// 式查询，零状态同步问题）。feature `click-through` 门控。
+    #[cfg(feature = "click-through")]
+    pub(crate) fn set_click_through(&self, enable: bool) -> Result<(), WindowError> {
         // SAFETY: hwnd is valid for the window's lifetime. / hwnd 在窗口存活期内有效。
         unsafe {
             let ex = wm::GetWindowLongW(self.hwnd, wm::GWL_EXSTYLE) as u32;
@@ -426,8 +427,10 @@ impl WindowInner {
                 wm::SetWindowLongW(self.hwnd, wm::GWL_EXSTYLE, next as i32);
             }
         }
+        Ok(())
     }
 
+    #[cfg(feature = "click-through")]
     pub(crate) fn is_click_through(&self) -> bool {
         // SAFETY: hwnd is valid for the window's lifetime. / hwnd 在窗口存活期内有效。
         unsafe {

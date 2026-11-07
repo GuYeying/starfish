@@ -207,7 +207,9 @@ pub fn set_caption(title: &str) {
 }
 
 /// 鼠标事件穿透开关（点击落到下层窗口——桌宠形态配套；2026-11-07
-/// 穿透设计稿 M1。Win32 实装；不支持平台 Err——能力位垫底原则）
+/// 穿透设计稿 M1。Win32 实装；不支持平台 Err——能力位垫底原则。
+/// ⚠️ feature `click-through` 门控——未启用 = 编译期即知不支持）
+#[cfg(feature = "click-through")]
 pub fn set_click_through(enable: bool) -> Result<(), String> {
     match with_window(|w| w.set_click_through(enable)) {
         Some(Ok(())) => Ok(()),
@@ -217,6 +219,7 @@ pub fn set_click_through(enable: bool) -> Result<(), String> {
 }
 
 /// 窗口当前是否鼠标穿透（OS ex-style 位读回）
+#[cfg(feature = "click-through")]
 pub fn get_click_through() -> bool {
     with_window(|w| w.is_click_through()).unwrap_or(false)
 }

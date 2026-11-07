@@ -309,6 +309,20 @@ impl WindowInner {
         true
     }
 
+    /// Click-through stub：移动端无窗口穿透概念——Err 垫底。
+    #[cfg(feature = "click-through")]
+    pub(crate) fn set_click_through(&self, enable: bool) -> Result<(), WindowError> {
+        let _ = enable;
+        Err(WindowError::OsError(
+            "click-through: ios 平台不支持".into(),
+        ))
+    }
+
+    #[cfg(feature = "click-through")]
+    pub(crate) fn is_click_through(&self) -> bool {
+        false
+    }
+
     pub(crate) fn minimize(&self) {}
 
     pub(crate) fn maximize(&self) {}

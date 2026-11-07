@@ -20,6 +20,9 @@ embedded = []
 we-wgpu = ["dep:raw-window-handle"]
 wgpu-auto = ["we-wgpu", "dep:wgpu"]
 multi-window = []
+# 鼠标事件穿透（桌宠形态配套；穿透设计稿 M1——Win32 实装，
+# macos/linux 站桩预留，各平台模块各自实装；web/mobile 无此概念 Err 垫底）
+click-through = []
 
 [dependencies]
 starfish-debug = { workspace = true }
