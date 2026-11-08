@@ -1389,14 +1389,15 @@ pub struct Surface {
 }
 
 impl Drop for Surface {
-    /// 纹理销毁即从 GPU bind 缓存摘除（2026-11-07 泄漏根治二段）：
-    /// 每帧临时纹理（font.render 等）死亡即出缓存——缓存条目数 =
-    /// 当前活纹理数（零填充期/零淘汰压力），GPU 纹理即时可回收。
+    /// 纹理销毁即入队摘除（2026-11-08 泄漏三段）：每帧临时纹理
+    /// （font.render 等）死亡即排队出缓存。⚠️ 不立即摘——延迟提交时序
+    /// 下临时面死于 flush 前，立即摘了 encode 尾 ensure_bind_view 会把
+    /// 已死纹理当新键重建插回（孤儿条目 → FIFO cap 满仓平台期）；
+    /// 摘除统一在 encode 尾 drain（binds 条目数 = 活纹理数不变式）。
     /// 被摘 BindGroup 的 wgpu 生命周期由命令缓冲引用保障（已编码
-    /// 命令不受影响）；batch 内未编码的 push 持 view Arc，encode 时
-    /// miss-重建自愈。
+    /// 命令不受影响）。
     fn drop(&mut self) {
-        self.gpu.unbind_texture(self.texture.cache_key());
+        self.gpu.queue_unbind(self.texture.cache_key());
     }
 }
 

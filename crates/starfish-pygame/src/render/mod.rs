@@ -117,6 +117,9 @@ pub(crate) struct Gpu {
     binds: RefCell<HashMap<usize, BindGroup>>,
     /// 插入序（FIFO 淘汰用——与 binds 同步维护）
     bind_order: RefCell<VecDeque<usize>>,
+    /// 帧内待摘队列（Drop 入队、encode 尾 drain——孤儿条目零存活；
+    /// 机制见 drain_unbinds 文档，2026-11-08 三段修复）
+    pending_unbinds: RefCell<Vec<usize>>,
     white_key: usize,
 }
 
@@ -294,6 +297,7 @@ impl Gpu {
             white_bind,
             binds: RefCell::new(HashMap::new()),
             bind_order: RefCell::new(VecDeque::new()),
+            pending_unbinds: RefCell::new(Vec::new()),
             white_key,
         };
         gpu0
@@ -344,6 +348,25 @@ impl Gpu {
             if let Some(i) = order.iter().position(|k| *k == key) {
                 order.remove(i);
             }
+        }
+    }
+
+    /// 帧内待摘队列：Drop 若**立即**摘除，会与延迟提交时序竞争——临时
+    /// 面死于 draw_surface 返回时（flush 前），该帧 encode 尾
+    /// ensure_bind_view 把已死纹理当新键插回缓存 → 每帧 +1 孤儿条目 →
+    /// FIFO cap 满仓平台期（font_test 36s 实测）。改为 Drop 入队、
+    /// encode 尾统一摘除（时序不变式：encode 内插入 → 同尾 drain，
+    /// 孤儿零存活）。字段定义见 Gpu 结构体。
+    /// 入队待摘（Surface Drop 调用——摘除统一在 encode 尾执行）
+    pub(crate) fn queue_unbind(&self, key: usize) {
+        self.pending_unbinds.borrow_mut().push(key);
+    }
+
+    /// 摘除队尾清空（encode 收尾调用——键若已被 FIFO 淘汰则 no-op）
+    pub(crate) fn drain_unbinds(&self) {
+        let keys: Vec<usize> = self.pending_unbinds.borrow_mut().drain(..).collect();
+        for key in keys {
+            self.unbind_texture(key);
         }
     }
 

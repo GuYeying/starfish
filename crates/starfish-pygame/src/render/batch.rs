@@ -549,6 +549,8 @@ fn seg_cam_bind(gpu: &Gpu, mvp: &Mat4) -> BindGroup {
 /// 颜色目标 >1 时切 MRT 管线（双输出着色器）。
 pub(crate) fn encode(batch: &Batch, ctx: &mut EncodeCtx) -> Option<wgpu::CommandBuffer> {
     if batch.is_empty() {
+        // 空批：无插入发生，待摘队列照清（防零绘制帧下挂起键堆积）
+        ctx.gpu.drain_unbinds();
         return None;
     }
 
@@ -586,6 +588,11 @@ pub(crate) fn encode(batch: &Batch, ctx: &mut EncodeCtx) -> Option<wgpu::Command
         draw_stream(&mut pass, &batch.lines, true, ctx);
     }
     pass.end();
+    // 帧内死纹理孤儿条目就地摘除（2026-11-08 泄漏三段）：encode 内
+    // ensure_bind_view 的插入在本函数发生——Drop 入队的待摘键在此统一
+    // 清（时序不变式：插入后必有同尾 drain，孤儿零存活；命令缓冲已
+    // 引用全部 bind group，摘除不影响本帧呈现）。
+    ctx.gpu.drain_unbinds();
     Some(encoder.finish())
 }
 
