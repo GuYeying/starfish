@@ -85,3 +85,34 @@ pub fn inject_touch(action: u8, x: f64, y: f64) {
 pub fn inject_text(text: String) {
     crate::platform::android::inject_text_impl(text);
 }
+
+// ── 文本输入生命周期（Android IME 键盘弹收——脚本显式控制）──────
+
+type KeyboardBridge = Arc<dyn Fn(bool) + Send + Sync>; // true = show, false = hide
+
+static KEYBOARD_BRIDGE: std::sync::Mutex<Option<KeyboardBridge>> =
+    std::sync::Mutex::new(None);
+
+/// 注册软键盘弹收桥（宿主启动期调用一次——桥内做 JNI 上叫 Java
+/// showSoftInput / hideSoftInput）。未接桥 = no-op（桌面形态）。
+pub fn set_keyboard_bridge(f: KeyboardBridge) {
+    *KEYBOARD_BRIDGE.lock().unwrap_or_else(|p| p.into_inner()) = Some(f);
+}
+
+/// 呼出软键盘（Android = InputMethodManager.showSoftInput；桌面 = no-op
+/// ——硬件键盘恒可用）。脚本通过 pygame.key.start_text_input() 触发。
+pub fn start_text_input() {
+    let bridge = KEYBOARD_BRIDGE.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    if let Some(f) = bridge {
+        f(true);
+    }
+}
+
+/// 收起软键盘（Android = InputMethodManager.hideSoftInput）。脚本通过
+/// pygame.key.stop_text_input() 触发。
+pub fn stop_text_input() {
+    let bridge = KEYBOARD_BRIDGE.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    if let Some(f) = bridge {
+        f(false);
+    }
+}

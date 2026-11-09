@@ -123,6 +123,21 @@ pub use wgpu_auto::{AutoSurface, AutoSurfaceError};
 pub use window::Window;
 pub use window::{EventProxy, EventProxyClosed};
 
+// ── 文本输入生命周期（顶层包装——全平台可用，Android+embedded 走真路径）──
+
+/// 呼出软键盘（Android = Java 宿主 showSoftInput；桌面 = no-op——硬件
+/// 键盘恒可用，文本事件已恒流动）。跨平台脚本安全调用。
+pub fn start_text_input() {
+    #[cfg(all(target_os = "android", feature = "embedded"))]
+    embedded::start_text_input();
+}
+
+/// 收起软键盘（Android = Java 宿主 hideSoftInput；桌面 = no-op）。
+pub fn stop_text_input() {
+    #[cfg(all(target_os = "android", feature = "embedded"))]
+    embedded::stop_text_input();
+}
+
 /// (Android builds only) Call from the host's `android_main` to wire up
 /// the system callbacks.
 /// ï¼ä» Android æå»ºï¼å®¿ä¸»å¨ `android_main` ä¸­è°ç¨ï¼è£éç³»ç»åè°ã
