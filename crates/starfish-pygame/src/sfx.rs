@@ -114,10 +114,28 @@ fn hashed_lookup(path: &str) -> Option<Vec<u8>> {
     unwrap_envelope(&raw, &key, &io_magic()).ok()
 }
 
+/// 路径恒相对归一（**限制 + base_dir 模型定约** 2026-11-09）：sfx 面
+/// 的任何输入都按 base_dir 相对路径处理——剥离 Windows 盘符、前导分隔
+/// 符，反斜杠归一；绝对语义不生效（原始 io 层不受影响，保持自由形态）。
+/// 例外：`http(s)://` 完整 URL 原样透传（跨源 CDN 资产，base_dir 前缀
+/// 对其无意义）。
+pub(crate) fn normalize_relative(path: &str) -> String {
+    if path.starts_with("http://") || path.starts_with("https://") {
+        return path.to_string();
+    }
+    let mut s = path.replace('\\', "/");
+    let bytes = s.as_bytes();
+    if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
+        s = s[2..].to_string(); // 剥盘符（"X:"）
+    }
+    s.trim_start_matches('/').to_string()
+}
+
 /// 资源同步读（image.load / mixer / font 内部调用——**全链路同步**）：
 /// 逻辑路径 → 哈希定位 → 解封装（未命中 → 路径裸读，明文透传）。
 /// wasm 无同步文件系统恒 Err（v1 定约：Web 走异步 read）。
 pub fn read_sync(path: &str) -> Result<Vec<u8>, String> {
+    let path = &normalize_relative(path);
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(b) = hashed_lookup(path) {
         return Ok(b);
@@ -133,6 +151,7 @@ pub fn read_sync(path: &str) -> Result<Vec<u8>, String> {
 /// 定位（嵌套散文件）；未命中/无钥 → io 裸读 → 解封装。wasm = fetch
 ///（no-store，按原名寻址）→ 解封装。
 pub async fn read(path: &str) -> Result<Vec<u8>, String> {
+    let path = &normalize_relative(path);
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(b) = hashed_lookup(path) {
         return Ok(b);
@@ -151,6 +170,7 @@ pub async fn read(path: &str) -> Result<Vec<u8>, String> {
 /// 系于 wasm 必然 Condvar::wait panic，三端测试 2026-11-07 实测定约；
 /// 主线程一次性装载期阻塞可接受）。
 pub fn read_block(path: &str) -> Result<Vec<u8>, String> {
+    let path = &normalize_relative(path);
     #[cfg(target_arch = "wasm32")]
     {
         read_sync(path)

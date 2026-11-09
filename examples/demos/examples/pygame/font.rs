@@ -51,8 +51,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         {
             let f = screen.render();
             f.fill([30, 30, 46, 255]);
-            f.blit(&big_text, (120, 160));
-            f.blit(&text, (120, 260));
+            f.draw_surface(&big_text);
+            f.draw_surface(&text);
             draw_status(&f, &checks);
             f.end();
         }

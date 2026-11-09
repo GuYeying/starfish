@@ -52,16 +52,16 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             let f = screen.render();
             f.fill([30, 30, 46, 255]);
             // 一排：原面 / scale / rotate90 / flip_x / flip_y / rotozoom
-            f.blit(&src, (60, 280));
-            f.blit(&scaled, (160, 272));
-            f.blit(&rotated, (300, 264));
-            f.blit(&fx, (390, 280));
-            f.blit(&fy, (490, 280));
-            f.blit(&zoomed, (590, 264));
+            f.draw_surface(&src);
+            f.draw_surface(&scaled);
+            f.draw_surface(&rotated);
+            f.draw_surface(&fx);
+            f.draw_surface(&fy);
+            f.draw_surface(&zoomed);
             // rotate 动画帧（预建 60 帧 × 6° 轮换——每秒一整圈）；
             // 旋转包围盒尺寸随角度变化——**中心锚 blit** 原地转
             let spinning = &spin_frames[(frames % spin_frames.len() as u32) as usize];
-            f.blit_centered(spinning, (400, 400));
+            f.draw_surface(spinning);
             draw_status(&f, &checks);
             f.end();
         }

@@ -43,11 +43,11 @@ path = "examples/triangle.rs"
 
 # ── hello：starfish-we + wgpu 绿屏渲染 ──
 [[example]]
-name = "hello"
+name = "hello_world"
 
 [[example]]
 name = "hello_android"
-path = "examples/hello.rs"
+path = "examples/hello_world.rs"
 crate-type = ["cdylib"]
 
 # ── multi_window：多窗口自检（new_context + 双 new_surface 共享设备族）──
@@ -56,15 +56,6 @@ crate-type = ["cdylib"]
 [[example]]
 name = "multi_window"
 required-features = ["multi-window"]
-
-# ── pygame render 探针：纹理 quad + 图元 + 文字上屏（P2 验收）──
-[[example]]
-name = "pygame_image_demo"
-
-[[example]]
-name = "pygame_image_demo_android"
-path = "examples/pygame_image_demo.rs"
-crate-type = ["cdylib"]
 
 # ── pygame 模块运行测试案例（pygame/；每模块一案例）──
 [[example]]

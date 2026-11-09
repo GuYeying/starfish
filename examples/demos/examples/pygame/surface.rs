@@ -50,7 +50,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         {
             let f = screen.render();
             f.fill([30, 30, 46, 255]);
-            f.blit(&tile, (360 - s as i32 / 2, 300 - s as i32 / 2));
+            f.draw_surface(&tile);
             draw_status(&f, &checks);
             f.end();
         }
