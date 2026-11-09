@@ -56,6 +56,17 @@ impl Connection for WebTcp {
     }
 }
 
+impl Drop for WebTcp {
+    /// 处理器摘除（close 未调的丢弃路径同吃——迟到的浏览器回调打进已
+    /// drop 闭包 = "closure invoked after being dropped" 全 wasm 崩，
+    /// 实测；见 close_ws 注记）
+    fn drop(&mut self) {
+        for name in ["onopen", "onmessage", "onclose", "onerror"] {
+            let _ = js_sys::Reflect::set(&self.ws, &name.into(), &JsValue::NULL);
+        }
+    }
+}
+
 impl WebTcp {
     fn state_web(&self) -> ConnState {
         match js_sys::Reflect::get(&self.ws, &"readyState".into())
@@ -100,6 +111,12 @@ impl WebTcp {
     fn close_ws(&mut self) {
         self.state
             .store(STATE_CLOSED, std::sync::atomic::Ordering::Release);
+        // 处理器摘除先于闭包 drop（_closures 随 self drop——浏览器侧仍持
+        // 引用时，迟到的 onclose/onerror 回调打进已 drop 闭包 = "closure
+        // invoked after being dropped" 全 wasm 崩，实测）。
+        for name in ["onopen", "onmessage", "onclose", "onerror"] {
+            let _ = js_sys::Reflect::set(&self.ws, &name.into(), &JsValue::NULL);
+        }
         let close: js_sys::Function = match js_sys::Reflect::get(&self.ws, &"close".into())
             .ok()
             .and_then(|v| v.dyn_into().ok())
