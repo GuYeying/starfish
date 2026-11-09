@@ -70,6 +70,23 @@ impl Texture {
         self.size
     }
 
+    /// 包裹既有 GPU 纹理（零拷贝直通——视频帧同款外部纹理来源；调用方
+    /// 保证纹理存活期覆盖本 Texture 的使用期，且 usage 含 TEXTURE_
+    /// BINDING）。Surface 桥定约见 video.rs 模块文档（帧纹理同尺寸复用
+    /// ——包装层可跨帧缓存，零 bind 缓存扰动）
+    pub fn from_existing(
+        raw: Arc<wgpu::Texture>,
+        view: Arc<wgpu::TextureView>,
+        size: (u32, u32),
+    ) -> Self {
+        Self {
+            raw,
+            view,
+            size,
+            id: NEXT_TEXTURE_ID.fetch_add(1, Ordering::Relaxed),
+        }
+    }
+
     /// 默认视图（全 mip 全层）
     pub(crate) fn view(&self) -> Arc<wgpu::TextureView> {
         self.view.clone()

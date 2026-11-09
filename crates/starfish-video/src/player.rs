@@ -18,6 +18,9 @@ pub struct Video {
     texture: Option<wgpu::Texture>,
     /// 帧纹理默认视图（与 texture 同生命周期：纹理重建时换新）
     view: Option<Arc<wgpu::TextureView>>,
+    /// 帧纹理代数（纹理（重）建即 +1——外部包装层（Surface 桥缓存）的
+    /// 失效判据：地址复用不误判，重建必换代）
+    texture_generation: u64,
     size: (u32, u32),
     /// 主时钟（有音轨时未来 = 音轨位置；v1 = 累计 dt）
     clock: Duration,
@@ -42,6 +45,7 @@ impl Video {
             queue,
             texture: None,
             view: None,
+            texture_generation: 0,
             size: (0, 0),
             clock: Duration::ZERO,
             position: Duration::ZERO,
@@ -141,9 +145,15 @@ impl Video {
                 copy_frame_pixels(&self.queue, &texture, frame, size);
                 self.texture = Some(texture);
                 self.view = Some(view);
+                self.texture_generation = self.texture_generation.wrapping_add(1);
                 self.size = (frame.width, frame.height);
             }
         }
+    }
+
+    /// 帧纹理代数（纹理（重）建即 +1；外部包装缓存按此失效）
+    pub fn texture_generation(&self) -> u64 {
+        self.texture_generation
     }
 
     /// 帧纹理（YUV 已转 RGBA；未解码首帧时 None）

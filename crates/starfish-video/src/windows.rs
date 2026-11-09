@@ -144,7 +144,21 @@ pub(crate) fn hardware_h264_available() -> bool {
 impl MfReader {
     pub(crate) fn open(path: &str) -> WResult<Self> {
         let guard = MfGuard::new()?;
-        let url = windows::core::HSTRING::from(path);
+        // 本地路径 → file:// URL（MFCreateSourceReaderFromURL 按 URL scheme
+        // 解析——裸 "D:\..." 的盘符冒号被误读为 scheme = 0x80070035 网络
+        // 路径未找到，桌面实测）。file:/// + 正斜杠绝对路径为规范形态
+        let url = windows::core::HSTRING::from(if path.contains("://") {
+            path.to_owned()
+        } else {
+            let canon = std::path::Path::new(path)
+                .canonicalize()
+                .unwrap_or_else(|_| std::path::PathBuf::from(path));
+            // 先剥 \\?\ 扩展前缀再转正斜杠（顺序颠倒则前缀匹配落空）
+            let s = canon.to_string_lossy();
+            let s = s.strip_prefix(r"\\?\").unwrap_or(&s).to_owned();
+            let s = s.replace('\\', "/");
+            format!("file:///{s}")
+        });
 
         let reader: mf::IMFSourceReader = unsafe {
             mf::MFCreateSourceReaderFromURL(&url, None)?
