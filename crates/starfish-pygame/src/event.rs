@@ -64,6 +64,14 @@ pub enum Event {
         x: f64,
         y: f64,
     },
+    /// 文本输入对话框完成（Android IME 组合方案：宿主弹出原生
+    /// EditText 对话框，完成后整体回填——脚本以此覆盖自己的输入
+    /// 框内容；取消 = 宿主不回投本事件）。变体无条件存在——仅
+    /// Android 产生，与 Touch/Suspend 同惯例。
+    TextDialogDone {
+        /// 对话框的最终文本（确定 = 编辑后全文；取消 = 宿主不回投）
+        text: String,
+    },
     /// 未翻译变体兜底（RedrawRequested 等不丢不炸）
     Other,
 }
@@ -118,6 +126,12 @@ pub fn remove_raw_listener(id: RawListenerId) -> bool {
 /// 后端，just_pressed 是帧间边沿——一帧恰好一次，归宿主帧管线）。
 pub fn pump() -> bool {
     let mut quit = false;
+    // 文本对话框完成回投 drain（引擎线程收——UI 线程 JNI 回调写的跨线程
+    // 槽经此转正为事件，随 USER_PENDING 通道入队）
+    for text in crate::dialog::drain_text_dialog_results() {
+        USER_PENDING
+            .with(|p| p.borrow_mut().push_back(Event::TextDialogDone { text }));
+    }
     let pending: Vec<Event> = USER_PENDING.with(|p| p.borrow_mut().drain(..).collect());
     QUEUE.with(|q| {
         let mut q = q.borrow_mut();
@@ -187,6 +201,13 @@ pub fn custom_code() -> u32 {
 pub fn post_user(code: u32) {
     USER_PENDING
         .with(|p| p.borrow_mut().push_back(Event::User { code }));
+}
+
+/// 文本对话框完成回投（Android 宿主 JNI 回调调用——start_text_dialog
+/// 的配对完成事件）。保一帧语义同 post_user：下一帧 get/poll 可见。
+pub fn post_text_dialog_done(text: String) {
+    USER_PENDING
+        .with(|p| p.borrow_mut().push_back(Event::TextDialogDone { text }));
 }
 
 /// 引擎窗口事件直取（仅 pump 使用——翻译 + 状态表喂入的唯一入口）。
