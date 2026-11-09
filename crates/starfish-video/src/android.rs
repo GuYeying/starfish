@@ -306,7 +306,19 @@ fn jni_byte_buffer<'local>(
     let as_i8 = unsafe { std::slice::from_raw_parts(bytes.as_ptr().cast::<i8>(), bytes.len()) };
     env.set_byte_array_region(&arr, 0, as_i8)
         .map_err(jerr("set_byte_array_region 失败"))?;
-    Ok(arr.into())
+    // jbyteArray → ByteBuffer.wrap（MediaFormat.setByteBuffer 形参 =
+    // ByteBuffer；直接传 jbyteArray 被 CheckJNI 拒绝 = bad arguments
+    // abort，模拟器/真机同炸）
+    let wrapped = env
+        .call_static_method(
+            "java/nio/ByteBuffer",
+            "wrap",
+            "([B)Ljava/nio/ByteBuffer;",
+            &[JValue::Object(&arr)],
+        )
+        .and_then(|v| v.l())
+        .map_err(jerr("ByteBuffer.wrap 失败"))?;
+    Ok(wrapped)
 }
 
 fn set_buffer(
