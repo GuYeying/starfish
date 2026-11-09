@@ -15,7 +15,7 @@
 use std::sync::Mutex;
 
 use super::PENDING;
-use crate::event::{Event, MouseButton};
+use crate::event::{Event, KeyCode, MouseButton};
 use crate::window::reset_single_window_slot;
 
 /// 外部注入窗口：ANativeWindow 引用（fromSurface 获得 _acquire，detach
@@ -200,4 +200,21 @@ pub(crate) fn external_size_impl() -> Option<(u32, u32)> {
 /// [`crate::embedded::inject_touch`] 的委托目标（action：0 down / 1 move / 2 up）
 pub(crate) fn inject_touch_impl(action: u8, x: f64, y: f64) {
     inject_external_touch(action, x, y);
+}
+
+/// 嵌入宿主注入退格（IME deleteSurroundingText → KeyDown/KeyUp
+/// Backspace 事件对——egui 以 Key::Backspace 处理文本删除）
+pub fn inject_external_backspace() {
+    let mut queue = PENDING.lock().unwrap_or_else(|p| p.into_inner());
+    queue.push_back(Event::KeyDown {
+        key: KeyCode::Backspace,
+        modifiers: Default::default(),
+        repeat: false,
+    });
+    queue.push_back(Event::KeyUp { key: KeyCode::Backspace, modifiers: Default::default() });
+}
+
+/// [] 的委托目标
+pub(crate) fn inject_backspace_impl() {
+    inject_external_backspace();
 }

@@ -125,17 +125,29 @@ pub use window::{EventProxy, EventProxyClosed};
 
 // ── 文本输入生命周期（顶层包装——全平台可用，Android+embedded 走真路径）──
 
+/// 文本输入活跃标志（跨线程 AtomicBool——Java 宿主经 JNI 读取；
+/// Rust 侧由隐式 egui wants_keyboard_input 状态变化驱动）
+static TEXT_INPUT_ACTIVE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// 呼出软键盘（Android = Java 宿主 showSoftInput；桌面 = no-op——硬件
 /// 键盘恒可用，文本事件已恒流动）。跨平台脚本安全调用。
 pub fn start_text_input() {
+    TEXT_INPUT_ACTIVE.store(true, std::sync::atomic::Ordering::Relaxed);
     #[cfg(all(target_os = "android", feature = "embedded"))]
     embedded::start_text_input();
 }
 
 /// 收起软键盘（Android = Java 宿主 hideSoftInput；桌面 = no-op）。
 pub fn stop_text_input() {
+    TEXT_INPUT_ACTIVE.store(false, std::sync::atomic::Ordering::Relaxed);
     #[cfg(all(target_os = "android", feature = "embedded"))]
     embedded::stop_text_input();
+}
+
+/// 文本输入活跃标志（Java 宿主 JNI 轮询读——决定 show/hide 软键盘）
+pub fn text_input_active() -> bool {
+    TEXT_INPUT_ACTIVE.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// (Android builds only) Call from the host's `android_main` to wire up

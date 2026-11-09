@@ -48,7 +48,7 @@ pub(crate) mod embedded;
 
 pub(crate) use embedded::{
     attach_surface_impl, detach_surface_impl, external_active, external_size_impl,
-    inject_text_impl, inject_touch_impl, release_pending_external,
+    inject_backspace_impl, inject_text_impl, inject_touch_impl, release_pending_external,
     surface_resized_impl, EXTERNAL,
 };
 

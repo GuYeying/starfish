@@ -32,6 +32,8 @@
 //! 线程：attach/detach 在宿主 UI 线程调用（JNI 回调线程）；引擎在
 //! .so 自起线程驱动，帧渲染对本指针的使用由 GPU 驱动线程安全保证。
 
+use std::sync::Arc;
+
 /// 注入宿主 SurfaceView 的 Surface（attach JNI 回调转发）。
 ///
 /// # Safety
@@ -115,4 +117,10 @@ pub fn stop_text_input() {
     if let Some(f) = bridge {
         f(false);
     }
+}
+
+/// 退格注入（IME 删除——TextInputSurfaceView 的
+/// deleteSurroundingText 转发）
+pub fn inject_backspace() {
+    crate::platform::android::inject_backspace_impl();
 }
