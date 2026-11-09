@@ -122,6 +122,21 @@ pub fn inject_external_touch(action: u8, x: f64, y: f64) {
     }
 }
 
+/// 嵌入宿主注入 IME 提交文本（TextInput 事件——与 glue 路径的
+/// `InputEvent::TextEvent` 同语义）。宿主 Java 侧由自定义
+/// `InputConnection.commitText` 转发（软键盘 → JNI → 本队列）。
+pub fn inject_external_text(text: String) {
+    PENDING
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .push_back(Event::TextInput { text });
+}
+
+/// [`crate::embedded::inject_text`] 的委托目标
+pub(crate) fn inject_text_impl(text: String) {
+    inject_external_text(text);
+}
+
 /// 嵌入宿主的尺寸变化事件（Resized 事件入队）
 pub fn inject_external_resized(width: u32, height: u32) {
     PENDING

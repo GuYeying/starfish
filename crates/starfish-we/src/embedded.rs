@@ -21,6 +21,7 @@
 //! - [`attach_surface`] / [`surface_resized`] / [`detach_surface`]：
 //!   宿主 SurfaceView 生命周期回调的转发；
 //! - [`inject_touch`]：宿主 View 的触摸事件注入（主手指 → 鼠标合成）；
+//! - [`inject_text`]：宿主 InputConnection 的 IME 提交文本注入（TextInput 事件）；
 //! - [`external_size`] / [`release_surface`]：尺寸自查与引用收尾。
 //!
 //! 设计约束（层级纪律）：starfish-we 的正式 API 仍是 [`crate::Window`]
@@ -77,4 +78,10 @@ pub fn release_surface() {
 /// 触摸注入（action：0 = down，1 = move，2 = up；坐标 = 位图像素）
 pub fn inject_touch(action: u8, x: f64, y: f64) {
     crate::platform::android::inject_touch_impl(action, x, y);
+}
+
+/// IME 提交文本注入（TextInput 事件——宿主 Java 侧自定义
+/// InputConnection.commitText 转发；软键盘呼出与聚焦归宿主 Java 层）
+pub fn inject_text(text: String) {
+    crate::platform::android::inject_text_impl(text);
 }

@@ -42,6 +42,7 @@ use windows_sys::Win32::Foundation::{
 use windows_sys::Win32::Graphics::Gdi as gdi;
 use windows_sys::Win32::System::LibraryLoader as lib;
 use windows_sys::Win32::UI::HiDpi as hid;
+use windows_sys::Win32::Graphics::Dwm as dwm;
 use windows_sys::Win32::UI::WindowsAndMessaging as wm;
 
 use crate::error::WindowError;
@@ -490,6 +491,20 @@ impl WindowInner {
                         | wm::SWP_FRAMECHANGED,
                 );
             }
+            // Win11 corner consistency (user-tested feedback): TOOLWINDOW
+            // windows are excluded from DWM auto-rounding — force ROUND
+            // so the desktop-pet window keeps system aesthetics. Restore
+            // DEFAULT on disable (let DWM decide again).
+            // Win11 圆角一致性（用户实测反馈）：TOOLWINDOW 会被 DWM 排除
+            // 在自动圆角外——显式 ROUND 让桌宠窗口保持系统审美；关闭时
+            // 恢复默认（交还 DWM 判定）。
+            let pref: u32 = if enable { 2 } else { 0 }; // DWMWCP_ROUND / DEFAULT
+            dwm::DwmSetWindowAttribute(
+                self.hwnd,
+                dwm::DWMWA_WINDOW_CORNER_PREFERENCE as u32,
+                &pref as *const u32 as *const core::ffi::c_void,
+                4,
+            );
         }
         Ok(())
     }
