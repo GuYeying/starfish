@@ -23,6 +23,7 @@ robius-file-picker = { workspace = true }
 # Android 专属：Fragment 对话框的 JNI 桥 + robius 环境桥（crate 化时
 # 从旧单 crate 的 android 依赖段漏带——批次三十四出包时补回）
 [target.'cfg(target_os = "android")'.dependencies]
+starfish-debug = { path = "../starfish-debug" }
 jni = "0.21"
 robius-android-env = "0.2"
 

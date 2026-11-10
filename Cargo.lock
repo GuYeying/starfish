@@ -4049,6 +4049,7 @@ dependencies = [
  "rfd 0.15.4",
  "robius-android-env",
  "robius-file-picker",
+ "starfish-debug",
  "starfish-permission",
  "wasm-bindgen",
  "wasm-bindgen-futures",

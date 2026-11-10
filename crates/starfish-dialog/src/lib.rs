@@ -531,17 +531,21 @@ mod imp {
             let name = env
                 .new_string("robius.file_picker.FilePickerFragment")
                 .map_err(|e| format!("STEP-A0: new_string failed: {e:?}"))?;
-            env.call_method(
+            // STEP-A：loadClass 预热——命中（部分容器把 dex 并入 app
+            // classpath）则直通；**未命中非致命**（2026-11-10 卓易通真机
+            // 实测：activity loader 对该类抛异常属常态——robius 自带
+            // InMemoryDexClassLoader 自足装载，不依赖 app classpath；
+            // 本函数真正的必要步骤只是下方 setContextClassLoader）
+            if let Err(e) = env.call_method(
                 &loader,
                 "loadClass",
                 "(Ljava/lang/String;)Ljava/lang/Class;",
                 &[JValue::from(&name)],
-            )
-            .map_err(|e| {
-                format!(
-                    "STEP-A: loadClass failed — dex not loaded by container: {e:?}"
-                )
-            })?;
+            ) {
+                starfish_debug::log_debug!(format!(
+                    "[dialog] STEP-A loadClass 未命中（常态——InMemory 兜底）: {e:?}"
+                ));
+            }
             // 设为当前线程上下文类加载器（robius 内部查找的回退依赖）
             let thread = env
                 .call_static_method(
