@@ -18,6 +18,7 @@ tray = ["starfish-we/tray"]
 
 # 依赖单向（契约硬性规则）：本层可直用各引擎 crate 类型；引擎 crate 永不感知本层。
 [dependencies]
+pollster = { workspace = true }
 starfish-std = { workspace = true }
 starfish-debug = { workspace = true }
 starfish-we = { workspace = true }

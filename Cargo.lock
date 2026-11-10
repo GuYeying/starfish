@@ -4138,6 +4138,7 @@ dependencies = [
  "js-sys",
  "log",
  "once_cell",
+ "pollster",
  "serde",
  "serde_json",
  "sha2",

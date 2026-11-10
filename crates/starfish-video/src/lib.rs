@@ -163,7 +163,7 @@ impl VideoModule {
     ///
     /// 硬解唯一策略：平台无硬件 H.264 解码器时返回 [`VideoError::NoHardwareDecoder`]，
     /// 不落任何软解兜底。
-    pub fn open(&self, path: impl Into<String>) -> Result<Video, VideoError> {
+    pub async fn open(&self, path: impl Into<String>) -> Result<Video, VideoError> {
         let backend = self.open_backend(path.into().as_str())?;
         Ok(Video::new(backend, self.device.clone(), self.queue.clone()))
     }
@@ -181,7 +181,7 @@ impl VideoModule {
     ///   结束收尾推荐 `voice` 的 `fade_out_and_close`（或在 [`Video::ended`]
     ///   后静置——ring 残余由混音侧自然排空）
     /// - native 无音轨/坏音轨返回 Err（可感知）；web 异步装配失败仅静音降级
-    pub fn open_with_audio(
+    pub async fn open_with_audio(
         &self,
         path: impl Into<String>,
         voice: StreamVoice,

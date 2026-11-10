@@ -37,10 +37,11 @@ impl VideoSystem {
         }
     }
 
-    /// 打开视频文件（惰性：首个 update 才解码首帧）
+    /// 打开视频文件（惰性：首个 update 才解码首帧）——底层 async 接口
+    /// pollster::block_on 收敛（调用方在引擎线程——帧轮询模型无 executor）
     pub fn open(&self, path: impl Into<String>) -> Result<Video, VideoError> {
         Ok(Video {
-            inner: self.inner.open(path)?,
+            inner: pollster::block_on(self.inner.open(path))?,
             frame_cache: std::cell::RefCell::new(None),
         })
     }
