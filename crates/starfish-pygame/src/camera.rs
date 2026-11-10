@@ -37,7 +37,7 @@ pub enum Projection {
 /// 构造：`Camera::ortho(logical, physical)` 或
 /// `Camera::perspective(fov, logical, physical, near, far)`
 /// ——物理/逻辑尺寸关系（letterbox）在构造时锁定，resize 走 `resize()`。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct Camera {
     /// 视图矩阵（2D 恒 identity；3D = look_at 等）
     view: Mat4,
@@ -283,5 +283,21 @@ mod tests {
     fn matmul_composes_transforms() {
         let a = Camera::ortho((800, 600), (800, 600));
         let _ = a.mvp(); // 确保 letterbox 内聚不 panic
+    }
+}
+// 追加：Screen 集成方法（阶段一 1.2 集成口——Screen.camera 显式设置）
+impl Camera {
+    /// 从 RenderWish 构造（Screen.refresh_camera 内部使用——
+    /// dim3d 旗标决定 ortho/perspective，物理尺寸取自 surface）
+    pub(crate) fn from_wish(
+        wish: &crate::render::RenderWish,
+        logical: (u32, u32),
+        physical: (u32, u32),
+    ) -> Self {
+        if wish.dim3d {
+            Self::perspective(wish.fov_deg, logical, physical, wish.near, wish.far)
+        } else {
+            Self::ortho(logical, physical)
+        }
     }
 }

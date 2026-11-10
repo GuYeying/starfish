@@ -323,6 +323,10 @@ pub struct Screen {
     logical: Cell<(u32, u32)>,
     /// 显式相机（阶段一 1.2：letterbox 内聚——MVP/坐标映射/裁剪全在此）
     pub(crate) camera: RefCell<GameCamera>,
+    /// 显式相机旗标（`set_game_camera` 置位——显式优先于自动：
+    /// refresh_camera 不再按 wish 重建，仅随物理视口重算 letterbox；
+    /// set_mode 新画布 = 新会话，旗标清除恢复 Auto）
+    camera_explicit: Cell<bool>,
     /// 首包映射参数打点哨兵（呈现排障；一次性）
     pack_logged: Cell<bool>,
     /// 延迟叠加队列（[`Screen::defer_overlay`] 的排程；present 时统一执行）
@@ -369,6 +373,7 @@ impl Screen {
             transparent_bg: Cell::new(false),
             logical: Cell::new(physical),
             camera: RefCell::new(GameCamera::ortho(physical, physical)),
+            camera_explicit: Cell::new(false),
             pack_logged: Cell::new(false),
             pending_overlays: RefCell::new(Vec::new()),
         })
@@ -388,15 +393,38 @@ impl Screen {
     }
 
     /// 逻辑画布尺寸登记（set_mode 语义尺寸；Android 嵌入下 = 脚本请求
-    /// 值，物理表面恒原生窗口——呈现按等比缩放居中映射）
+    /// 值，物理表面恒原生窗口——呈现按等比缩放居中映射）。新画布 =
+    /// 新会话：显式相机旗标清除，恢复 Auto（脚本重设走 set_game_camera）
     pub fn set_logical_size(&self, width: u32, height: u32) {
         self.logical.set((width, height));
+        self.camera_explicit.set(false);
         self.refresh_camera();
     }
 
+    /// **显式设置 Camera**（阶段一 1.2 定约——渲染会话必传，无兜底）。
+    /// 脚本通过 pygame.render.game_camera_ortho/perspective 构造后传入。
+    /// 设置后 refresh_camera 不再按 wish 重建（显式优先于自动）——
+    /// 仅随物理视口重算 letterbox（投影/视图/逻辑域保持脚本意志）。
+    pub fn set_game_camera(&self, camera: crate::camera::Camera) {
+        *self.camera.borrow_mut() = camera;
+        self.camera_explicit.set(true);
+    }
+
+    /// 当前 Camera 的克隆（绑定层获取 MVP/坐标映射用）
+    pub fn get_camera(&self) -> crate::camera::Camera {
+        self.camera.borrow().clone()
+    }
+
     /// 重建 Camera（logical/physical/camera_kind 变化时调用——
-    /// letterbox 数学的唯一来源）
+    /// letterbox 数学的唯一来源）。显式相机（`set_game_camera` 已设）
+    /// **不按 wish 重建**——仅随新物理视口重算 letterbox（投影/视图/
+    /// 逻辑域保持脚本意志；显式优先于自动）
     fn refresh_camera(&self) {
+        if self.camera_explicit.get() {
+            let physical = self.surface.borrow().size();
+            self.camera.borrow_mut().resize(physical);
+            return;
+        }
         let (lw, lh) = self.logical.get();
         let (pw, ph) = self.surface.borrow().size();
         let wish = super::current_wish();
