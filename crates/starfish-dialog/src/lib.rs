@@ -542,6 +542,10 @@ mod imp {
                 "(Ljava/lang/String;)Ljava/lang/Class;",
                 &[JValue::from(&name)],
             ) {
+                // 挂起异常必须清（jni crate 捕获不清——后续任一 JNI 调用
+                // 在 CheckJNI 下 abort "No pending exception expected"，
+                // 模拟器 runtime 实测）
+                env.exception_clear();
                 starfish_debug::log_debug!(format!(
                     "[dialog] STEP-A loadClass 未命中（常态——InMemory 兜底）: {e:?}"
                 ));
