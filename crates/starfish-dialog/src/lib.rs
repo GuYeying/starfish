@@ -77,8 +77,9 @@ impl PickedFile {
 }
 
 // ── 桌面：rfd 阻塞实现（在 async 体内直接执行 = 模拟异步）─────────
+// OHOS 摘除：ohos 目标 target_os=linux（rustc 实测）——rfd 后端拉 ashpd→Wayland；OHOS 走下方站桩臂。
 
-#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+#[cfg(all(any(target_os = "windows", target_os = "linux", target_os = "macos"), not(target_env = "ohos")))]
 mod imp {
     use super::*;
     use rfd::FileDialog;
@@ -660,6 +661,70 @@ pub async fn pick_file(
 /// - 用户取消 → `Ok(None)`
 pub async fn save_bytes(file_name: &str, data: impl AsRef<[u8]>) -> Result<Option<PathBuf>, DialogError> {
     imp::save_bytes_impl(file_name, data.as_ref()).await
+}
+
+// ── OHOS：站桩（target_os="linux" + target_env="ohos"，rustc --print cfg
+//    实测 2026-11-11——不分流会误吞桌面 rfd 臂拉起 ashpd→Wayland 链，
+//    OHOS 无 Wayland 合成器）。真适配层 = FilePicker NDK / ArkUI，接入位
+//    见 pygamest reference/新平台扩展指南（macOS-iOS-HarmonyOS）。
+
+#[cfg(all(target_os = "linux", target_env = "ohos"))]
+mod imp {
+    use super::*;
+
+    /// OHOS 站桩任务句柄——`start` 恒 Err，本类型无实例（uninhabited
+    /// enum：类型系统编码不可达；空匹配对 enum 合法）。
+    pub(super) enum PickJob {}
+
+    impl PickJob {
+        pub fn try_result(&mut self) -> Option<Result<Option<PickedFile>, DialogError>> {
+            match *self {}
+        }
+    }
+
+    pub(super) enum SaveJob {}
+
+    impl SaveJob {
+        pub fn try_result(&mut self) -> Option<Result<Option<PathBuf>, DialogError>> {
+            match *self {}
+        }
+    }
+
+    fn stub_err(api: &str) -> DialogError {
+        DialogError::Backend(format!(
+            "{api}: HarmonyOS 站桩预留——FilePicker/ArkUI 适配层待建，\
+             接入位见 pygamest reference/新平台扩展指南（macOS-iOS-HarmonyOS）"
+        ))
+    }
+
+    pub(super) fn pick_file_start_impl(
+        _title: Option<&str>,
+        _filters: &[Filter],
+    ) -> Result<PickJob, DialogError> {
+        Err(stub_err("pick_file_start"))
+    }
+
+    pub(super) fn save_bytes_start_impl(
+        _file_name: &str,
+        _data: Vec<u8>,
+    ) -> Result<SaveJob, DialogError> {
+        Err(stub_err("save_bytes_start"))
+    }
+
+    /// 阻塞式（async 形态）——同 start 口的显式 Err 定约。
+    pub(super) async fn pick_file_impl(
+        _title: Option<&str>,
+        _filters: &[Filter],
+    ) -> Result<Option<PickedFile>, DialogError> {
+        Err(stub_err("pick_file"))
+    }
+
+    pub(super) async fn save_bytes_impl(
+        _file_name: &str,
+        _data: &[u8],
+    ) -> Result<Option<PathBuf>, DialogError> {
+        Err(stub_err("save_bytes"))
+    }
 }
 
 // ── 轮询式 API（非 wasm 平台；Android 强烈推荐）──────────────────────

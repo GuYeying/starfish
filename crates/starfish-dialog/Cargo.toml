@@ -13,7 +13,10 @@ log = { workspace = true }
 
 # 桌面：rfd 原生（Windows / Linux-GTK3 / macOS；同步阻塞 API）
 # Linux 构建注意：rfd 后端为 GTK3，需 libgtk-3-dev
-[target.'cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))'.dependencies]
+# OHOS 摘除：ohos 目标 target_os="linux"（rustc 实测 2026-11-11）——
+# rfd linux 后端拉 ashpd→Wayland（OHOS 无合成器，实证墙）；OHOS 走
+# lib.rs 站桩臂（FilePicker/ArkUI 真适配层待建）。
+[target.'cfg(all(any(target_os = "windows", target_os = "linux", target_os = "macos"), not(target_env = "ohos")))'.dependencies]
 rfd = { workspace = true }
 
 # 移动端：robius-file-picker（Android 构建需 ANDROID_JAR 环境变量）
