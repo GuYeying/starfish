@@ -101,7 +101,6 @@ pub(crate) struct Gpu {
     /// 默认相机 rig（uniform + bind；mvp 由 pack 按 CameraKind 现写）
     pub camera: RefCell<target::CameraRig>,
     /// Auto 兜底相机种类（Auto2d / Auto3d——init(dim=) 定型）
-    pub camera_kind: RefCell<CameraKind>,
     /// 默认采样器（linear clamp——pygame 贴图平滑语义）
     pub sampler: Arc<wgpu::Sampler>,
     /// 1×1 白纹理（纯色路径：fill/draw::* 的纹理入端）
@@ -164,14 +163,6 @@ impl RenderWish {
         blend: SpriteBlend::Alpha,
     };
 
-    /// Auto 兜底相机种类（Gpu 装配时定型）
-    fn camera_kind(&self) -> CameraKind {
-        if self.dim3d {
-            CameraKind::Auto3d { fov_deg: self.fov_deg, near: self.near, far: self.far }
-        } else {
-            CameraKind::Auto2d
-        }
-    }
 }
 
 /// 渲染愿望写入（pygame.render.init——set_mode 前配置；整只覆盖）。
@@ -179,11 +170,6 @@ impl RenderWish {
 /// 即时生效路径——旧 reset_camera 全局口退役后的承接）
 pub fn store_wish(wish: RenderWish) {
     WISH_SLOT.with(|w| *w.borrow_mut() = wish);
-    GPU_SLOT.with(|slot| {
-        if let Some(g) = slot.borrow().as_ref() {
-            *g.camera_kind.borrow_mut() = wish.camera_kind();
-        }
-    });
 }
 
 /// 当前渲染愿望（含未配置的默认值）
@@ -243,19 +229,17 @@ pub fn gpu_info() -> Option<GpuInfo> {
 
 // ── Auto 兜底相机（段级相机 None 段的解算源）──────────────────────
 
-/// 当前 Auto 兜底 MVP（主屏尺寸现算——resize 天然跟随）。会话级相机
-/// 选择走 `RenderPass::set_camera`（本函数不再承载 override）
+/// 兼容口：Surface 场景的 MVP（逻辑==物理 → letterbox 恒等 → 纯正交）。
+/// Screen 场景应用 Screen.camera.mvp()（含 letterbox）。
+/// 兼容口：主屏 MVP（脚本  调用——
+/// Screen.camera 的 letterbox MVP；无 Screen 时退化为正交）
 pub fn camera_mvp() -> Mat4 {
     let size = crate::display::get_screen().size();
     camera_mvp_for(size)
 }
 
-/// 按目标尺寸解 Auto 兜底 MVP（客人合成用——与目标层 pack 的 None 段
-/// 同一解算）
 pub fn camera_mvp_for(size: (u32, u32)) -> Mat4 {
-    let g = gpu();
-    let kind = *g.camera_kind.borrow();
-    kind.resolve_mvp((size.0.max(1) as f32, size.1.max(1) as f32))
+    crate::camera::Camera::ortho(size, size).mvp()
 }
 
 impl Gpu {
@@ -268,7 +252,6 @@ impl Gpu {
         // 愿望消费（一次定型：剔除/混合进材质，相机维进 Auto 种类初值）
         let wish = current_wish();
         let material = SpriteMaterial::new(&access, wish.cull, wish.blend);
-        let camera_kind = RefCell::new(wish.camera_kind());
         let sampler = Arc::new(
             access.create_sampler("pygame_sampler", &SamplerDescriptor::linear_clamp()),
         );
@@ -291,7 +274,6 @@ impl Gpu {
                 &device,
                 &access,
             )),
-            camera_kind,
             sampler,
             white,
             white_bind,
@@ -301,18 +283,6 @@ impl Gpu {
             white_key,
         };
         gpu0
-    }
-
-    /// pack 期 Auto 兜底 MVP 解算：按当前种类解出目标尺寸的 MVP 写入
-    /// 默认 rig——返回 rig 的借用供 EncodeCtx 消费（None 段用）。
-    pub(crate) fn camera_for(
-        &self,
-        size: (u32, u32),
-    ) -> std::cell::RefMut<'_, target::CameraRig> {
-        let mut rig = self.camera.borrow_mut();
-        let kind = *self.camera_kind.borrow();
-        rig.mvp = kind.resolve_mvp((size.0.max(1) as f32, size.1.max(1) as f32));
-        rig
     }
 
     /// 纹理 bind group 缓存（texture 0 + sampler 1；按纹理指针键控。

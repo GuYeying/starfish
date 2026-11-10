@@ -399,12 +399,11 @@ impl Screen {
     fn refresh_camera(&self) {
         let (lw, lh) = self.logical.get();
         let (pw, ph) = self.surface.borrow().size();
-        let kind = *self.gpu.camera_kind.borrow();
-        let cam = match kind {
-            super::camera::CameraKind::Auto2d => GameCamera::ortho((lw, lh), (pw, ph)),
-            super::camera::CameraKind::Auto3d { fov_deg, near, far } => {
-                GameCamera::perspective(fov_deg, (lw, lh), (pw, ph), near, far)
-            }
+        let wish = super::current_wish();
+        let cam = if wish.dim3d {
+            GameCamera::perspective(wish.fov_deg, (lw, lh), (pw, ph), wish.near, wish.far)
+        } else {
+            GameCamera::ortho((lw, lh), (pw, ph))
         };
         *self.camera.borrow_mut() = cam;
     }
@@ -435,7 +434,7 @@ impl Screen {
     /// letterbox 由 fit_ndc 统一施加——Manual 仍全权接管投影（视角/
     /// 纵横比用户定，按逻辑画布构造），仅输出被收进画布子矩形
     pub fn present_mvp(&self) -> Mat4 {
-        self.fit_ndc() * crate::render::camera_mvp_for(self.logical.get())
+        self.camera.borrow().mvp()
     }
 
     /// 物理点 → 逻辑点（输入坐标映射；呈现映射的逆变换——等比缩放 +
@@ -642,7 +641,7 @@ impl Screen {
             // （1.3 letterbox 收敛：fit_ndc + Auto MVP 组合全在 Camera 内部）
             let cam = self.camera.borrow();
             let fit_ndc = cam.fit_ndc();
-            let mut camera = self.gpu.camera_for(cam.logical_size());
+            let mut camera = self.gpu.camera.borrow_mut();
             camera.mvp = cam.mvp(); // Camera::mvp = fit_ndc × projection × view
             let mut ctx = EncodeCtx {
                 gpu: &self.gpu,
@@ -875,7 +874,8 @@ impl OverlayCtx {
     /// 收口才执行）若帧内多次 set_camera，收口时的全局相机可能已非排
     /// 程时的值；精确时序用 [`Self::blit_fullscreen_with`]（排程时快照）。
     pub fn blit_fullscreen(&mut self, src: &Surface) {
-        let mvp = super::camera_mvp_for(self.size);
+        // Surface 逻辑==物理 → letterbox 恒等 → 纯正交 MVP
+        let mvp = GameCamera::ortho(self.size(), self.size()).mvp();
         self.blit_fullscreen_with(src, mvp.to_cols_array_2d());
     }
 
@@ -1117,7 +1117,9 @@ impl<'a> RenderPass<'a> {
             if b.is_empty() {
                 return;
             }
-            let camera = gpu.camera_for(self.size());
+            let mut camera = gpu.camera.borrow_mut();
+            // Surface 逻辑==物理 → letterbox 恒等 → MVP = 纯正交
+            camera.mvp = GameCamera::ortho(self.size(), self.size()).mvp();
             let mut ctx = EncodeCtx {
                 gpu,
                 camera: &camera,
@@ -1589,7 +1591,9 @@ impl Surface {
             if batch.is_empty() {
                 return;
             }
-            let camera = self.gpu.camera_for(self.size);
+            let mut camera = self.gpu.camera.borrow_mut();
+            // Surface 逻辑==物理 → letterbox 恒等 → MVP = 纯正交
+            camera.mvp = GameCamera::ortho(self.size(), self.size()).mvp();
             let depth_att = if depth {
                 self.depth.as_ref().map(|(_, view)| DepthAttachment {
                     view: view.clone(),
