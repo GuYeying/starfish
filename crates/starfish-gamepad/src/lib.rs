@@ -113,12 +113,12 @@ pub struct GamepadState {
     /// 本帧新按下（上帧无、本帧有，或帧内收到按下事件）
     just: HashSet<(usize, Button)>,
     /// 桌面：gilrs 句柄（事件源 + 自动状态缓存）
-    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+    #[cfg(all(any(target_os = "windows", target_os = "linux", target_os = "macos"), not(target_env = "ohos")))]
     gilrs: Option<gilrs::Gilrs>,
     /// 桌面：自有编号 → gilrs GamepadId（gilrs id 不透明，连接顺序分配自有编号）
-    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+    #[cfg(all(any(target_os = "windows", target_os = "linux", target_os = "macos"), not(target_env = "ohos")))]
     gilrs_ids: BTreeMap<usize, gilrs::GamepadId>,
-    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+    #[cfg(all(any(target_os = "windows", target_os = "linux", target_os = "macos"), not(target_env = "ohos")))]
     next_id: usize,
 }
 
@@ -129,11 +129,11 @@ impl GamepadState {
             pads: BTreeMap::new(),
             prev_buttons: BTreeMap::new(),
             just: HashSet::new(),
-            #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+            #[cfg(all(any(target_os = "windows", target_os = "linux", target_os = "macos"), not(target_env = "ohos")))]
             gilrs: gilrs::Gilrs::new().ok(),
-            #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+            #[cfg(all(any(target_os = "windows", target_os = "linux", target_os = "macos"), not(target_env = "ohos")))]
             gilrs_ids: BTreeMap::new(),
-            #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+            #[cfg(all(any(target_os = "windows", target_os = "linux", target_os = "macos"), not(target_env = "ohos")))]
             next_id: 0,
         }
     }
@@ -148,7 +148,7 @@ impl GamepadState {
         }
         self.just.clear();
 
-        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+        #[cfg(all(any(target_os = "windows", target_os = "linux", target_os = "macos"), not(target_env = "ohos")))]
         self.poll_gilrs();
         #[cfg(target_arch = "wasm32")]
         self.poll_web();
@@ -198,14 +198,14 @@ impl Drop for GamepadState {
         // 析构时 drop gilrs 会 fail-fast（STATUS_STACK_BUFFER_OVERRUN，
         // 2026-09-30 sig_probe 实测；同 mixer_quit 的 TLS 析构教训）——
         // 跳过析构即可，OS 在进程回收时统一释放
-        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+        #[cfg(all(any(target_os = "windows", target_os = "linux", target_os = "macos"), not(target_env = "ohos")))]
         std::mem::forget(self.gilrs.take());
     }
 }
 
 // ── 桌面：gilrs 排水 ──────────────────────────────────────────
 
-#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+#[cfg(all(any(target_os = "windows", target_os = "linux", target_os = "macos"), not(target_env = "ohos")))]
 impl GamepadState {
     fn poll_gilrs(&mut self) {
         let Some(gilrs) = &mut self.gilrs else {
@@ -280,7 +280,7 @@ impl GamepadState {
     }
 }
 
-#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+#[cfg(all(any(target_os = "windows", target_os = "linux", target_os = "macos"), not(target_env = "ohos")))]
 fn from_gilrs_button(btn: gilrs::ev::Button) -> Button {
     use gilrs::ev::Button as G;
     match btn {
@@ -304,7 +304,7 @@ fn from_gilrs_button(btn: gilrs::ev::Button) -> Button {
     }
 }
 
-#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+#[cfg(all(any(target_os = "windows", target_os = "linux", target_os = "macos"), not(target_env = "ohos")))]
 fn from_gilrs_axis(axis: gilrs::ev::Axis) -> Axis {
     use gilrs::ev::Axis as G;
     match axis {

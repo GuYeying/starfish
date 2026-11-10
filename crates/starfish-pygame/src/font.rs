@@ -162,7 +162,9 @@ impl Font {
 mod tests {
     use super::*;
 
-    const FONT_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/resources/fonts/Antonio-Regular.ttf");
+    // examples 重组后字体在 demos/ 层下（2026-11-11 修正——原路径
+    // 缺 demos 层 = 干净检出必失败，架构债 A-2）
+    const FONT_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/demos/resources/fonts/Antonio-Regular.ttf");
 
     #[test]
     fn metrics_and_layout_math() {

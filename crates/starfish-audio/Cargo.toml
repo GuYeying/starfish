@@ -16,10 +16,17 @@ starfish-debug = { workspace = true }
 starfish-permission = { workspace = true }
 starfish-io = { workspace = true }
 starfish-dialog = { workspace = true, optional = true }
-cpal = { workspace = true }
 symphonia = { workspace = true }
 bytemuck = { workspace = true }
 log = { workspace = true }
+
+# 原生设备层：cpal 胶水（device.rs 唯一收敛点——上层零 cpal 类型）。
+# OHOS 摘除：ohos 目标 target_os="linux"（rustc --print cfg 实测
+# 2026-11-11）——cpal 会拉 ALSA 主机（alsa-sys 构建脚本在 OHOS 无
+# pkg-config/alsa 实证失败）；OHOS 走 device.rs 桩分支，真适配 =
+# OHAudio 实现同接口（pygamest reference/新平台扩展指南）。
+[target.'cfg(not(any(target_arch = "wasm32", all(target_os = "linux", target_env = "ohos"))))'.dependencies]
+cpal = { workspace = true }
 
 # Web：cpal WebAudio 设备后端；getUserMedia 录音采集（device.rs wasm 输入分支）
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]

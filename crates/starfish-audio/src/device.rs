@@ -18,10 +18,20 @@
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 use std::sync::Arc;
 
+// cpal 导入门控：OHOS 目标（target_os="linux" + target_env="ohos"，
+// rustc --print cfg 实测 2026-11-11）会拉 ALSA 主机——alsa-sys 构建
+// 脚本在 OHOS 实证失败；OHOS 走本文件桩分支（下方同款 cfg），真适配
+// = OHAudio 实现同一公共面（open_output_stream/open_input_stream/
+// 枚举——上层零 cpal 类型，唯一收敛点即本文件）。
+#[cfg(not(all(target_os = "linux", target_env = "ohos")))]
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+#[cfg(not(all(target_os = "linux", target_env = "ohos")))]
 use cpal::{SampleFormat, StreamConfig};
 
-use super::common::{AudioError, AudioUserCallback, StereoFrame};
+use super::common::{AudioError, AudioUserCallback};
+// StereoFrame 仅原生 cpal 回调路径使用（OHOS 桩分支无回调面）
+#[cfg(not(all(target_os = "linux", target_env = "ohos")))]
+use super::common::StereoFrame;
 
 /// 设备端实际生效的流规格（打开成功后由设备值回填）
 #[derive(Debug, Clone, Copy)]
@@ -47,7 +57,7 @@ pub(crate) fn web_audio_ctx() -> Option<Arc<web_sys::AudioContext>> {
 ///
 /// cpal 0.17+ 的 `Stream` 为 Send+Sync，本结构可安全跨线程持有
 ///（对应 free-threaded 线程契约：混音器/录音器可从任意线程创建与销毁）。
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(target_env = "ohos")))]
 pub struct DeviceStream {
     stream: cpal::Stream,
     pub spec: StreamSpec,
@@ -62,9 +72,21 @@ pub struct DeviceStream {
     pub spec: StreamSpec,
 }
 
+/// OHOS 站桩变体：设备面 = OHAudio（真适配层待建）——本结构刻意不可
+/// 构造（`_never: Infallible` 无值可填；open_output_stream /
+/// open_input_stream 恒 Err），类型系统编码"OHOS 尚无设备流"；`spec`
+/// 字段保留 = 上层（混音器/录音器直取字段）零改动。
+#[cfg(all(target_os = "linux", target_env = "ohos"))]
+pub struct DeviceStream {
+    /// 站桩面恒 `StreamSpec { 48000, 2 }` 语义占位（永不读取——无实例）
+    pub spec: StreamSpec,
+    /// 不可构造标记（Infallible 无值——本类型无实例）
+    _never: std::convert::Infallible,
+}
+
 impl DeviceStream {
     /// 暂停流（设备保持打开，回调停发）
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), not(target_env = "ohos")))]
     pub fn pause(&self) -> Result<(), AudioError> {
         self.stream
             .pause()
@@ -87,11 +109,23 @@ impl DeviceStream {
     }
 
     /// 恢复流
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), not(target_env = "ohos")))]
     pub fn resume(&self) -> Result<(), AudioError> {
         self.stream
             .play()
             .map_err(|e| AudioError::Device(format!("流 resume 失败: {e}")))
+    }
+
+    /// OHOS 站桩变体（DeviceStream 不可构造——经 Infallible 字段编码不可达；
+    /// struct 空匹配不适用，分流到字段自身的 uninhabited match）
+    #[cfg(all(target_os = "linux", target_env = "ohos"))]
+    pub fn pause(&self) -> Result<(), AudioError> {
+        match self._never {}
+    }
+
+    #[cfg(all(target_os = "linux", target_env = "ohos"))]
+    pub fn resume(&self) -> Result<(), AudioError> {
+        match self._never {}
     }
 
     /// 恢复流
@@ -117,6 +151,7 @@ impl super::AudioOutputBackend for DeviceStream {
 }
 
 /// 打开默认播放设备：数据面 = 用户回调周期性填充立体声帧（构造即播放）
+#[cfg(not(all(target_os = "linux", target_env = "ohos")))]
 pub fn open_output_stream(
     user_cb: impl AudioUserCallback + Send + 'static,
 ) -> Result<DeviceStream, AudioError> {
@@ -168,8 +203,21 @@ pub fn open_output_stream(
     })
 }
 
+/// OHOS 站桩：OHAudio 设备面待建（显式 Err 定约——绝不静默；
+/// DeviceStream 不可构造，真适配层落位后本分支退役）。
+#[cfg(all(target_os = "linux", target_env = "ohos"))]
+pub fn open_output_stream(
+    _user_cb: impl AudioUserCallback + Send + 'static,
+) -> Result<DeviceStream, AudioError> {
+    Err(AudioError::Device(
+        "open_output_stream: HarmonyOS 站桩预留——OHAudio 设备面待建，\
+         接入位见 pygamest reference/新平台扩展指南（macOS-iOS-HarmonyOS）"
+            .into(),
+    ))
+}
+
 /// 打开默认录音设备：数据面 = 用户回调周期性收到采集帧（构造即采集）
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(target_env = "ohos")))]
 pub fn open_input_stream(
     user_cb: impl AudioUserCallback + Send + 'static,
 ) -> Result<DeviceStream, AudioError> {
@@ -229,7 +277,20 @@ pub fn open_input_stream(
     })
 }
 
+/// OHOS 站桩（录音）：同 open_output_stream 的显式 Err 定约。
+#[cfg(all(target_os = "linux", target_env = "ohos"))]
+pub fn open_input_stream(
+    _user_cb: impl AudioUserCallback + Send + 'static,
+) -> Result<DeviceStream, AudioError> {
+    Err(AudioError::Device(
+        "open_input_stream: HarmonyOS 站桩预留——OHAudio 采集面待建，\
+         接入位见 pygamest reference/新平台扩展指南（macOS-iOS-HarmonyOS）"
+            .into(),
+    ))
+}
+
 /// 枚举播放设备名（诊断用）
+#[cfg(not(all(target_os = "linux", target_env = "ohos")))]
 pub fn output_device_names() -> Result<Vec<String>, AudioError> {
     let host = cpal::default_host();
     let devices = host
@@ -238,8 +299,16 @@ pub fn output_device_names() -> Result<Vec<String>, AudioError> {
     Ok(devices.map(device_name).collect())
 }
 
+/// OHOS 站桩（播放枚举）：同 open_output_stream 的显式 Err 定约。
+#[cfg(all(target_os = "linux", target_env = "ohos"))]
+pub fn output_device_names() -> Result<Vec<String>, AudioError> {
+    Err(AudioError::Device(
+        "output_device_names: HarmonyOS 站桩预留——OHAudio 枚举面待建".into(),
+    ))
+}
+
 /// 枚举录音设备名（诊断用）
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(target_env = "ohos")))]
 pub fn input_device_names() -> Result<Vec<String>, AudioError> {
     let host = cpal::default_host();
     let devices = host
@@ -254,7 +323,16 @@ pub fn input_device_names() -> Result<Vec<String>, AudioError> {
     Ok(vec!["WebAudio 默认麦克风".into()])
 }
 
+/// OHOS 站桩（录音枚举）：同 open_output_stream 的显式 Err 定约。
+#[cfg(all(target_os = "linux", target_env = "ohos"))]
+pub fn input_device_names() -> Result<Vec<String>, AudioError> {
+    Err(AudioError::Device(
+        "input_device_names: HarmonyOS 站桩预留——OHAudio 枚举面待建".into(),
+    ))
+}
+
 /// 设备名（0.18 起 name() 并入 description()）
+#[cfg(not(all(target_os = "linux", target_env = "ohos")))]
 fn device_name(d: cpal::Device) -> String {
     d.description()
         .map(|desc| desc.name().to_string())
@@ -263,10 +341,12 @@ fn device_name(d: cpal::Device) -> String {
 
 // ───────────────────────────────── 内部 ─────────────────────────────────
 
+// 以下 helper 仅原生 cpal 路径使用（OHOS 桩分支无回调/协商面）
 /// 把交错 f32 缓冲以 [`StereoFrame`] 视角交给用户回调
 ///
 /// `#[repr(C) {f32, f32}]` 与交错立体声 f32 布局一致，bytemuck 零拷贝。
 /// 声道数非 2 时静音兜底（协商层已保证 v1 恒为立体声，此为防御分支）。
+#[cfg(not(all(target_os = "linux", target_env = "ohos")))]
 #[inline]
 fn fill_interleaved(data: &mut [f32], channels: u16, f: impl FnOnce(&mut [StereoFrame])) {
     if channels == 2 {
@@ -279,6 +359,7 @@ fn fill_interleaved(data: &mut [f32], channels: u16, f: impl FnOnce(&mut [Stereo
 
 /// 格式协商：优先设备默认配置（f32 立体声命中即用），
 /// 否则扫描支持列表取最高采样率的 f32 立体声档位
+#[cfg(not(all(target_os = "linux", target_env = "ohos")))]
 fn negotiate_stereo_f32(
     default: Option<cpal::SupportedStreamConfig>,
     enumerate: Result<impl Iterator<Item = cpal::SupportedStreamConfigRange>, cpal::Error>,
@@ -296,11 +377,13 @@ fn negotiate_stereo_f32(
         })
 }
 
+#[cfg(not(all(target_os = "linux", target_env = "ohos")))]
 #[inline]
 fn is_stereo_f32(c: &cpal::SupportedStreamConfig) -> bool {
     c.sample_format() == SampleFormat::F32 && c.channels() == 2
 }
 
+#[cfg(not(all(target_os = "linux", target_env = "ohos")))]
 #[inline]
 fn is_stereo_f32_range(c: &cpal::SupportedStreamConfigRange) -> bool {
     c.sample_format() == SampleFormat::F32 && c.channels() == 2

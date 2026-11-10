@@ -6,7 +6,11 @@ rust-version.workspace = true
 description = "手柄输入：gilrs 原生（win/linux/mac，SDL 兼容布局）/ Web Gamepad API Reflect 轮询 / 移动端空实现占位"
 
 # 桌面：gilrs 原生（震动 rumble：win/linux ✓，macos ✗）
-[target.'cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))'.dependencies]
+# OHOS 摘除：ohos 目标 target_os="linux"（rustc 实测 2026-11-11）——
+# gilrs-core 的 linux 分支拉 udev（libudev-sys 构建脚本在 OHOS 实证
+# 失败）；OHOS 自然落入"移动端空实现占位"路径（lib.rs 桌面门控同款
+# cfg 摘除）。
+[target.'cfg(all(any(target_os = "windows", target_os = "linux", target_os = "macos"), not(target_env = "ohos")))'.dependencies]
 gilrs = { workspace = true }
 
 # Web：自持 js_sys Reflect 轮询 navigator.getGamepads()（标准布局映射）
