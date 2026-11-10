@@ -21,7 +21,10 @@ windows = { workspace = true }
 
 # Linux：GStreamer 硬解聚合（klass=Hardware 过滤；仅链接系统动态库，
 # Ubuntu 24.04 自带 GStreamer 1.24）
-[target.'cfg(target_os = "linux")'.dependencies]
+# OHOS 摘除：ohos 目标 target_os="linux"（rustc --print cfg 实测
+# 2026-11-11）——GStreamer 不存在于 OHOS，分流走 UnsupportedPlatform
+# 站桩（lib.rs open_backend 同款 cfg）。
+[target.'cfg(all(target_os = "linux", not(target_env = "ohos")))'.dependencies]
 gstreamer = { workspace = true }
 gstreamer-app = { workspace = true }
 gstreamer-video = { workspace = true }

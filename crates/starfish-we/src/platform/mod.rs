@@ -14,12 +14,20 @@
 #[cfg(target_os = "android")]
 #[allow(dead_code)]
 pub(crate) mod android;
+// HarmonyOS（OHOS）分流桩：rustc 对 ohos 目标的元数据 = target_os="linux"
+// + target_env="ohos"（2026-11-11 rustc --print cfg 实测）——不分流时
+// OHOS 会静默走 linux-Wayland 后端（OHOS 无 Wayland 合成器）。显式摘出
+// 走 harmonyos 站桩（全接口 UnsupportedPlatform/OsError 显式 Err 定约，
+// 真适配层接入位见 pygamest reference/新平台扩展指南）。
+#[cfg(all(target_os = "linux", target_env = "ohos"))]
+#[allow(dead_code)]
+pub(crate) mod harmonyos;
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[allow(dead_code)]
+pub(crate) mod linux;
 #[cfg(target_os = "ios")]
 #[allow(dead_code)]
 pub(crate) mod ios;
-#[cfg(target_os = "linux")]
-#[allow(dead_code)]
-pub(crate) mod linux;
 #[cfg(target_os = "macos")]
 #[allow(dead_code)]
 pub(crate) mod macos;
@@ -33,10 +41,12 @@ pub(crate) mod windows;
 
 #[cfg(target_os = "android")]
 pub(crate) use android as imp;
+#[cfg(all(target_os = "linux", target_env = "ohos"))]
+pub(crate) use harmonyos as imp;
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+pub(crate) use linux as imp;
 #[cfg(target_os = "ios")]
 pub(crate) use ios as imp;
-#[cfg(target_os = "linux")]
-pub(crate) use linux as imp;
 #[cfg(target_os = "macos")]
 pub(crate) use macos as imp;
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]

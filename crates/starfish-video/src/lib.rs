@@ -43,7 +43,10 @@ use starfish_audio::StreamVoice;
 #[cfg(target_os = "windows")]
 mod windows;
 
-#[cfg(target_os = "linux")]
+// OHOS 摘除：ohos 目标 target_os="linux"（rustc --print cfg 实测
+// 2026-11-11）——GStreamer 不存在于 OHOS；ohos 分流走
+// open_backend 的 UnsupportedPlatform 站桩（见下方同款 cfg）。
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
 mod linux;
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
@@ -214,7 +217,7 @@ impl VideoModule {
                     .map_err(|e| VideoError::Backend(e.to_string()))?,
             )
         };
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
         let backend: Box<dyn DecodeBackend> = Box::new(linux::GstReader::open(path)?);
         #[cfg(any(target_os = "macos", target_os = "ios"))]
         let backend: Box<dyn DecodeBackend> = Box::new(apple::VtReader::open(path)?);
@@ -222,9 +225,17 @@ impl VideoModule {
         let backend: Box<dyn DecodeBackend> = Box::new(web::WebDecoder::open(path)?);
         #[cfg(target_os = "android")]
         let backend: Box<dyn DecodeBackend> = Box::new(android::MediaCodecReader::open(path)?);
+        // OHOS：真适配层（AVPlayer/AVCodec NDK）待建——显式站桩
+        // （UnsupportedPlatform 设计语义，绝不静默）。
+        #[cfg(all(target_os = "linux", target_env = "ohos"))]
+        let backend: Box<dyn DecodeBackend> = {
+            let _ = path;
+            return Err(VideoError::UnsupportedPlatform);
+        };
         #[cfg(not(any(
             target_os = "windows",
-            target_os = "linux",
+            all(target_os = "linux", not(target_env = "ohos")),
+            all(target_os = "linux", target_env = "ohos"),
             target_os = "macos",
             target_os = "ios",
             target_arch = "wasm32",

@@ -18,8 +18,26 @@
 //! 泵全线程窗口），菜单/图标事件落入两个全局 crossbeam channel；
 //! 排水在同一 poll 内转成 [`Event::Tray`]。
 
+// 导入随 drain_events 门控走（OHOS 目标下三桌面排水桩被摘除——
+// 这两个类型仅在门控内使用，否则 OHOS check 报 unused import）
+#[cfg(all(
+    feature = "tray",
+    any(
+        target_os = "windows",
+        target_os = "macos",
+        all(target_os = "linux", not(target_env = "ohos")),
+    )
+))]
 use std::collections::VecDeque;
 
+#[cfg(all(
+    feature = "tray",
+    any(
+        target_os = "windows",
+        target_os = "macos",
+        all(target_os = "linux", not(target_env = "ohos")),
+    )
+))]
 use crate::event::Event;
 
 /// Tray icon request: RGBA icon + tooltip + flat menu.
@@ -94,7 +112,13 @@ pub struct TrayEvent {
 /// 门面类型 + Err 站桩，后端不链接）。
 #[cfg(all(
     feature = "tray",
-    any(target_os = "windows", target_os = "macos", target_os = "linux")
+    any(
+        target_os = "windows",
+        target_os = "macos",
+        // OHOS 摘除（target_env="ohos" 会被 linux 分支误吞——tray-icon
+        // 依赖已按同款 cfg 门控排除；OHOS 托盘走真适配层）
+        all(target_os = "linux", not(target_env = "ohos")),
+    )
 ))]
 pub fn drain_events(pending: &mut VecDeque<Event>) {
     use tray_icon::TrayIconEvent as Tie;
@@ -121,7 +145,13 @@ pub fn drain_events(pending: &mut VecDeque<Event>) {
 /// 图标事件转换（悬停噪声丢弃；按下+抬起折算一次——抬起才算点击）。
 #[cfg(all(
     feature = "tray",
-    any(target_os = "windows", target_os = "macos", target_os = "linux")
+    any(
+        target_os = "windows",
+        target_os = "macos",
+        // OHOS 摘除（target_env="ohos" 会被 linux 分支误吞——tray-icon
+        // 依赖已按同款 cfg 门控排除；OHOS 托盘走真适配层）
+        all(target_os = "linux", not(target_env = "ohos")),
+    )
 ))]
 fn convert_icon_event(ev: tray_icon::TrayIconEvent) -> Option<TrayEvent> {
     use tray_icon::{MouseButtonState as Tbs, TrayIconEvent as Tie};
@@ -162,7 +192,13 @@ fn convert_icon_event(ev: tray_icon::TrayIconEvent) -> Option<TrayEvent> {
 /// tray-icon 按键 → pygame 编号（1=左 2=中 3=右）。
 #[cfg(all(
     feature = "tray",
-    any(target_os = "windows", target_os = "macos", target_os = "linux")
+    any(
+        target_os = "windows",
+        target_os = "macos",
+        // OHOS 摘除（target_env="ohos" 会被 linux 分支误吞——tray-icon
+        // 依赖已按同款 cfg 门控排除；OHOS 托盘走真适配层）
+        all(target_os = "linux", not(target_env = "ohos")),
+    )
 ))]
 fn button_code(button: tray_icon::MouseButton) -> u8 {
     match button {
