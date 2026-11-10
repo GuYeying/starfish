@@ -668,13 +668,33 @@ pub async fn save_bytes(file_name: &str, data: impl AsRef<[u8]>) -> Result<Optio
 // if let Some(res) = job.try_result() { /* 完成：res = Ok(Some(file)) / Ok(None)=取消 */ }
 // ```
 
+// ── 活动 job 计数（宿主生命周期守卫用）────────────────────────
+// SAF 选择器覆盖期间会触发本应用 surface 销毁/重建——宿主按此旗标豁免
+// "surface 销毁 = 停引擎"的收口（否则选择器返回时引擎已死，结果无人接）
+static ACTIVE_JOBS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// 是否有进行中的对话框任务（start 发起 +1 / try_result 收到终值 -1）
+pub fn jobs_active() -> bool {
+    ACTIVE_JOBS.load(std::sync::atomic::Ordering::Acquire) > 0
+}
+
+fn job_started() {
+    ACTIVE_JOBS.fetch_add(1, std::sync::atomic::Ordering::Release);
+}
+
+fn job_settled() {
+    ACTIVE_JOBS.fetch_sub(1, std::sync::atomic::Ordering::Release);
+}
+
 /// 非阻塞发起"选择文件"，返回可轮询的任务句柄
 #[cfg(not(target_arch = "wasm32"))]
 pub fn pick_file_start(
     title: Option<&str>,
     filters: &[Filter],
 ) -> Result<PickJob, DialogError> {
-    Ok(PickJob { imp: imp::pick_file_start_impl(title, filters)? })
+    let imp = imp::pick_file_start_impl(title, filters)?;
+    job_started();
+    Ok(PickJob { imp })
 }
 
 /// [`pick_file_start`] 的任务句柄（每帧 [`try_result`](PickJob::try_result) 轮询）
@@ -686,14 +706,20 @@ pub struct PickJob {
 #[cfg(not(target_arch = "wasm32"))]
 impl PickJob {
     pub fn try_result(&mut self) -> Option<Result<Option<PickedFile>, DialogError>> {
-        self.imp.try_result()
+        let r = self.imp.try_result();
+        if r.is_some() {
+            job_settled();
+        }
+        r
     }
 }
 
 /// 非阻塞发起"保存数据"（数据立即移交，可安全释放原缓冲）
 #[cfg(not(target_arch = "wasm32"))]
 pub fn save_bytes_start(file_name: &str, data: Vec<u8>) -> Result<SaveJob, DialogError> {
-    Ok(SaveJob { imp: imp::save_bytes_start_impl(file_name, data)? })
+    let imp = imp::save_bytes_start_impl(file_name, data)?;
+    job_started();
+    Ok(SaveJob { imp })
 }
 
 /// [`save_bytes_start`] 的任务句柄（每帧 [`try_result`](SaveJob::try_result) 轮询）
@@ -705,6 +731,10 @@ pub struct SaveJob {
 #[cfg(not(target_arch = "wasm32"))]
 impl SaveJob {
     pub fn try_result(&mut self) -> Option<Result<Option<PathBuf>, DialogError>> {
-        self.imp.try_result()
+        let r = self.imp.try_result();
+        if r.is_some() {
+            job_settled();
+        }
+        r
     }
 }
