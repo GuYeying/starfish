@@ -35,6 +35,7 @@ pub mod mixer;
 pub mod mouse;
 pub mod net;
 pub mod permission;
+pub mod camera;
 pub mod render;
 pub mod effects;
 /// 资源加密面（**全家唯一加密归属**——加密红线 2026-11-03：SFXE1/
