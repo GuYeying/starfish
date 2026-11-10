@@ -405,8 +405,16 @@ impl Screen {
     /// 脚本通过 pygame.render.game_camera_ortho/perspective 构造后传入。
     /// 设置后 refresh_camera 不再按 wish 重建（显式优先于自动）——
     /// 仅随物理视口重算 letterbox（投影/视图/逻辑域保持脚本意志）。
+    ///
+    /// **物理面对账**（2026-11-11 手机实证）：构造入参的 pw/ph 只是
+    /// 设计意图（桌面恰好等于窗口尺寸）；跨设备（手机物理面 ≠ 桌面
+    /// 800×600）若不重对账，fit_ndc 用错误物理面算出恒等映射 → 内容
+    /// 拉伸满屏、letterbox 失效。物理面 = 设备事实（引擎所有权）——
+    /// set 时即以当前物理表面重算 letterbox，投影/视图/逻辑面不动。
     pub fn set_game_camera(&self, camera: crate::camera::Camera) {
-        *self.camera.borrow_mut() = camera;
+        let mut cam = camera;
+        cam.resize(self.surface.borrow().size());
+        *self.camera.borrow_mut() = cam;
         self.camera_explicit.set(true);
     }
 
