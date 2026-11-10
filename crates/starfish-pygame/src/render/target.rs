@@ -35,6 +35,7 @@ use crate::{Color, IRect};
 
 use super::batch::{encode, Batch, BatchTopology, EncodeCtx, GeometryKind, SpriteVertex};
 use super::camera::Camera;
+use crate::camera::Camera as GameCamera;
 use super::texture::Texture;
 use super::{init_gpu, gpu, Coord, Gpu};
 use starfish_gfx::{Geometry, ShapeVertex};
@@ -320,6 +321,8 @@ pub struct Screen {
     /// 逻辑画布尺寸（脚本 set_mode 语义尺寸——Android 嵌入下物理表面
     /// 恒原生窗口、逻辑独立；呈现 = 等比缩放居中）
     logical: Cell<(u32, u32)>,
+    /// 显式相机（阶段一 1.2：letterbox 内聚——MVP/坐标映射/裁剪全在此）
+    pub(crate) camera: RefCell<GameCamera>,
     /// 首包映射参数打点哨兵（呈现排障；一次性）
     pack_logged: Cell<bool>,
     /// 延迟叠加队列（[`Screen::defer_overlay`] 的排程；present 时统一执行）
@@ -365,6 +368,7 @@ impl Screen {
             samples,
             transparent_bg: Cell::new(false),
             logical: Cell::new(physical),
+            camera: RefCell::new(GameCamera::ortho(physical, physical)),
             pack_logged: Cell::new(false),
             pending_overlays: RefCell::new(Vec::new()),
         })
@@ -387,6 +391,22 @@ impl Screen {
     /// 值，物理表面恒原生窗口——呈现按等比缩放居中映射）
     pub fn set_logical_size(&self, width: u32, height: u32) {
         self.logical.set((width, height));
+        self.refresh_camera();
+    }
+
+    /// 重建 Camera（logical/physical/camera_kind 变化时调用——
+    /// letterbox 数学的唯一来源）
+    fn refresh_camera(&self) {
+        let (lw, lh) = self.logical.get();
+        let (pw, ph) = self.surface.borrow().size();
+        let kind = *self.gpu.camera_kind.borrow();
+        let cam = match kind {
+            super::camera::CameraKind::Auto2d => GameCamera::ortho((lw, lh), (pw, ph)),
+            super::camera::CameraKind::Auto3d { fov_deg, near, far } => {
+                GameCamera::perspective(fov_deg, (lw, lh), (pw, ph), near, far)
+            }
+        };
+        *self.camera.borrow_mut() = cam;
     }
 
     /// 逻辑画布尺寸（`get_size()` 的返回语义）
@@ -394,24 +414,10 @@ impl Screen {
         self.logical.get()
     }
 
-    /// 逻辑画布 → 物理呈现的 NDC 域拟合矩阵（clip 空间仿射——底行
-    /// (0,0,0,1)，透视除法后恰为"NDC 缩放+平移"）：把整幅 NDC 收进
-    /// letterbox 画布子矩形。Auto 与 Manual 相机统一的呈现 letterbox——
-    /// Auto2d 下与旧"正交(物理)×平移×缩放"逐位等价（恒等桌面），离屏
-    /// Surface（逻辑==物理）恒 identity
+    /// 逻辑画布 → 物理呈现的 NDC 域拟合矩阵——**委托 Camera**（1.3
+    /// letterbox 收敛：唯一计算点在 Camera 内部）
     fn fit_ndc(&self) -> Mat4 {
-        let (pw, ph) = self.surface.borrow().size();
-        let (lw, lh) = self.logical.get();
-        let fit = starfish_std::letterbox::Fit::fit(
-            pw as f64, ph as f64, lw as f64, lh as f64,
-        );
-        let (pw, ph) = (pw.max(1) as f32, ph.max(1) as f32);
-        let sx = (lw.max(1) as f32 * fit.scale as f32) / pw;
-        let sy = (lh.max(1) as f32 * fit.scale as f32) / ph;
-        let bx = 2.0 * fit.offset_x as f32 / pw - 1.0 + sx;
-        let by = 1.0 - 2.0 * fit.offset_y as f32 / ph - sy;
-        glam::Mat4::from_translation(glam::Vec3::new(bx, by, 0.0))
-            * glam::Mat4::from_scale(glam::Vec3::new(sx, sy, 1.0))
+        self.camera.borrow().fit_ndc()
     }
 
     /// 呈现拟合矩阵（NDC 域 clip 空间仿射——**自管相机的 letterbox
@@ -435,18 +441,14 @@ impl Screen {
     /// 物理点 → 逻辑点（输入坐标映射；呈现映射的逆变换——等比缩放 +
     /// 居中）
     pub(crate) fn map_point_to_logical(&self, x: f64, y: f64) -> (f64, f64) {
-        let (pw, ph) = self.surface.borrow().size();
-        let (lw, lh) = self.logical.get();
-        let fit = starfish_std::letterbox::Fit::fit(
-            pw as f64, ph as f64, lw as f64, lh as f64,
-        );
-        fit.physical_to_logical(x, y)
+        self.camera.borrow().physical_to_logical(x, y)
     }
 
     /// 窗口尺寸变化（交换链 + 深度重建；相机无需跟随——全局相机
     /// Auto 状态 pack 时按目标尺寸现算，resize 天然生效）
     pub fn resize(&self, width: u32, height: u32) {
         self.surface.borrow_mut().resize(width, height);
+        self.refresh_camera();
     }
 
     /// 帧边界安全的 resize 请求（批次二十三）：帧进行中（begun）时挂起，
@@ -620,51 +622,28 @@ impl Screen {
         // 覆盖；需要时从 git 历史（970faa9）恢复本段实现。
         let scissor = self.clip.get().and_then(|r| {
             let (pw, ph) = self.surface.borrow().size();
-            let (lw, lh) = self.logical.get();
-            let fit = starfish_std::letterbox::Fit::fit(
-                pw as f64, ph as f64, lw as f64, lh as f64,
-            );
-            let mapped = if lw == 0 || lh == 0 {
-                r
-            } else {
-                let (mx, my) = fit.logical_to_physical(r[0] as f64, r[1] as f64);
-                [
-                    mx as i32,
-                    my as i32,
-                    (r[2] as f32 * fit.scale as f32) as i32,
-                    (r[3] as f32 * fit.scale as f32) as i32,
-                ]
-            };
+            let mapped = self.camera.borrow().map_scissor(r);
             super::batch::scissor_from(mapped, (pw, ph))
         });
         let cmd = {
             let batch = self.batch.borrow();
-            // 呈现映射（等比 letterbox）：正交(物理) × 平移(居中) ×
-            // 缩放(等比)。桌面逻辑==物理 → s=1、o=0 恒等；Android 逻辑
-            // (set_mode) < 物理(原生窗口) → 短轴铺满长轴留黑边，零变形
-            let (pw, ph) = self.surface.borrow().size();
-            let (lw, lh) = self.logical.get();
-            let fit = starfish_std::letterbox::Fit::fit(
-                pw as f64, ph as f64, lw as f64, lh as f64,
-            );
-            let (s, ox, oy) = (fit.scale as f32, fit.offset_x as f32, fit.offset_y as f32);
+            let cam = self.camera.borrow();
             if !self.pack_logged.get() {
                 self.pack_logged.set(true);
+                let fit = cam.fit();
+                let (lw, lh) = cam.logical_size();
+                let (pw, ph) = cam.physical_size();
                 starfish_debug::log_debug!(&format!(
-                    "[present] 物理={pw}x{ph} 逻辑={lw}x{lh} scale={s:.3} ox={ox:.1} oy={oy:.1} scissor={:?}",
-                    scissor,
+                    "[present] 物理={pw}x{ph} 逻辑={lw}x{lh} scale={:.3} ox={:.1} oy={:.1} scissor={:?}",
+                    fit.scale, fit.offset_x, fit.offset_y, scissor,
                 ));
             }
-            // 呈现映射（等比 letterbox，NDC 域统一组合）：相机一律解算
-            // 在逻辑画布域（Auto 正交/透视按逻辑尺寸，Manual 用户相机
-            // 本就按逻辑画布构造），输出经 fit_ndc 收进画布子矩形。
-            // Auto2d 与旧"正交(物理)×平移×缩放"逐位等价；Manual 修正
-            // 双映射（旧路径把逻辑域相机输出再当物理域叠 T·S——内容
-            // 越画布右/下溢出，blit_transform demo 真机实测）；Auto3d
-            // 纵横比随之归画布
-            let fit_ndc = self.fit_ndc();
-            let mut camera = self.gpu.camera_for(self.logical.get());
-            camera.mvp = fit_ndc * camera.mvp;
+            // 呈现映射（等比 letterbox，NDC 域统一组合）——**委托 Camera**
+            // （1.3 letterbox 收敛：fit_ndc + Auto MVP 组合全在 Camera 内部）
+            let cam = self.camera.borrow();
+            let fit_ndc = cam.fit_ndc();
+            let mut camera = self.gpu.camera_for(cam.logical_size());
+            camera.mvp = cam.mvp(); // Camera::mvp = fit_ndc × projection × view
             let mut ctx = EncodeCtx {
                 gpu: &self.gpu,
                 camera: &camera,

@@ -143,7 +143,7 @@ impl Camera {
     }
 
     /// NDC 域 letterbox 仿射（把整幅 NDC 收进画布子矩形）
-    fn fit_ndc(&self) -> Mat4 {
+    pub(crate) fn fit_ndc(&self) -> Mat4 {
         let (pw, ph) = (
             self.physical_size.0.max(1) as f32,
             self.physical_size.1.max(1) as f32,
