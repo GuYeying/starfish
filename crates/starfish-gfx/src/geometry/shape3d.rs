@@ -246,3 +246,43 @@ pub fn capsule(
     }
     g
 }
+
+/// 平面多边形 3D（填充）：任意共面三维多边形——Newell 法求平面法线，
+/// 投影到多边形局部 2D 基复用 2D 三角化，举回三维。退化输入
+/// （<3 点 / 共线）返回空几何。
+pub fn polygon_3d(points: &[Vec3], color: [f32; 4]) -> Geometry {
+    if points.len() < 3 {
+        return Geometry::default();
+    }
+    // Newell's method：对非凸/轻微非共面基稳健
+    let mut normal = Vec3::ZERO;
+    for i in 0..points.len() {
+        let a = points[i];
+        let b = points[(i + 1) % points.len()];
+        normal += Vec3::new(
+            (a.y - b.y) * (a.z + b.z),
+            (a.z - b.z) * (a.x + b.x),
+            (a.x - b.x) * (a.y + b.y),
+        );
+    }
+    if normal.length_squared() < 1e-12 {
+        return Geometry::default();
+    }
+    let n = normal.normalize();
+    // 局部基：任取与法线不平行的辅助轴构造 u/v
+    let helper = if n.x.abs() < 0.9 { Vec3::X } else { Vec3::Y };
+    let u = n.cross(helper).normalize();
+    let v = n.cross(u);
+    let origin = points[0];
+    let flat: Vec<Vec2> = points
+        .iter()
+        .map(|p| Vec2::new((p - origin).dot(u), (p - origin).dot(v)))
+        .collect();
+    let indices = super::tri::triangulate(&flat);
+    let mut g = Geometry::default();
+    for p in points {
+        g.push([p.x, p.y, p.z], color);
+    }
+    g.extend_indices(&indices);
+    g
+}

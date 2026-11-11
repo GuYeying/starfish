@@ -237,8 +237,9 @@ pub trait DrawTarget {
         self.with_batch(|b| b.set_mvp(Some(camera.mvp())));
     }
 
-    /// 回 Auto 兜底相机
-    fn reset_camera(&self) {
+    /// 清除会话相机覆盖（clear_camera——2026-11-12 改名：Auto 兜底
+    /// 已退役，本口语义 = 摘除段级显式相机，回到按目标尺寸正交）
+    fn clear_camera(&self) {
         self.with_batch(|b| b.reset_mvp());
     }
 
@@ -1195,8 +1196,9 @@ impl<'a> RenderPass<'a> {
         self.with_batch(|b| b.set_mvp(Some(camera.mvp())));
     }
 
-    /// 回 Auto 兜底相机（按目标尺寸现算——resize 天然跟随）
-    pub fn reset_camera(&self) {
+    /// 清除会话相机覆盖（按目标尺寸正交——resize 天然跟随；
+    /// 2026-11-12 改名 clear_camera：无隐式兜底语义，"clear" 才是实义）
+    pub fn clear_camera(&self) {
         self.with_batch(|b| b.reset_mvp());
     }
 
