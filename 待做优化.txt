@@ -1,15 +1,24 @@
-
-## 2026-11-12 gfxdraw 审计发现：batch 几何通路深层 bug（高优先）
-像素探针实证（probe4-7，screen_probe 回读）：
-- 连续多次 push_geometry（纯几何、无 push_quad 穿插）时内容损坏/丢失：
-  20 圆网格仅 lx=0 一列存活（x=399 恒定竖线），其余列消失；
-  单几何 push 正常（probe4 中心圆 / probe6 (150,30) 均像素实证可见）；
-  push_quad 穿插（draw_test box+几何混排）正常。
-- 幸存顶点颜色错读为 (uv.x, 0, uv.y)=(128, 0, 128)——顶点布局/stride
-  或 strip 编码（退化四边形拼接 [a,b,c,a,c,c] 连续拼接）错位嫌疑最大。
-- 深度会话（render_depth）batch 词汇同样受此阻塞；且深度会话每帧重建
-  深度资源，无帧率上限循环 OOM（gfx3d_demo 13s 实证）——深度纹理应
-  随表面复用。
-修复路径：RenderDoc 帧捕获看 batch vbo 顶点数据 → 定位 strip 编码/段
-切分错位点；修复后 gfxdraw 3D 五件套 + polygon3d + capsule/polyline/
-regular_polygon 九口即全可用（绑定层已就位 commit 5f5d02f）。
+## 2026-11-12 gfxdraw 审计【勘误与实测结论】（推翻同日早先误诊，probe9 决定性实测）
+早先误诊（同日 probe4-7）："batch 几何通路深层 bug——连续 push_geometry
+丢段/只存一列 + 颜色错读 (128,0,128)"。probe9（r=80 大圆五列异色 +
+screen_probe 逐列验证）决定性推翻：
+- 【位置/颜色全部正常】per-draw set_color 模式：20 圆五列异色
+  （红/绿/蓝/黄/品红）五列全部命中各自颜色——几何通路（push_geometry
+  → TriangleList 管线）无任何损坏。早先"只存一列"为探针误诊：35 点
+  网格对 r=50 圆的采样恰好全落在圆缘外 1-2px（网格行距 150 ≈ 圆行距
+  150 + 半径 50 的不幸对齐），只有 x=399 列深入圆内 1px 命中。
+- 【"颜色错读 (128,0,128)" = DEFAULT_DRAW_COLOR 默认紫】one-shot 语义：
+  set_color 只对下一个图元生效，end_draw 重置回默认紫（batch.rs:176
+  [0.5,0,0.5,1]）。probe7b 脚本 set 一次画 20 个 = 圆 2-20 全默认紫——
+  非"错读"，是设计语义（draw_test 逐形状 set_color 模式为正解用法；
+  end_draw 防泄漏设计：忘 set 不继承上一物体颜色）。
+- 【深度会话 OOM 真因勘误】深度纹理已随表面缓存复用（render_surface.rs
+  init 创建一次存 Arc 字段）——非"每帧重建"。真因 = 无帧率上限 ×
+  每帧内联一次性 vertex buffer（batch.rs 自注 P3 优化位：append-only
+  arena + slice 偏移）——999fps 下缓冲创建速率超过驱动回收速率 → OOM
+  （gfx3d_demo 13s 实证）。规避：demo 帧率 delay（已加）；根治：P3
+  arena 优化（既有债务，非新 bug）。
+- 【结论】gfxdraw 九新口（3D 五件套 cube/sphere/plane/cylinder/cone +
+  polygon3d + capsule/polyline/regular_polygon）绑定层就位、通路可用、
+  无阻塞 bug。改进项：gfxdraw.md 显著标注 set_color one-shot 语义；
+  P3 arena 优化（既有）。
