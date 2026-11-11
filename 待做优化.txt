@@ -1,0 +1,15 @@
+
+## 2026-11-12 gfxdraw 审计发现：batch 几何通路深层 bug（高优先）
+像素探针实证（probe4-7，screen_probe 回读）：
+- 连续多次 push_geometry（纯几何、无 push_quad 穿插）时内容损坏/丢失：
+  20 圆网格仅 lx=0 一列存活（x=399 恒定竖线），其余列消失；
+  单几何 push 正常（probe4 中心圆 / probe6 (150,30) 均像素实证可见）；
+  push_quad 穿插（draw_test box+几何混排）正常。
+- 幸存顶点颜色错读为 (uv.x, 0, uv.y)=(128, 0, 128)——顶点布局/stride
+  或 strip 编码（退化四边形拼接 [a,b,c,a,c,c] 连续拼接）错位嫌疑最大。
+- 深度会话（render_depth）batch 词汇同样受此阻塞；且深度会话每帧重建
+  深度资源，无帧率上限循环 OOM（gfx3d_demo 13s 实证）——深度纹理应
+  随表面复用。
+修复路径：RenderDoc 帧捕获看 batch vbo 顶点数据 → 定位 strip 编码/段
+切分错位点；修复后 gfxdraw 3D 五件套 + polygon3d + capsule/polyline/
+regular_polygon 九口即全可用（绑定层已就位 commit 5f5d02f）。
