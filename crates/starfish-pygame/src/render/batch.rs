@@ -320,6 +320,40 @@ impl Batch {
         self.push_quad_uv(x, y, w, h, [0.0, 0.0, 1.0, 1.0], color, texture);
     }
 
+    /// 背景填充 quad（**远平面 z=1.0**——深度会话语义 2026-11-12 修）：
+    /// fill 是"背景"而非普通图元——普通 quad 的 z=0 在深度会话 =
+    /// 深度 0.0（最近），全屏写满后 3D 内容（深度 0.1~0.98）Less/LessEqual
+    /// 全拒 = 深度会话黑屏（gfx3d_demo 0/35 像素实证）。背景恒最远：
+    /// z=1.0 → 深度 1.0，后续 3D 全部通过（LessEqual 1.0）。普通会话
+    /// 无深度测试，z 值无感。
+    pub fn push_fill_quad(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        color: [f32; 4],
+    ) {
+        let v = |px: f32, py: f32| SpriteVertex {
+            pos: [px, py, 1.0],
+            uv: [0.5, 0.5],
+            color,
+        };
+        let (x1, y1) = (x + w, y + h);
+        self.push_vertices(
+            BatchTopology::Triangles,
+            None,
+            &[
+                v(x, y),
+                v(x1, y),
+                v(x1, y1),
+                v(x, y),
+                v(x1, y1),
+                v(x, y1),
+            ],
+        );
+    }
+
     /// 矩形 quad + 自定 uv 子区域（图集/字体地基）——基层展开糖：
     /// 两三角 (0,1,2)(0,2,3) 六顶点入 Triangles 流（剔除关闭，绕向不敏感）
     pub fn push_quad_uv(

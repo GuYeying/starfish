@@ -368,7 +368,11 @@ impl RenderPipelineBuilder {
 
         let depth_compare = match self.depth_mode {
             DepthMode::Disabled => None,
-            DepthMode::Standard => Some(wgpu::CompareFunction::Less),
+            // LessEqual（2026-11-12）：背景填充 quad 画在远平面深度 1.0
+            // （batch push_fill_quad——fill 恒最远语义），Less(1<1) 会拒掉
+            // 背景自身；LessEqual 放行共面/贴底几何（业界惯例），深度
+            // 会话 fill→3D 层级正确
+            DepthMode::Standard => Some(wgpu::CompareFunction::LessEqual),
             DepthMode::Reverse => Some(wgpu::CompareFunction::GreaterEqual),
         };
         let depth_stencil = depth_compare.map(|compare| {

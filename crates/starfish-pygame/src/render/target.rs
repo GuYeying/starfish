@@ -1033,7 +1033,9 @@ impl DrawTarget for Screen {
         self.with_batch(|b| {
             let saved = b.mvp_snapshot();
             b.reset_mvp();
-            b.push_quad(-(w as f32) / 2.0, -(h as f32) / 2.0, w as f32, h as f32, rgba(color), None);
+            // 远平面填充 quad（2026-11-12：深度会话 fill 若 z=0 → 全屏
+            // 写深度 0.0 = 3D 全拒黑屏；背景恒最远 z=1.0）
+            b.push_fill_quad(-(w as f32) / 2.0, -(h as f32) / 2.0, w as f32, h as f32, rgba(color));
             b.set_mvp(saved);
         });
     }
