@@ -238,6 +238,13 @@ impl WindowInner {
         match *self {}
     }
 
+    /// set_orientation：OHOS 站桩（XComponent 后端建成后接窗口方向）
+    pub(crate) fn set_orientation(&self, _orientation: &str) -> Result<(), crate::error::WindowError> {
+        Err(crate::error::WindowError::OsError(
+            "set_orientation: HarmonyOS 适配层待建（XComponent 后端）".into(),
+        ))
+    }
+
     pub(crate) fn set_opacity(&self, _opacity: f32) {
         match *self {}
     }

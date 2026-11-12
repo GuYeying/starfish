@@ -334,6 +334,9 @@ impl WindowInner {
         String::new()
     }
     pub(crate) fn set_opacity(&self, _opacity: f32) {}
+    pub(crate) fn set_orientation(&self, orientation: &str) -> Result<(), crate::error::WindowError> {
+        request_orientation(orientation)
+    }
     pub(crate) fn opacity(&self) -> f32 {
         1.0
     }
@@ -638,4 +641,93 @@ fn keycode_to_keycode(keycode: Keycode) -> KeyCode {
         Keycode::Break => K::Pause,
         other => K::Other(u32::from(other)),
     }
+}
+
+// ── 运行时屏幕方向（2026-11-12：竖屏应用支持——Activity 级
+//    setRequestedOrientation 经 ndk-context JNI；glue（android-activity
+//    crate 无此口）与嵌入（Java 宿主 initContext 绑定 Activity 本体）
+//    两路径共用——ndk-context 的 Activity 全局引用是唯一事实源）──────
+
+/// 方向名 → ActivityInfo 常量（android.content.pm.ActivityInfo）
+fn orientation_const(name: &str) -> Option<i32> {
+    // unspecified=-1 / landscape=0 / portrait=7 / sensor=4 /
+    // sensor_landscape=6 / sensor_portrait=9 / full_sensor=10 /
+    // locked=14
+    match name {
+        "unspecified" => Some(-1),
+        "landscape" => Some(0),
+        "portrait" => Some(7),
+        "sensor" => Some(4),
+        "sensor_landscape" => Some(6),
+        "sensor_portrait" => Some(9),
+        "full_sensor" => Some(10),
+        _ => None,
+    }
+}
+
+pub(crate) fn request_orientation(name: &str) -> Result<(), crate::error::WindowError> {
+    use crate::error::WindowError;
+    let Some(value) = orientation_const(name) else {
+        return Err(WindowError::OsError(format!(
+            "set_orientation: 未识别方向 '{name}'（portrait/landscape/sensor_portrait/\
+             sensor_landscape/sensor/full_sensor/unspecified）"
+        )));
+    };
+    let ctx = ndk_context::android_context();
+    let vm: *mut jni_sys::JavaVM = ctx.vm().cast();
+    let activity: jni_sys::jobject = ctx.context().cast();
+    if vm.is_null() || activity.is_null() {
+        return Err(WindowError::OsError(
+            "set_orientation: ndk-context 未绑定（嵌入宿主须先 initContext 传 Activity）"
+                .into(),
+        ));
+    }
+    unsafe {
+        // 最小 JNI 调用面（免 jni crate 依赖）：attach → 找
+        // setRequestedOrientation(I)V → 调用 → 异常兜底清 → detach。
+        // jni-sys 0.3 函数表字段 = Option<fn>（Android #5651 修复后
+        // 形态）——逐项 expect 解包再调。
+        let attach = (*(*vm)).AttachCurrentThread.expect("AttachCurrentThread missing");
+        let mut env: *mut std::ffi::c_void = std::ptr::null_mut();
+        if attach(vm, &mut env, std::ptr::null_mut()) != 0 {
+            return Err(WindowError::OsError("set_orientation: JNI attach 失败".into()));
+        }
+        let env = env as *mut jni_sys::JNIEnv;
+        let get_cls = (*(*env)).GetObjectClass.expect("GetObjectClass missing");
+        let get_mid = (*(*env)).GetMethodID.expect("GetMethodID missing");
+        let call_void = (*(*env)).CallVoidMethod.expect("CallVoidMethod missing");
+        let exc_check = (*(*env)).ExceptionCheck.expect("ExceptionCheck missing");
+        let exc_clear = (*(*env)).ExceptionClear.expect("ExceptionClear missing");
+        let del_ref = (*(*env)).DeleteLocalRef.expect("DeleteLocalRef missing");
+        let detach = (*(*vm)).DetachCurrentThread.expect("DetachCurrentThread missing");
+
+        let cls = get_cls(env, activity);
+        let mid = get_mid(
+            env,
+            cls,
+            c"setRequestedOrientation".as_ptr(),
+            c"(I)V".as_ptr(),
+        );
+        let mut ok = true;
+        if mid.is_null() {
+            exc_clear(env);
+            ok = false;
+        } else {
+            call_void(env, activity, mid, value as jni_sys::jint);
+            if exc_check(env) != 0 {
+                exc_clear(env);
+                ok = false;
+            }
+        }
+        if !cls.is_null() {
+            del_ref(env, cls);
+        }
+        detach(vm);
+        if !ok {
+            return Err(WindowError::OsError(
+                "set_orientation: Java 侧调用失败（方法缺失或异常，已清）".into(),
+            ));
+        }
+    }
+    Ok(())
 }

@@ -704,6 +704,12 @@ impl WindowInner {
         }
     }
 
+    /// set_orientation：桌面/web = no-op Ok（方向是移动端 Activity 级概念——
+    /// 跨端脚本零分支；Android 实装）
+    pub(crate) fn set_orientation(&self, _orientation: &str) -> Result<(), crate::error::WindowError> {
+        Ok(())
+    }
+
     pub(crate) fn set_opacity(&self, opacity: f32) {
         // SAFETY: hwnd 有效；透明度 <1.0 需 WS_EX_LAYERED + 分层属性。
         unsafe {

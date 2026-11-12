@@ -915,6 +915,12 @@ impl WindowInner {
 
     pub(crate) fn center_on_screen(&self) {}
 
+    /// set_orientation：桌面/web = no-op Ok（方向是移动端 Activity 级概念——
+    /// 跨端脚本零分支；Android 实装）
+    pub(crate) fn set_orientation(&self, _orientation: &str) -> Result<(), crate::error::WindowError> {
+        Ok(())
+    }
+
     pub(crate) fn set_opacity(&self, _opacity: f32) {}
 
     pub(crate) fn opacity(&self) -> f32 {

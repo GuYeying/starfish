@@ -513,6 +513,19 @@ impl Window {
         self.inner.set_opacity(opacity)
     }
 
+    /// Requests the screen orientation (mobile: Activity-level rotation;
+    /// desktop/web: no-op success — orientation is a mobile concept).
+    /// 请求屏幕方向（2026-11-12：竖屏应用支持）。
+    ///
+    /// `orientation`：`"portrait"` / `"landscape"` / `"sensor_portrait"` /
+    /// `"sensor_landscape"` / `"sensor"` / `"full_sensor"` / `"unspecified"`
+    /// （Android ActivityInfo 常量同语义；manifest 的 screenOrientation
+    /// 只是初始请求，运行时本口即时覆盖——configChanges 已含 orientation
+    /// 的宿主只重表面不重建 Activity）。
+    pub fn set_orientation(&self, orientation: &str) -> Result<(), WindowError> {
+        self.inner.set_orientation(orientation)
+    }
+
     /// The window opacity.
     /// 窗口不透明度。
     pub fn opacity(&self) -> f32 {

@@ -712,6 +712,12 @@ impl WindowInner {
         self.window.title().to_string()
     }
 
+    /// set_orientation：桌面/web = no-op Ok（方向是移动端 Activity 级概念——
+    /// 跨端脚本零分支；Android 实装）
+    pub(crate) fn set_orientation(&self, _orientation: &str) -> Result<(), crate::error::WindowError> {
+        Ok(())
+    }
+
     pub(crate) fn set_opacity(&self, opacity: f32) {
         self.window
             .setAlphaValue(f64::from(opacity.clamp(0.0, 1.0)));

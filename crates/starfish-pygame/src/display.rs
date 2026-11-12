@@ -206,6 +206,21 @@ pub fn set_caption(title: &str) {
     with_window(|w| w.set_title(title));
 }
 
+/// 请求屏幕方向（2026-11-12 竖屏应用支持）：`"portrait"` /
+/// `"landscape"` / `"sensor_portrait"` / `"sensor_landscape"` /
+/// `"sensor"` / `"full_sensor"` / `"unspecified"`（ActivityInfo 常量
+/// 同语义）。Android 实装（Activity 级 setRequestedOrientation 经
+/// ndk-context JNI——运行时即时覆盖 manifest 初始请求，configChanges
+/// 已含 orientation 的宿主只重表面不重建 Activity）；桌面/web = no-op
+/// Ok（方向是移动端概念，跨端脚本零分支）；OHOS = 站桩 Err。
+pub fn set_orientation(orientation: &str) -> Result<(), String> {
+    match with_window(|w| w.set_orientation(orientation)) {
+        Some(Ok(())) => Ok(()),
+        Some(Err(e)) => Err(e.to_string()),
+        None => Err("display 未初始化（须先 set_mode）".into()),
+    }
+}
+
 /// 鼠标事件穿透开关（点击落到下层窗口——桌宠形态配套；2026-11-07
 /// 穿透设计稿 M1。Win32 实装；不支持平台 Err——能力位垫底原则。
 /// ⚠️ feature `click-through` 门控——未启用 = 编译期即知不支持）

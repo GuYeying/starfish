@@ -89,6 +89,10 @@ tray-icon = { version = "0.26", optional = true, default-features = false, featu
 
 [target.'cfg(target_os = "android")'.dependencies]
 android-activity = { workspace = true }
+# 运行时屏幕方向（set_orientation：ndk-context 拿 Activity + jni-sys 裸调
+# setRequestedOrientation——最小面，免 jni crate 依赖）
+ndk-context = { workspace = true }
+jni-sys = "0.3"
 # 资产/目录句柄移交 starfish-io（资源读取语义归 io 层——we 只做移交，2026-11-02 定约）
 starfish-io = { workspace = true }
 
