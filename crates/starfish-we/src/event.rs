@@ -476,6 +476,14 @@ pub enum Event {
         /// 新高度。
         height: u32,
     },
+    /// 全屏状态变化（2026-11-12 web 全屏实装配套）。Web 端浏览器
+    /// fullscreenchange（含**用户 ESC 手动退出**与 exitFullscreen）；
+    /// 脚本据 `fullscreen` 布尔同步自身状态。桌面端 v1 不发（引擎
+    /// 发起的转换脚本自知，外部转换无系统通知面）。
+    FullscreenChanged {
+        /// 变化后是否处于全屏。
+        fullscreen: bool,
+    },
     /// The window gained keyboard focus.
     /// 窗口获得键盘焦点。
     FocusGained,

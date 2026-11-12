@@ -523,7 +523,86 @@ impl Window {
     /// 只是初始请求，运行时本口即时覆盖——configChanges 已含 orientation
     /// 的宿主只重表面不重建 Activity）。
     pub fn set_orientation(&self, orientation: &str) -> Result<(), WindowError> {
-        self.inner.set_orientation(orientation)
+        let r = self.inner.set_orientation(orientation);
+        if r.is_ok() {
+            // 方向意图记录（(0,0)+FULLSCREEN 的旋转在途交换依据；
+            // 桌面/web no-op Ok 也记录 = 行为一致）
+            LAST_ORIENTATION.with(|c| c.set(Some(orientation.contains("portrait"))));
+        }
+        r
+    }
+
+    /// Requests the display mode as a whole (ecosystem-level orchestration
+    /// entry — 2026-11-12 sunk from starfish-pygame so every starfish
+    /// consumer gets identical semantics).
+    /// 整体显示模式请求（生态统一编排口——自动方向 + 全屏转换序 +
+    /// 实测交换，自 starfish-pygame 下沉）。
+    ///
+    /// * 自动方向：尺寸纵横比隐式请求（竖尺寸 → `"portrait"` / 横尺寸
+    ///   → `"landscape"`；相等或 0 跳过；固定方向——sensor 变体留显式
+    ///   [`Self::set_orientation`] 精细口）
+    /// * 全屏转换序：进入 = borderless → resizable → fullscreen（跳过
+    ///   set_size）；退出 = fullscreen(false) 先行（placement 还原）→
+    ///   borderless/resizable → set_size（请求尺寸覆盖还原值）
+    /// * 实测交换（Android）：全屏画布取原生实测；请求纵横比（或
+    ///   `(0,0)` 时最近方向意图）与实测相反 → 交换尺寸（旋转在途——
+    ///   旋转完成后物理 = 该值，两序皆对）
+    ///
+    /// 返回生效画布尺寸（fullscreen = 实测；否则 = 请求尺寸原样）。
+    pub fn set_display_mode(
+        &self,
+        size: (u32, u32),
+        fullscreen: bool,
+        borderless: bool,
+        resizable: bool,
+    ) -> (u32, u32) {
+        // 自动方向先行（旋转异步——先请求先转；意图同时记录）
+        if size.0 > 0 && size.1 > 0 && size.0 != size.1 {
+            let orient = if size.1 > size.0 { "portrait" } else { "landscape" };
+            if let Err(e) = self.set_orientation(orient) {
+                starfish_debug::log_debug!(&format!(
+                    "[we] set_display_mode 自动方向 {orient} 未生效：{e}"
+                ));
+            }
+        }
+        if fullscreen {
+            // 进入全屏：跳过 set_size（画布恒取原生实测；(0,0) 字面应用
+            // 会把 Win32 saved_placement 钉成 0×0——退出还原 = 只剩标题栏）
+            self.inner.set_borderless(borderless);
+            self.inner.set_resizable(true);
+            self.inner.set_fullscreen(true);
+        } else {
+            // 退出全屏：先还原 placement 再 set_size（请求尺寸覆盖）
+            self.inner.set_fullscreen(false);
+            self.inner.set_borderless(borderless);
+            self.inner.set_resizable(resizable);
+            self.inner.set_size(size.0, size.1);
+        }
+        if fullscreen {
+            match self.inner.size() {
+                (w, h) if w > 0 && h > 0 => {
+                    // 旋转在途交换：请求纵横比 → 请求比；(0,0) → 最近方向
+                    // 意图；与实测相反 → 交换（Android 限定——桌面实测恒
+                    // 同步、无旋转在途窗口）
+                    let want_portrait = if size.0 > 0 && size.1 > 0 {
+                        Some(size.1 > size.0)
+                    } else {
+                        LAST_ORIENTATION.with(|c| c.get())
+                    };
+                    let measured_portrait = h > w;
+                    if want_portrait.is_some_and(|wp| wp != measured_portrait)
+                        && cfg!(target_os = "android")
+                    {
+                        (h, w)
+                    } else {
+                        (w, h)
+                    }
+                }
+                _ => size,
+            }
+        } else {
+            size
+        }
     }
 
     /// The window opacity.
@@ -768,4 +847,10 @@ impl WindowBuilder {
     pub fn build(self) -> Result<Window, WindowError> {
         Window::build(self.options)
     }
+}
+
+/// 最近一次成功方向请求的竖屏意图（true = 竖屏族；None = 未请求）——
+/// set_display_mode 的 (0,0)+FULLSCREEN 交换判据
+thread_local! {
+    static LAST_ORIENTATION: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
 }

@@ -214,24 +214,14 @@ pub fn set_caption(title: &str) {
 /// 已含 orientation 的宿主只重表面不重建 Activity）；桌面/web = no-op
 /// Ok（方向是移动端概念，跨端脚本零分支）；OHOS = 站桩 Err。
 pub fn set_orientation(orientation: &str) -> Result<(), String> {
-    let r = match with_window(|w| w.set_orientation(orientation)) {
+    match with_window(|w| w.set_orientation(orientation)) {
         Some(Ok(())) => Ok(()),
         Some(Err(e)) => Err(e.to_string()),
         None => Err("display 未初始化（须先 set_mode）".into()),
-    };
-    // 方向意图记录（2026-11-12：(0,0)+FULLSCREEN 的旋转在途交换依据
-    // ——竖全屏→横全屏时无请求纵横比，以最近方向请求为准；桌面
-    // no-op 成功也记录 = 行为一致）
-    if r.is_ok() {
-        LAST_ORIENTATION.with(|c| c.set(Some(orientation.contains("portrait"))));
     }
-    r
+    // 意图记录在 we 层 Window::set_orientation（2026-11-12 编排下沉统一）
 }
 
-/// 最近一次成功方向请求的竖屏意图（true = 竖屏族；None = 未请求）
-thread_local! {
-    static LAST_ORIENTATION: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
-}
 
 /// 鼠标事件穿透开关（点击落到下层窗口——桌宠形态配套；2026-11-07
 /// 穿透设计稿 M1。Win32 实装；不支持平台 Err——能力位垫底原则。
@@ -342,27 +332,20 @@ pub fn apply_window_request(size: (u32, u32), flags: u32) {
     // FULLSCREEN 旗标处理——移动端全屏形态的本机对照
     let flags = if starfish_debug::fullscreen_sim() { flags | FULLSCREEN } else { flags };
     let desktop_lb = desktop_letterbox();
-    // 全屏转换序（2026-11-12 修，window_mode_test 实测根因）：
-    // · 进入全屏：**跳过 set_size**——画布恒取原生实测尺寸；且 set_mode
-    //   约定 (0,0) 尺寸字面应用会把 Win32 后端进入全屏时保存的
-    //   saved_placement 钉成 0×0 窗口——退出还原后只剩标题栏。
-    // · 退出全屏：**set_fullscreen(false) 先行**（还原 saved_placement），
-    //   set_size 随后覆盖为请求尺寸——原序 set_size 先行的值被还原顶掉。
-    // · 2026-11-03 顺序定案保持不变：borderless 定形态 → resizable 定
-    //   权威 → fullscreen 收尾铺满（进入向）。
-    let going_fullscreen = flags & FULLSCREEN != 0;
+    // ── 编排下沉（2026-11-12：starfish-we Window::set_display_mode 生态
+    // 统一口——自动方向 + 全屏转换序 + 实测交换全在引擎窗口层，本层
+    // 只补 pygame 语义位 HIDDEN/ALWAYS_ON_TOP 与同步 resize）──
+    let effective = with_window(|w| {
+        Some(w.set_display_mode(
+            desktop_lb.unwrap_or(size),
+            flags & FULLSCREEN != 0,
+            flags & NOFRAME != 0,
+            flags & RESIZABLE != 0,
+        ))
+    })
+    .flatten()
+    .unwrap_or(size);
     with_window(|w| {
-        if going_fullscreen {
-            w.set_borderless(flags & NOFRAME != 0);
-            w.set_resizable(true);
-            w.set_fullscreen(true);
-        } else {
-            w.set_fullscreen(false);
-            w.set_borderless(flags & NOFRAME != 0);
-            w.set_resizable(flags & RESIZABLE != 0);
-            // 复现钩子：窗口实测钉为环境变量指定尺寸（逻辑≠物理的前提）
-            w.set_size(desktop_lb.unwrap_or(size));
-        }
         // HIDDEN 运行时语义 = 隐藏窗口（真 pygame 为创建期；垫底执行）
         if flags & HIDDEN != 0 {
             w.set_visible(false);
@@ -371,60 +354,6 @@ pub fn apply_window_request(size: (u32, u32), flags: u32) {
             w.set_always_on_top(true);
         }
     });
-    // ── 纵横比自动方向（2026-11-12 定约：竖屏尺寸 = 竖屏应用）──────
-    // 在 effective 测量**之前**触发（旋转异步生效——先请求先转）。
-    // 固定方向 portrait/landscape（sensor_* 允许 180° 反向——手机横持
-    // 传感器挑反向竖屏 = 用户实测"倒过来的"，2026-11-12 改固定）。
-    // 桌面/web no-op 零分支；OHOS Err 静默；手动 set_orientation 在
-    // set_mode 之前/之后调用均可（后调胜出——last-write-wins）。
-    if size.0 > 0 && size.1 > 0 && size.0 != size.1 {
-        let orient = if size.1 > size.0 { "portrait" } else { "landscape" };
-        if let Err(e) = set_orientation(orient) {
-            starfish_debug::log_debug!(&format!(
-                "[display] set_mode 自动方向 {orient} 未生效：{e}"
-            ));
-        }
-    }
-    // FULLSCREEN 旗标：尺寸请求作废——画布改取原生窗口实测尺寸
-    // （Android 嵌入 = 外部窗口实测值，满屏 1:1 零变形零映射；Linux
-    // Wayland = 全屏 configure 回落后的窗口实测值——后端 set_fullscreen
-    // 内有界往返收集 configure，此处同步可取；实测失败垫底回请求尺寸）。
-    // 非全屏 = 请求尺寸原样（GLES 缩放铺满，既定语义）。
-    // "set_mode 与 fullscreen 处理"的语义修正定案
-    let effective = if flags & FULLSCREEN != 0 {
-        // 全屏画布 = 原生窗口实测尺寸（Android 嵌入 = 外部窗实测；桌面 =
-        // 全屏 apply 后的窗实测——Win32 SetWindowPos 同步发 WM_SIZE、
-        // Wayland 后端 set_fullscreen 内先解钉 commit 再有界往返收
-        // configure，均可同步取到；Web 全屏为 no-op，实测 = 请求 = 原
-        // 行为）。实测失败垫底回请求尺寸。
-        // **旋转在途交换**（2026-11-12：竖全屏 (450,800)+FULLSCREEN 在
-        // 横屏实测 = landscape 尺寸锁进逻辑 → 旋转后 portrait 物理下
-        // letterbox 出"横屏大小竖屏显示"；请求纵横比与实测相反 → 取
-        // 交换尺寸——旋转完成后物理 = 该值，同一数字两序皆对）
-        match with_window(|w| w.size()) {
-            Some(native) if native.0 > 0 && native.1 > 0 => {
-                // 方向意图：显式尺寸纵横比 → 请求比；(0,0) 全屏 → 最近
-                // 方向请求（竖全屏→横全屏 = 记录 landscape → 竖屏实测
-                // 交换成横——修"横屏下显示竖屏大小画布"）
-                let want_portrait = if size.0 > 0 && size.1 > 0 {
-                    Some(size.1 > size.0)
-                } else {
-                    LAST_ORIENTATION.with(|c| c.get())
-                };
-                let measured_portrait = native.1 > native.0;
-                if want_portrait.is_some_and(|wp| wp != measured_portrait)
-                    && cfg!(target_os = "android")
-                {
-                    (native.1, native.0)
-                } else {
-                    native
-                }
-            }
-            _ => size,
-        }
-    } else {
-        size
-    };
     // 逻辑画布登记：Android 窗口化下 = 脚本请求尺寸（引擎等比居中
     // 映射到物理）；桌面/物理可跟随平台 = 物理即逻辑（handle_resized
     // 内统一回填）

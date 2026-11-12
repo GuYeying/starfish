@@ -23,6 +23,8 @@ pub enum Event {
     Quit,
     /// 窗口尺寸变化（物理像素；ADR-8：display 尺寸不跟随）
     Resized { width: u32, height: u32 },
+    /// 全屏状态变化（web 手动退出全屏捕获——desktop v1 不产生）
+    FullscreenChanged { fullscreen: bool },
     FocusGained,
     FocusLost,
     /// 按键按下（`key` = [`KeyCode`]，与 [`crate::locals`] 常量同型；
@@ -240,6 +242,9 @@ fn translate(e: WindowEvent) -> Option<Event> {
             // ADR-8：display 逻辑尺寸不跟随。
             display::handle_resized(width, height);
             Some(Event::Resized { width, height })
+        }
+        WindowEvent::FullscreenChanged { fullscreen } => {
+            Some(Event::FullscreenChanged { fullscreen })
         }
         WindowEvent::FocusGained => {
             key::set_focused(true);

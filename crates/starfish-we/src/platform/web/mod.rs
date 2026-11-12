@@ -294,18 +294,32 @@ impl WindowInner {
             });
     }
 
-    /// Fullscreen is a v0 no-op (Element::requestFullscreen integration is
-    /// a follow-up).
-    /// 全屏 v0 no-op（Element::requestFullscreen 接入为后续项）。
-    pub(crate) fn set_fullscreen(&self, _fullscreen: bool) {
-        Self::warn_once(
-            "fullscreen",
-            "[starfish-we] web: FULLSCREEN not supported in v0 (requestFullscreen is a follow-up) / v0 暂不支持(后续接 requestFullscreen)",
-        );
+    /// 全屏（2026-11-12 实装）：canvas `requestFullscreen()` /
+    /// document `exitFullscreen()`。Promise 异步生效——拒绝（浏览器
+    /// 策略/非用户手势）吞掉仅日志（状态经 fullscreenchange 事件面
+    /// 通知，is_fullscreen 以 document.fullscreenElement 为准）。
+    pub(crate) fn set_fullscreen(&self, fullscreen: bool) {
+        if fullscreen {
+            // requestFullscreen 同步 catch（拒绝经 fullscreenchange 不
+            // 到来体现——is_fullscreen 仍是事实源）
+            if let Err(e) = self.canvas().request_fullscreen() {
+                starfish_debug::log_warn!(&format!(
+                    "[starfish-we] web requestFullscreen 失败：{e:?}"
+                ));
+            }
+        } else if let Some(doc) =
+            web_sys::window().and_then(|w| w.document())
+        {
+            doc.exit_fullscreen();
+        }
     }
 
     pub(crate) fn is_fullscreen(&self) -> bool {
-        false
+        web_sys::window()
+            .and_then(|w| w.document())
+            .and_then(|d| d.fullscreen_element())
+            .map(|el| el == *elem_cmp(&self.canvas()))
+            .unwrap_or(false)
     }
 
     pub(crate) fn set_borderless(&self, _borderless: bool) {
@@ -752,6 +766,29 @@ impl WindowInner {
                 });
             })?);
         }
+        // 全屏状态变化（document 级：canvas 进入/退出全屏——含**用户
+        // ESC 手动退出**；2026-11-12 web 全屏实装配套）。fullscreenElement
+        // 与本 canvas 比对 = 事实源（外部元素全屏 = 非本画布，false 侧）。
+        {
+            let ctx = ctx.clone();
+            let document: web_sys::EventTarget = web_sys::window()
+                .and_then(|w| w.document())
+                .map(|d| d.into())
+                .ok_or_else(|| {
+                    WindowError::OsError("document 不可用（fullscreenchange 挂载）".into())
+                })?;
+            listeners.push(add_listener(&document, "fullscreenchange", move |_| {
+                let fs = web_sys::window()
+                    .and_then(|w| w.document())
+                    .and_then(|d| d.fullscreen_element())
+                    .map(|el| el == *elem_cmp(&ctx.canvas))
+                    .unwrap_or(false);
+                ctx.shared
+                    .borrow_mut()
+                    .pending
+                    .push_back(Event::FullscreenChanged { fullscreen: fs });
+            })?);
+        }
         // Touch (with primary-finger mouse synthesis).
         // 触摸（含主手指合成鼠标）。
         for ty in ["touchstart", "touchmove", "touchend", "touchcancel"] {
@@ -1013,4 +1050,13 @@ fn on_touch(ctx: &Ctx, value: JsValue, ty: &str) {
             shared.pending.push_back(mouse);
         }
     }
+}
+
+/// canvas → Element 比较（fullscreen_element 返回 Element——HtmlCanvasElement
+/// 经 dyn_into 上行；比较失败 = 恒 false 不 panic）
+fn elem_cmp(canvas: &HtmlCanvasElement) -> std::rc::Rc<web_sys::Element> {
+    use wasm_bindgen::JsCast;
+    // canvas → Element 上行（恒成功；Rc 包一层使解引用与 el（JS 引用
+    // 值语义 ==）可直接比对——wasm-bindgen 对象 == 即 JS 严格等）
+    std::rc::Rc::new(canvas.clone().dyn_into().unwrap())
 }
