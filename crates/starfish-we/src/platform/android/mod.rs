@@ -665,7 +665,40 @@ fn orientation_const(name: &str) -> Option<i32> {
     }
 }
 
+// ── 方向解析器（嵌入宿主覆盖通道，2026-11-12）─────────────────────
+// ndk-context 的 context 在嵌入宿主形态下可能是 Application Context
+// （宿主首启绑定的对象——setRequestedOrientation 定义在 Activity 类，
+// app context 类上 GetMethodID 必 null = 方向请求静默失败，打包 APK
+// 实测根因）。嵌入宿主经 [`set_orientation_resolver`] 注册自己的解析
+// 器（onResume 更新的当前 Activity 引用）；glue 路径（android-activity
+// crate 绑定 NativeActivity 本体 = Activity 子类）无需注册，走
+// ndk-context 默认。
+type OrientationResolver = fn(name: &str) -> Result<(), crate::error::WindowError>;
+static ORIENTATION_RESOLVER: std::sync::Mutex<Option<OrientationResolver>> =
+    std::sync::Mutex::new(None);
+
+/// 注册方向请求解析器（嵌入宿主启动时调用一次——解析器内部自行持有
+/// 当前 Activity 引用；见 android_host.rs updateUiContext 通道）
+pub fn set_orientation_resolver(resolver: OrientationResolver) {
+    *ORIENTATION_RESOLVER.lock().unwrap_or_else(|p| p.into_inner()) = Some(resolver);
+}
+
 pub(crate) fn request_orientation(name: &str) -> Result<(), crate::error::WindowError> {
+    if let Some(f) = *ORIENTATION_RESOLVER.lock().unwrap_or_else(|p| p.into_inner()) {
+        return f(name);
+    }
+    let ctx = ndk_context::android_context();
+    request_orientation_on(ctx.vm(), ctx.context(), name)
+}
+
+/// 在指定 Activity 对象上请求方向（JNI 底座——request_orientation 的
+/// ndk-context 默认与嵌入宿主解析器共用；`vm` = JavaVM*，
+/// `activity` = Activity 实例 jobject）
+pub fn request_orientation_on(
+    vm_raw: *mut std::ffi::c_void,
+    activity_raw: *mut std::ffi::c_void,
+    name: &str,
+) -> Result<(), crate::error::WindowError> {
     use crate::error::WindowError;
     let Some(value) = orientation_const(name) else {
         return Err(WindowError::OsError(format!(
@@ -673,9 +706,8 @@ pub(crate) fn request_orientation(name: &str) -> Result<(), crate::error::Window
              sensor_landscape/sensor/full_sensor/unspecified）"
         )));
     };
-    let ctx = ndk_context::android_context();
-    let vm: *mut jni_sys::JavaVM = ctx.vm().cast();
-    let activity: jni_sys::jobject = ctx.context().cast();
+    let vm: *mut jni_sys::JavaVM = vm_raw.cast();
+    let activity: jni_sys::jobject = activity_raw.cast();
     if vm.is_null() || activity.is_null() {
         return Err(WindowError::OsError(
             "set_orientation: ndk-context 未绑定（嵌入宿主须先 initContext 传 Activity）"

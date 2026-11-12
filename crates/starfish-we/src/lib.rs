@@ -159,6 +159,8 @@ pub fn text_input_active() -> bool {
 /// å¹³å°ç¹æ API çæ¾å¼ä¾å¤ï¼åªå­å¨äº Android æå»ºä¸­ã
 #[cfg(target_os = "android")]
 pub use platform::android::android_init;
+#[cfg(target_os = "android")]
+pub use platform::android::{set_orientation_resolver, request_orientation_on};
 
 /// (Android builds only) The system app handle â the parameter type of
 /// [`android_init`], needed by the host's `android_main` signature.

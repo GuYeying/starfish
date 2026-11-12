@@ -407,6 +407,25 @@ pub fn apply_window_request(size: (u32, u32), flags: u32) {
             None => handle_resized(effective.0, effective.1),
         }
     }
+    // ── 纵横比自动方向（2026-11-12 定约：竖屏尺寸 = 竖屏应用）──────
+    // set_mode 请求尺寸纵横比隐式请求屏幕方向——脚本零额外调用即得
+    // 正确朝向（Android 实装；桌面/web no-op 零分支；OHOS Err 静默）。
+    // 规则：请求尺寸双维均 > 0 时按其纵横比（h>w → sensor_portrait /
+    // w>h → sensor_landscape / 相等跳过）；(0,0) 全屏 = 无纵横比信息
+    // 不自动（显式 set_orientation 补位）。手动 set_orientation 在
+    // set_mode 之前/之后调用均可（后调胜出——last-write-wins）。
+    if size.0 > 0 && size.1 > 0 && size.0 != size.1 {
+        let orient = if size.1 > size.0 {
+            "sensor_portrait"
+        } else {
+            "sensor_landscape"
+        };
+        if let Err(e) = set_orientation(orient) {
+            starfish_debug::log_debug!(&format!(
+                "[display] set_mode 自动方向 {orient} 未生效：{e}"
+            ));
+        }
+    }
 }
 
 /// 物理点 → **逻辑中心系**点（输入坐标映射的统一收口：物理 → 逻辑
