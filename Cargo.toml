@@ -5,7 +5,7 @@ resolver = "2"
 members = ["crates/*", "examples/*"]
 
 [workspace.package]
-version = "0.9.72"
+version = "0.9.73"
 edition = "2024"
 rust-version = "1.85"
 

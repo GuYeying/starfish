@@ -566,11 +566,20 @@ impl Window {
             }
         }
         if fullscreen {
-            // 进入全屏：跳过 set_size（画布恒取原生实测；(0,0) 字面应用
-            // 会把 Win32 saved_placement 钉成 0×0——退出还原 = 只剩标题栏）
-            self.inner.set_borderless(borderless);
-            self.inner.set_resizable(true);
-            self.inner.set_fullscreen(true);
+            // **全屏→全屏跳过全部样式操作**（2026-11-12 修：横全屏↔竖全屏
+            // 切换时 set_borderless(false) 把 WS_CAPTION|WS_THICKFRAME
+            // 回填到 WS_POPUP 全屏窗（弹出 WS_POPUP = 破坏全屏样式 =
+            // 窗口化），且 set_fullscreen(true) 撞 state 等值守卫 no-op
+            // 不自愈——实测"全屏互切一次后永久窗口化"。已全屏且继续
+            // 全屏 = 仅尺寸语义变化（effective 重取实测），样式零触碰）
+            if !self.is_fullscreen() {
+                // 窗口化→全屏：跳过 set_size（画布恒取原生实测；
+                // (0,0) 字面应用会把 Win32 saved_placement 钉成 0×0
+                // ——退出还原 = 只剩标题栏）
+                self.inner.set_borderless(borderless);
+                self.inner.set_resizable(true);
+                self.inner.set_fullscreen(true);
+            }
         } else {
             // 退出全屏：先还原 placement 再 set_size（请求尺寸覆盖）
             self.inner.set_fullscreen(false);
