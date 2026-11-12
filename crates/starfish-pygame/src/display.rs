@@ -359,6 +359,20 @@ pub fn apply_window_request(size: (u32, u32), flags: u32) {
             w.set_always_on_top(true);
         }
     });
+    // ── 纵横比自动方向（2026-11-12 定约：竖屏尺寸 = 竖屏应用）──────
+    // 在 effective 测量**之前**触发（旋转异步生效——先请求先转）。
+    // 固定方向 portrait/landscape（sensor_* 允许 180° 反向——手机横持
+    // 传感器挑反向竖屏 = 用户实测"倒过来的"，2026-11-12 改固定）。
+    // 桌面/web no-op 零分支；OHOS Err 静默；手动 set_orientation 在
+    // set_mode 之前/之后调用均可（后调胜出——last-write-wins）。
+    if size.0 > 0 && size.1 > 0 && size.0 != size.1 {
+        let orient = if size.1 > size.0 { "portrait" } else { "landscape" };
+        if let Err(e) = set_orientation(orient) {
+            starfish_debug::log_debug!(&format!(
+                "[display] set_mode 自动方向 {orient} 未生效：{e}"
+            ));
+        }
+    }
     // FULLSCREEN 旗标：尺寸请求作废——画布改取原生窗口实测尺寸
     // （Android 嵌入 = 外部窗口实测值，满屏 1:1 零变形零映射；Linux
     // Wayland = 全屏 configure 回落后的窗口实测值——后端 set_fullscreen
@@ -371,8 +385,22 @@ pub fn apply_window_request(size: (u32, u32), flags: u32) {
         // Wayland 后端 set_fullscreen 内先解钉 commit 再有界往返收
         // configure，均可同步取到；Web 全屏为 no-op，实测 = 请求 = 原
         // 行为）。实测失败垫底回请求尺寸。
+        // **旋转在途交换**（2026-11-12：竖全屏 (450,800)+FULLSCREEN 在
+        // 横屏实测 = landscape 尺寸锁进逻辑 → 旋转后 portrait 物理下
+        // letterbox 出"横屏大小竖屏显示"；请求纵横比与实测相反 → 取
+        // 交换尺寸——旋转完成后物理 = 该值，同一数字两序皆对）
         match with_window(|w| w.size()) {
-            Some(native) if native.0 > 0 && native.1 > 0 => native,
+            Some(native) if native.0 > 0 && native.1 > 0 => {
+                let req_portrait = size.1 > size.0;
+                let measured_portrait = native.1 > native.0;
+                if (size.0 > 0 && size.1 > 0 && req_portrait != measured_portrait)
+                    && cfg!(target_os = "android")
+                {
+                    (native.1, native.0)
+                } else {
+                    native
+                }
+            }
             _ => size,
         }
     } else {
@@ -405,25 +433,6 @@ pub fn apply_window_request(size: (u32, u32), flags: u32) {
                 }
             }
             None => handle_resized(effective.0, effective.1),
-        }
-    }
-    // ── 纵横比自动方向（2026-11-12 定约：竖屏尺寸 = 竖屏应用）──────
-    // set_mode 请求尺寸纵横比隐式请求屏幕方向——脚本零额外调用即得
-    // 正确朝向（Android 实装；桌面/web no-op 零分支；OHOS Err 静默）。
-    // 规则：请求尺寸双维均 > 0 时按其纵横比（h>w → sensor_portrait /
-    // w>h → sensor_landscape / 相等跳过）；(0,0) 全屏 = 无纵横比信息
-    // 不自动（显式 set_orientation 补位）。手动 set_orientation 在
-    // set_mode 之前/之后调用均可（后调胜出——last-write-wins）。
-    if size.0 > 0 && size.1 > 0 && size.0 != size.1 {
-        let orient = if size.1 > size.0 {
-            "sensor_portrait"
-        } else {
-            "sensor_landscape"
-        };
-        if let Err(e) = set_orientation(orient) {
-            starfish_debug::log_debug!(&format!(
-                "[display] set_mode 自动方向 {orient} 未生效：{e}"
-            ));
         }
     }
 }

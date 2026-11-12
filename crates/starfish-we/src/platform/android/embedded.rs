@@ -172,6 +172,16 @@ pub(crate) unsafe fn attach_surface_impl(
 
 /// [`crate::embedded::surface_resized`] 的委托目标
 pub(crate) fn surface_resized_impl(width: u32, height: u32) {
+    // 槽位尺寸同步（2026-11-12：只推事件不更新 EXTERNAL = WindowInner
+    // size/raw_handle 的尺寸查询陈旧横屏——旋转后窗口查询与引擎实际
+    // 表面分裂）
+    {
+        let mut slot = EXTERNAL.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(ext) = slot.as_mut() {
+            ext.width = width;
+            ext.height = height;
+        }
+    }
     inject_external_resized(width, height);
 }
 
