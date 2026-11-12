@@ -168,6 +168,11 @@ impl Mipmap {
                 // 各向异性过滤（1=关闭，适合地面/墙面，默认关闭省性能）,context设置
                 anisotropy_clamp: anisotropy,
                 // 边界颜色（只有使用ClampToBorder才需要，默认不用）,使用白色，更容易醒目。黑色容易以为没有打光问题被跳过。
+                // WebGL2 无 sampler 边框色 API（glow f32 切片硬 panic——
+                // 2026-11-13 手机浏览器实测）——web 恒 None（白边仅调试醒目辅助）
+                #[cfg(target_arch = "wasm32")]
+                border_color: None,
+                #[cfg(not(target_arch = "wasm32"))]
                 border_color: Some(SamplerBorderColor::OpaqueWhite),
                 }
             )

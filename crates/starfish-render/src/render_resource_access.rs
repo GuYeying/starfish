@@ -183,6 +183,14 @@ impl RenderResourceAccess {
 
 
     pub fn create_sampler(&self,label: &str,config:&SamplerDescriptor)->Sampler{
+        // 边框色仅在 ClampToBorder 寻址下生效。WebGL2 无 sampler 边框色
+        // API（glow sampler_parameter_f32_slice 对 f32 切片硬 panic——
+        // wgpu-hal gles 已知缺口：WebGPU 后端不踩，手机浏览器 GLES 回退
+        // 即炸 2026-11-13 实测）——web 侧恒 None（ClampToBorder 边界黑，
+        // 其余寻址模式零差）
+        #[cfg(target_arch = "wasm32")]
+        let border_color = None;
+        #[cfg(not(target_arch = "wasm32"))]
         let border_color = if config.use_white_border() {
             Some(SamplerBorderColor::OpaqueWhite)
         } else {
