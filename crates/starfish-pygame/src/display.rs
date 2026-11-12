@@ -214,11 +214,23 @@ pub fn set_caption(title: &str) {
 /// 已含 orientation 的宿主只重表面不重建 Activity）；桌面/web = no-op
 /// Ok（方向是移动端概念，跨端脚本零分支）；OHOS = 站桩 Err。
 pub fn set_orientation(orientation: &str) -> Result<(), String> {
-    match with_window(|w| w.set_orientation(orientation)) {
+    let r = match with_window(|w| w.set_orientation(orientation)) {
         Some(Ok(())) => Ok(()),
         Some(Err(e)) => Err(e.to_string()),
         None => Err("display 未初始化（须先 set_mode）".into()),
+    };
+    // 方向意图记录（2026-11-12：(0,0)+FULLSCREEN 的旋转在途交换依据
+    // ——竖全屏→横全屏时无请求纵横比，以最近方向请求为准；桌面
+    // no-op 成功也记录 = 行为一致）
+    if r.is_ok() {
+        LAST_ORIENTATION.with(|c| c.set(Some(orientation.contains("portrait"))));
     }
+    r
+}
+
+/// 最近一次成功方向请求的竖屏意图（true = 竖屏族；None = 未请求）
+thread_local! {
+    static LAST_ORIENTATION: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
 }
 
 /// 鼠标事件穿透开关（点击落到下层窗口——桌宠形态配套；2026-11-07
@@ -391,9 +403,16 @@ pub fn apply_window_request(size: (u32, u32), flags: u32) {
         // 交换尺寸——旋转完成后物理 = 该值，同一数字两序皆对）
         match with_window(|w| w.size()) {
             Some(native) if native.0 > 0 && native.1 > 0 => {
-                let req_portrait = size.1 > size.0;
+                // 方向意图：显式尺寸纵横比 → 请求比；(0,0) 全屏 → 最近
+                // 方向请求（竖全屏→横全屏 = 记录 landscape → 竖屏实测
+                // 交换成横——修"横屏下显示竖屏大小画布"）
+                let want_portrait = if size.0 > 0 && size.1 > 0 {
+                    Some(size.1 > size.0)
+                } else {
+                    LAST_ORIENTATION.with(|c| c.get())
+                };
                 let measured_portrait = native.1 > native.0;
-                if (size.0 > 0 && size.1 > 0 && req_portrait != measured_portrait)
+                if want_portrait.is_some_and(|wp| wp != measured_portrait)
                     && cfg!(target_os = "android")
                 {
                     (native.1, native.0)
