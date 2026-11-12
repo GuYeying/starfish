@@ -635,13 +635,18 @@ impl Screen {
             return;
         };
         let depth_att = if depth {
-            // base 帧清屏已把深度清为 1.0——这里恒 Load 承接
+            // 深度随本 pass 清 1.0（2026-11-12 修：原 Load 承接的假设
+            // "base 帧清屏已清深度"不成立——全链无深度清屏点，wgpu 零
+            // 初始化 = 0.0（最近平面）→ LessEqual 只放过深度恰 0 的
+            // Auto 2D 图元，透视 3D（深度 ~0.98）全拒 = 深度会话黑屏，
+            // gfx3d_demo 0/35 像素实证）。overlay 路径（with_pass/raw）
+            // 本就 Clear(1.0)——本口对齐同语义。
             self.surface
                 .borrow()
                 .get_current_depth_texture_view()
                 .map(|view| DepthAttachment {
                     view,
-                    load: wgpu::LoadOp::Load,
+                    load: wgpu::LoadOp::Clear(1.0),
                     store: wgpu::StoreOp::Store,
                     stencil_ops: None,
                     depth_slice: None,

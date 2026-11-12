@@ -315,22 +315,27 @@ pub fn apply_window_request(size: (u32, u32), flags: u32) {
     // FULLSCREEN 旗标处理——移动端全屏形态的本机对照
     let flags = if starfish_debug::fullscreen_sim() { flags | FULLSCREEN } else { flags };
     let desktop_lb = desktop_letterbox();
+    // 全屏转换序（2026-11-12 修，window_mode_test 实测根因）：
+    // · 进入全屏：**跳过 set_size**——画布恒取原生实测尺寸；且 set_mode
+    //   约定 (0,0) 尺寸字面应用会把 Win32 后端进入全屏时保存的
+    //   saved_placement 钉成 0×0 窗口——退出还原后只剩标题栏。
+    // · 退出全屏：**set_fullscreen(false) 先行**（还原 saved_placement），
+    //   set_size 随后覆盖为请求尺寸——原序 set_size 先行的值被还原顶掉。
+    // · 2026-11-03 顺序定案保持不变：borderless 定形态 → resizable 定
+    //   权威 → fullscreen 收尾铺满（进入向）。
+    let going_fullscreen = flags & FULLSCREEN != 0;
     with_window(|w| {
-        // 复现钩子：窗口实测钉为环境变量指定尺寸（逻辑≠物理的前提）
-        w.set_size(desktop_lb.unwrap_or(size));
-        // FULLSCREEN 解除 min=max 钉死（Wayland 合成器的约束引擎在全屏
-        // 态也吃 max_size——钉请求尺寸时 configure 尺寸原地不变，窗口
-        // 字母箱钉在请求尺寸，Mutter 真机实测 2026-10-29）
-        // 旗标应用顺序（2026-11-03 修，实测根因）：**borderless 必须最先、
-        // fullscreen 必须最后**——原序 set_borderless(false) 排在
-        // set_fullscreen 之后，把 WS_CAPTION|WS_THICKFRAME 整体回填到
-        // 已全屏的窗口（样式重算弹回创建尺寸 = "带边框+不满屏缝隙"；
-        // THICKFRAME 残留 = 可拖边无边框按钮），窗口化默认也因此可拖边
-        // resize。现序：borderless 定形态 → resizable 定权威 → fullscreen
-        // 收尾铺满。
-        w.set_borderless(flags & NOFRAME != 0);
-        w.set_resizable(flags & RESIZABLE != 0 || flags & FULLSCREEN != 0);
-        w.set_fullscreen(flags & FULLSCREEN != 0);
+        if going_fullscreen {
+            w.set_borderless(flags & NOFRAME != 0);
+            w.set_resizable(true);
+            w.set_fullscreen(true);
+        } else {
+            w.set_fullscreen(false);
+            w.set_borderless(flags & NOFRAME != 0);
+            w.set_resizable(flags & RESIZABLE != 0);
+            // 复现钩子：窗口实测钉为环境变量指定尺寸（逻辑≠物理的前提）
+            w.set_size(desktop_lb.unwrap_or(size));
+        }
         // HIDDEN 运行时语义 = 隐藏窗口（真 pygame 为创建期；垫底执行）
         if flags & HIDDEN != 0 {
             w.set_visible(false);
