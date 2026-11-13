@@ -327,6 +327,12 @@ impl log::Log for FacadeBridge {
             && Level::from(meta.level()) <= STATE.lock().unwrap().as_ref().map(|s| s.level).unwrap_or(Level::Off)
     }
     fn log(&self, record: &log::Record) {
+        // wasm 门控（2026-11-13 egui_app 实测定案）：此处曾是唯一漏网的
+        // 裸 Instant——wgpu/naga/egui 第三方首次管线编译发 log::info! →
+        // 全局桥 → std Instant wasm32 未实现 → 启动即 panic（egui_app
+        // wasm 崩、纯脚本案例无第三方日志故不触发——七轮 raise 二分 +
+        // wasm-tools 反汇编调用方全景锁定）
+        #[cfg(not(target_arch = "wasm32"))]
         let t0 = std::time::Instant::now();
         // 第三方 Info 降位为自家 Debug（wgpu/egui 等内部进展属诊断——
         // 发行壳 Info 级别下不落盘；dev Debug 级别照常全见），
@@ -339,6 +345,7 @@ impl log::Log for FacadeBridge {
             lvl,
             format_args!("[{}] {}", record.target(), record.args()),
         );
+        #[cfg(not(target_arch = "wasm32"))]
         if let Ok(mut g) = STATE.try_lock() {
             if let Some(st) = g.as_mut() {
                 st.bridge_count += 1;
