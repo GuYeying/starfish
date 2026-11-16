@@ -60,17 +60,10 @@ pub const ALWAYS_ON_TOP: u32 = 1 << 6;
 /// 透明窗口（**创建期**——透明合成 + Screen 清屏改 alpha 0；
 /// 桌宠/悬浮件形态。运行期不可追溯）
 pub const TRANSPARENT: u32 = 1 << 7;
-/// 后端声明（wgpu 在声明位集内自动挑选、不可用即隐式退化；
-/// 未声明任何后端位 = `Backends::all()` 平台最优）。
-/// 注意：GPU 初始化在 set_mode_ex 内进程一次——后端声明须在
-/// 首次 set_mode 时给出（运行期不可重选）。
-pub const VULKAN: u32 = 1 << 8;
-pub const DIRECTX: u32 = 1 << 9;
-pub const METAL: u32 = 1 << 10;
-pub const OPENGLES: u32 = 1 << 11;
-/// GL 上下文请求（2026-09-30 语义变更：由"显式报错"改为后端声明
-/// = wgpu GL 后端，不可用隐式退化）
-pub const OPENGL: u32 = 1 << 30;
+// ⚠️ 后端声明位（VULKAN/DIRECTX/METAL/OPENGLES/OPENGL）已剔除
+//（2026-11-16 拆步装配批次定约）——后端选择走 GpuSettings.backends
+//（脚本期装配 kwargs / env / pending settings 承载）；透明窗用
+// TRANSPARENT 位（DX12 推导自动承载）。
 
 /// 已登记旗标全集（未登记位 → 警告并忽略，垫底原则）
 pub const KNOWN_MASK: u32 = RESIZABLE
@@ -78,12 +71,7 @@ pub const KNOWN_MASK: u32 = RESIZABLE
     | NOFRAME
     | HIDDEN
     | ALWAYS_ON_TOP
-    | TRANSPARENT
-    | VULKAN
-    | DIRECTX
-    | METAL
-    | OPENGLES
-    | OPENGL;
+    | TRANSPARENT;
 
 
 /// 建窗 + GPU 装配（契约 §七：**进程一次**；重复调用 = 契约违例 panic）
@@ -165,37 +153,9 @@ pub async fn set_mode_ex(size: (u32, u32), flags: u32) -> Result<(), RenderConte
         }
         g
     });
-    // 后端声明位 → GpuSettings.backends（wgpu 位集内自动挑选；
-    // 未声明 = Backends::all 平台最优。GL 位（OPENGL/OPENGLES）同语义，
-    // 不可用隐式退化——旧"显式报错"垫底表已废）
-    let mut backends = wgpu::Backends::empty();
-    for (bit, be) in [
-        (VULKAN, wgpu::Backends::VULKAN),
-        (DIRECTX, wgpu::Backends::DX12),
-        (METAL, wgpu::Backends::METAL),
-        (OPENGLES | OPENGL, wgpu::Backends::GL),
-    ] {
-        if flags & bit != 0 {
-            backends |= be;
-        }
-    }
-    // Web：GL 旗标（OPENGL/OPENGLES——GLES 判定探针的创建期预扫描词置
-    // 位）在 wasm 上追加 BROWSER_WEBGPU 优先位。wgpu 适配器择序 WebGPU
-    // 先于 GL，旗标语义（"要 GLES 家族"）落为"WebGPU 优先、WebGL2 兜
-    // 底"——强制单 GL 会落 glow web_sys 的采样参数 f32 切片不支持
-    // panic（Sampler parameter for `f32` slice is not supported，
-    // surface_size_probe 建窗即 trap，2026-10-29 真页实测）。
-    #[cfg(target_arch = "wasm32")]
-    if backends.intersects(wgpu::Backends::GL) {
-        backends |= wgpu::Backends::BROWSER_WEBGPU;
-    }
-    // 透明创建位：DirectComposition 呈现（DxgiFromVisual——wgpu 文档
-    // 明示 DxgiFromHwnd "does not support transparency"）+ 表面
-    // **显式 PreMultiplied**（管线 ALPHA_BLENDING 的 alpha 通道因子
-    // One/OneMinusSrcAlpha 累积即预乘形式，匹配）。
-    // ⚠ 逐像素透明 = **DX12 专属**（Vulkan Win32 表面只报 Opaque）——
-    // 透明时强制 DX12 后端（平台矩阵：Windows ✓；Linux/macOS 窗口后端
-    // 未实现——透明随平台后端落地；Android/Web 排除）
+    // ⚠️ 后端声明位已剔除（2026-11-16 定约）——后端选择走
+    // GpuSettings.backends（pending settings kwargs / env / 默认平台
+    // 最优）；透明创建位保留（DX12 推导自动承载）。
     let transparent = flags & TRANSPARENT != 0;
     let mut surface_settings = pending_surface.unwrap_or_default();
     if let Ok(v) = std::env::var("PYGST_FRAME_LATENCY") {
@@ -210,14 +170,13 @@ pub async fn set_mode_ex(size: (u32, u32), flags: u32) -> Result<(), RenderConte
     }
     #[cfg(target_os = "windows")]
     if transparent {
+        // 逐像素透明 = DX12 专属（DirectComposition 呈现 + PreMultiplied
+        // 预乘——推导自动承载，无需 flags 后端位）
         surface_settings = surface_settings.with_alpha_mode(wgpu::CompositeAlphaMode::PreMultiplied);
         gpu_settings = gpu_settings
-            .with_dx12_swapchain_kind(wgpu::Dx12SwapchainKind::DxgiFromVisual);
-        backends |= wgpu::Backends::DX12;
-    }
-    let explicit_backends = backends != wgpu::Backends::empty();
-    if explicit_backends {
-        gpu_settings = gpu_settings.with_backends(backends);
+            .with_dx12_swapchain_kind(wgpu::Dx12SwapchainKind::DxgiFromVisual)
+            .with_backends(wgpu::Backends::DX12)
+            .with_backends(wgpu::Backends::DX12);
     }
     let window: &'static Window = Box::leak(Box::new(
         Window::builder()
@@ -235,19 +194,10 @@ pub async fn set_mode_ex(size: (u32, u32), flags: u32) -> Result<(), RenderConte
     // 必现）。桌面 builder.size 已定窗，重复 set_size 无需。
     #[cfg(target_arch = "wasm32")]
     window.set_size(size);
-    // 显式后端不可用 → 隐式退化回全后端重试一次（用户定案：
-    // 失败让 wgpu 自己隐式退化）
+    // 显式 backends 不可用 → wgpu 自身隐式退化（settings 是用户责任
+    // ——后端位剔除后无 flags 回退面）
     let screen = Box::leak(Box::new(
-        match Screen::new_with(&window, surface_settings.clone(), gpu_settings).await {
-            Ok(s) => s,
-            Err(_) if explicit_backends => {
-                starfish_debug::log_debug!(
-                    "[pygame] 声明后端不可用，回退全后端重试（wgpu 隐式退化）",
-                );
-                Screen::new_with(&window, surface_settings, GpuSettings::default()).await?
-            }
-            Err(e) => return Err(e),
-        },
+        Screen::new_with(&window, surface_settings, gpu_settings).await?,
     ));
     if transparent {
         screen.set_transparent_bg();
@@ -429,7 +379,7 @@ async fn create_screen_at(
         surface_settings =
             surface_settings.with_alpha_mode(wgpu::CompositeAlphaMode::PreMultiplied);
         gpu_settings =
-            gpu_settings.with_dx12_swapchain_kind(wgpu::Dx12SwapchainKind::DxgiFromVisual);
+            gpu_settings.with_dx12_swapchain_kind(wgpu::Dx12SwapchainKind::DxgiFromVisual).with_backends(wgpu::Backends::DX12);
     }
     let screen = Box::leak(Box::new(
         Screen::new_with(window, surface_settings, gpu_settings).await?,
@@ -548,7 +498,7 @@ pub async fn create_screen(
         surface_settings =
             surface_settings.with_alpha_mode(wgpu::CompositeAlphaMode::PreMultiplied);
         gpu_settings =
-            gpu_settings.with_dx12_swapchain_kind(wgpu::Dx12SwapchainKind::DxgiFromVisual);
+            gpu_settings.with_dx12_swapchain_kind(wgpu::Dx12SwapchainKind::DxgiFromVisual).with_backends(wgpu::Backends::DX12);
     }
     // Web：建窗初始位图 = 模板布局 × dpr——**set_size 先于装配**（装
     // 配尺寸/set_size 尺寸错位 → BeginRenderPass 校验失败）
@@ -711,12 +661,8 @@ pub(crate) fn desktop_letterbox() -> Option<(u32, u32)> {
 }
 
 /// 脚本 set_mode 为完整请求：set_size 跟随 + 旗标经 Window::set_* 即时
-/// 生效。创建期一次性旗标（透明）垫底收下；OPENGL 垫底：引擎恒 wgpu）
+/// 生效。创建期一次性旗标（透明）垫底收下。
 pub fn apply_window_request(size: (u32, u32), flags: u32) {
-
-    if flags & OPENGL != 0 {
-        starfish_debug::log_debug!("[display] OPENGL 旗标垫底（引擎恒 wgpu）");
-    }
     // 落地耗时打点（慢调用哨兵——启动诊断用）
     let t = starfish_std::debug::Stopwatch::now();
     // starfish-debug 全屏形态模拟（创建时声明）：脚本 set_mode 一律按
