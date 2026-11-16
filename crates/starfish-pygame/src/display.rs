@@ -278,6 +278,7 @@ pub fn with_windows<R>(f: impl FnOnce(&[(String, &'static Window)]) -> R) -> Opt
 /// ①' 多窗口窗口创建（multi-window 批次——id 注册表形态；平台不支持
 /// = 运行时 Err（绑定层映射 Python 异常——用户定约：编译期 feature +
 /// 平台常量注入，运行时检测抛错））
+#[cfg(all(feature = "multi-window", target_os = "windows"))]
 pub fn create_window_id(
     id: impl Into<String>,
     size: (u32, u32),
@@ -324,6 +325,7 @@ pub fn create_window_id(
 
 /// ②' 多窗口 GPU 装配（per-id——窗须先 create_window_id；settings
 /// kwargs/env 同主窗通路）
+#[cfg(all(feature = "multi-window", target_os = "windows"))]
 pub fn create_screen_for(
     id: &str,
     surface_settings: Option<SurfaceSettings>,
@@ -391,6 +393,7 @@ async fn create_screen_at(
     Ok(screen)
 }
 
+#[cfg(all(feature = "multi-window", target_os = "windows"))]
 /// 多窗窗口帧提交（per-id——flip 的多窗词汇）。
 pub fn flip_id(id: &str) {
     screen(Some(id))
