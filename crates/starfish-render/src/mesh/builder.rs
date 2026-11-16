@@ -19,6 +19,8 @@ pub struct MeshBuilder {
     vertices: Vec<u8>,
     long_indices: Vec<u32>,
     short_indices: Vec<u16>,
+    /// 原始字节索引（高级口——LE 字节 + 显式格式；越界校验调用方自担）
+    index_bytes: Option<(Vec<u8>, wgpu::IndexFormat)>,
 
     vertex_buffer_usages:BufferUsages,
     index_buffer_usages:BufferUsages,
@@ -39,6 +41,7 @@ impl MeshBuilder {
             vertices,
             long_indices:Vec::new(),
             short_indices:Vec::new(),
+            index_bytes:None,
             vertex_buffer_usages: BufferUsages::VERTEX,
             index_buffer_usages: BufferUsages::INDEX,
             instance_stepped: false,
@@ -75,6 +78,16 @@ impl MeshBuilder {
     pub fn with_long_indices(mut self, indices: Vec<u32>) -> Self {
         self.long_indices = indices;
         self.short_indices = Vec::new();
+        self
+    }
+
+    /// 原始字节索引（高级口——**LE 字节 + 显式格式**；越界校验调用方
+    /// 自担——大 mesh / py 侧 bytes 直喂通路，免 Vec<u16/u32> 中转；
+    /// 优先级高于 short/long 列表口）
+    pub fn with_index_bytes(mut self, data: Vec<u8>, format: wgpu::IndexFormat) -> Self {
+        self.index_bytes = Some((data, format));
+        self.short_indices = Vec::new();
+        self.long_indices = Vec::new();
         self
     }
 
@@ -118,7 +131,17 @@ impl MeshBuilder {
         let mut index_format = None;
         let mut index_count = 0;
 
-        if !self.short_indices.is_empty() {
+        if let Some((data, fmt)) = self.index_bytes {
+            // 原始字节口（高级口——越界校验调用方自担；count = 字节数 /
+            // 格式宽度）
+            index_count = (data.len() as u64 / if fmt == wgpu::IndexFormat::Uint16 { 2 } else { 4 }) as u32;
+            index_buffer = Some(Arc::new(self.device.create_buffer_init(&BufferInitDescriptor {
+                label: label_index,
+                contents: &data,
+                usage: self.index_buffer_usages,
+            })));
+            index_format = Some(fmt);
+        } else if !self.short_indices.is_empty() {
             let max_index = *self.short_indices.iter().max().unwrap();
 
             assert!(

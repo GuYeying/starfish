@@ -59,7 +59,9 @@ impl Mesh {
     }
 
 
-    pub(crate) fn index_buffer(&self)-> Option<&Arc<Buffer>>{
+    /// 索引缓冲句柄（None = 无索引——写 index 前须 builder with_indices
+    /// 建立；pub 化 2026-11-16——绑定层 copy_mesh_indices 容量守卫）
+    pub fn index_buffer(&self)-> Option<&Arc<Buffer>>{
         self.index_buffer.as_ref()
     }
 
