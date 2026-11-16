@@ -20,7 +20,7 @@ use starfish_we::{Window, WindowError, WindowFlags};
 use crate::render::Screen;
 
 thread_local! {
-    static WINDOW: RefCell<Option<Window>> = const { RefCell::new(None) };
+    static WINDOW: RefCell<Option<&'static Window>> = const { RefCell::new(None) };
     /// 窗口注册表（2026-11-16 多窗批次——创建序 Vec：泵序 = 创建序；
     /// "main" = 主窗。单窗形态表长 1——遍历零分支）
     static WINDOWS: RefCell<Vec<(String, &'static Window)>> = RefCell::new(Vec::new());
@@ -219,12 +219,15 @@ pub async fn set_mode_ex(size: (u32, u32), flags: u32) -> Result<(), RenderConte
     if explicit_backends {
         gpu_settings = gpu_settings.with_backends(backends);
     }
-    let window = Window::builder()
-        .title("starfish pygame")
-        .size(size)
-        .flags(wf)
-        .build()
-        .expect("display.set_mode: 建窗失败");
+    let window: &'static Window = Box::leak(Box::new(
+        Window::builder()
+            .title("starfish pygame")
+            .size(size)
+            .flags(wf)
+            .build()
+            .expect("display.set_mode: 建窗失败"),
+    ));
+    register_window("main", window);
     // Web：建窗初始位图 = 模板布局 × dpr（sync_canvas_size 定），Screen
     // 装配读 measure=位图——**set_size 必须先于装配**（逻辑→CSS/dpr +
     // 位图），否则装配 1540×1155 / set_size 800×600 之间的首帧渲染
@@ -249,7 +252,6 @@ pub async fn set_mode_ex(size: (u32, u32), flags: u32) -> Result<(), RenderConte
     if transparent {
         screen.set_transparent_bg();
     }
-    WINDOW.with(|w| *w.borrow_mut() = Some(window));
     register_screen("main", screen);
     Ok(())
 }
@@ -366,7 +368,7 @@ pub fn create_window_id(
     // Box::leak 注册（&'static Window——Vec realloc 移元素也不失效；
     // 窗口生命周期 = 进程尾，同 Screen 静态活定约）
     let leaked: &'static Window = Box::leak(Box::new(window));
-    WINDOWS.with(|w| w.borrow_mut().push((id, leaked)));
+    register_window(id, leaked);
     Ok(())
 }
 
@@ -454,7 +456,7 @@ pub fn flip_id(id: &str) {
 /// ① 窗口创建（we 层纯窗口——**不含 GPU**；flags = 窗口语义位
 /// RESIZABLE/FULLSCREEN/NOFRAME/HIDDEN/ALWAYS_ON_TOP/TRANSPARENT——
 /// 渲染后端位已迁 GpuSettings.backends，此口不再消费）
-pub async fn create_window(size: (u32, u32), flags: u32) -> Result<Window, WindowError> {
+pub async fn create_window(size: (u32, u32), flags: u32) -> Result<&'static Window, WindowError> {
     let mut wf = WindowFlags::from_bits(0);
     for (bit, flag) in [
         (RESIZABLE, WindowFlags::RESIZABLE),
@@ -473,7 +475,21 @@ pub async fn create_window(size: (u32, u32), flags: u32) -> Result<Window, Windo
         .size(size)
         .flags(wf)
         .build()?;
-    Ok(window)
+    // 注册即泵入表（⚠️ 事件泵遍历 WINDOWS——漏注册 = 消息队列不排水
+    // → Windows 判定窗口无响应，2026-11-16 实测回归）
+    let leaked: &'static Window = Box::leak(Box::new(window));
+    register_window("main", leaked);
+    Ok(leaked)
+}
+
+/// 窗口注册（WINDOWS 表——"main" 主窗同步 WINDOW 主槽别名；Box::leak
+/// 静态活——Vec realloc 移元素免疫）
+fn register_window(id: impl Into<String>, w: &'static Window) {
+    let id = id.into();
+    WINDOWS.with(|v| v.borrow_mut().push((id.clone(), w)));
+    if id == "main" {
+        WINDOW.with(|slot| *slot.borrow_mut() = Some(w));
+    }
 }
 
 /// ② GPU 驱动创建（wgpu 装配 + Screen 静态注册——surface/gpu settings
@@ -564,10 +580,9 @@ pub fn set_mode_blocking(
         let window = create_window(size, flags)
             .await
             .map_err(|e| format!("建窗失败: {e}"))?;
-        create_screen(&window, surface_settings, gpu_settings, transparent)
+        create_screen(window, surface_settings, gpu_settings, transparent)
             .await
             .map_err(|e| format!("GPU 装配失败: {e}"))?;
-        WINDOW.with(|w| *w.borrow_mut() = Some(window));
         Ok(())
     })
 }
@@ -827,9 +842,8 @@ pub(crate) fn handle_resized(width: u32, height: u32) {
 /// egui 适配层需要 `&Window`）；display 未就绪 → `None`。
 /// ⚠️ 借用即 `WINDOW` 槽 `borrow_mut`——嵌套调用会 panic（排队到外层
 /// 闭包外再做）。
-pub fn with_window<R>(f: impl FnOnce(&mut Window) -> R) -> Option<R> {
-    WINDOW.with(|w| {
-        let mut w = w.borrow_mut();
-        w.as_mut().map(f)
-    })
+pub fn with_window<R>(f: impl FnOnce(&Window) -> R) -> Option<R> {
+    // &Window 契约（we Window 方法面全 &self——set_display_mode/
+    // set_size/…；&'static 槽免 owned 拷贝）
+    WINDOW.with(|w| w.borrow().as_ref().map(|win| f(win)))
 }
