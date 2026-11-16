@@ -21,11 +21,14 @@ use crate::render::Screen;
 
 thread_local! {
     static WINDOW: RefCell<Option<Window>> = const { RefCell::new(None) };
+    /// 窗口注册表（2026-11-16 多窗批次——创建序 Vec：泵序 = 创建序；
+    /// "main" = 主窗。单窗形态表长 1——遍历零分支）
+    static WINDOWS: RefCell<Vec<(String, &'static Window)>> = RefCell::new(Vec::new());
     /// 主窗 Screen 快捷槽（老代码别名——注册表见表 SCREENS）
     static SCREEN: RefCell<Option<&'static Screen>> = const { RefCell::new(None) };
     /// Screen 注册表（2026-11-16 拆口批次——"main" = 主窗；多窗口
     /// 批次按 id 扩展。get_screen() = "main" 快捷——全绑定面零翻新）
-    static SCREENS: RefCell<std::collections::HashMap<&'static str, &'static Screen>>
+    static SCREENS: RefCell<std::collections::HashMap<String, &'static Screen>>
         = RefCell::new(std::collections::HashMap::new());
     /// 脚本级 GPU/表面配置暂存（2026-11-16 py 面透传——set_mode 脚本
     /// 侧经 pygame.display kwargs 注入，GPU 装配（set_mode_ex）时 take
@@ -251,11 +254,14 @@ pub async fn set_mode_ex(size: (u32, u32), flags: u32) -> Result<(), RenderConte
     Ok(())
 }
 
-/// Screen 注册（SCREENS 表——"main" = 主窗；Box::leak 静态活。SCREEN
-/// 快捷槽同步写——老代码别名）
-fn register_screen(id: &'static str, screen: &'static Screen) {
-    SCREENS.with(|m| m.borrow_mut().insert(id, screen));
-    SCREEN.with(|s| *s.borrow_mut() = Some(screen));
+/// Screen 注册（SCREENS 表——Box::leak 静态活。SCREEN 快捷槽同步写
+/// ——主窗别名）
+fn register_screen(id: impl Into<String>, screen: &'static Screen) {
+    let id = id.into();
+    SCREENS.with(|m| m.borrow_mut().insert(id.clone(), screen));
+    if id == "main" {
+        SCREEN.with(|s| *s.borrow_mut() = Some(screen));
+    }
 }
 
 /// 绘制终点（未 set_mode = 契约违例 panic，ADR-9）
@@ -263,11 +269,181 @@ pub fn get_screen() -> &'static Screen {
     screen(None).expect("display.get_screen: 须先 display.set_mode(...)")
 }
 
-/// screen(id) —— Screen 查询（None = 主窗 "main"；多窗口批次按 id
-/// 实义化——当前恒单窗，id 忽略）
+/// 指定窗口绘制终点（多窗批次——契约 panic 同 get_screen）
+pub fn get_screen_id(id: &str) -> &'static Screen {
+    screen(Some(id))
+        .unwrap_or_else(|| panic!("display.get_screen_id: 窗口 {id:?} 未装配"))
+}
+
+/// screen(id) —— Screen 查询（None = 主窗 "main"；多窗批次 id 实义化
+/// ——per-id 装配后按 id 查表）
 pub fn screen(id: Option<&str>) -> Option<&'static Screen> {
-    let _ = id;
-    SCREENS.with(|m| m.borrow().get("main").copied())
+    let key = id.unwrap_or("main").to_string();
+    SCREENS.with(|m| m.borrow().get(&key).copied())
+}
+
+/// 平台常量（编译期注入优先——`PYGST_PLATFORM` env（cross 构建显式
+/// 传）；缺省 cfg 推导：windows/macos/linux/android/web/harmonyos/ios）
+pub fn platform() -> &'static str {
+    if let Some(p) = std::option_env!("PYGST_PLATFORM") {
+        return p;
+    }
+    if cfg!(target_arch = "wasm32") {
+        "web"
+    } else if cfg!(target_os = "android") {
+        "android"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "linux") {
+        "linux"
+    } else if cfg!(target_os = "harmonyos") {
+        "harmonyos"
+    } else if cfg!(target_os = "ios") {
+        "ios"
+    } else {
+        "windows"
+    }
+}
+
+/// 多窗口能力（运行时判定——与 starfish-we multi-window 白名单同步：
+/// feature 开启 + 平台 windows。we 层白名单扩展后同步此表）
+pub fn multi_window_supported() -> bool {
+    cfg!(feature = "multi-window") && platform() == "windows"
+}
+
+/// 窗口注册表遍历（泵纪律承载——每帧每窗轮询；创建序）
+pub fn with_windows<R>(f: impl FnOnce(&[(String, &'static Window)]) -> R) -> Option<R> {
+    WINDOWS.with(|w| {
+        let w = w.borrow();
+        if w.is_empty() {
+            None
+        } else {
+            Some(f(&w)) // 修正下一段
+        }
+    })
+}
+
+/// ①' 多窗口窗口创建（multi-window 批次——id 注册表形态；平台不支持
+/// = 运行时 Err（绑定层映射 Python 异常——用户定约：编译期 feature +
+/// 平台常量注入，运行时检测抛错））
+pub fn create_window_id(
+    id: impl Into<String>,
+    size: (u32, u32),
+    flags: u32,
+) -> Result<(), String> {
+    if !multi_window_supported() {
+        return Err(format!(
+            "多窗口不支持当前构建/平台（feature multi-window 未启用或平台 {} \
+             不在白名单——当前白名单：windows）",
+            platform()
+        ));
+    }
+    let id = id.into();
+    if id == "main" {
+        return Err("窗口 id \"main\" 为主窗保留——set_mode 的隐式 id，勿显式占用".into());
+    }
+    let exists = WINDOWS.with(|w| w.borrow().iter().any(|(k, _)| *k == id));
+    if exists {
+        return Err(format!("窗口 id {id:?} 已存在"));
+    }
+    let mut wf = WindowFlags::from_bits(0);
+    for (bit, flag) in [
+        (RESIZABLE, WindowFlags::RESIZABLE),
+        (NOFRAME, WindowFlags::NOFRAME),
+        (HIDDEN, WindowFlags::HIDDEN),
+        (ALWAYS_ON_TOP, WindowFlags::ALWAYS_ON_TOP),
+    ] {
+        if flags & bit != 0 {
+            wf = wf.union(flag);
+        }
+    }
+    let window = Window::builder()
+        .title(&id)
+        .size(size)
+        .flags(wf)
+        .build()
+        .map_err(|e| format!("建窗失败: {e}"))?;
+    // Box::leak 注册（&'static Window——Vec realloc 移元素也不失效；
+    // 窗口生命周期 = 进程尾，同 Screen 静态活定约）
+    let leaked: &'static Window = Box::leak(Box::new(window));
+    WINDOWS.with(|w| w.borrow_mut().push((id, leaked)));
+    Ok(())
+}
+
+/// ②' 多窗口 GPU 装配（per-id——窗须先 create_window_id；settings
+/// kwargs/env 同主窗通路）
+pub fn create_screen_for(
+    id: &str,
+    surface_settings: Option<SurfaceSettings>,
+    gpu_settings: Option<GpuSettings>,
+) -> Result<(), String> {
+    starfish_std::app::block_on(async move {
+        // &'static Window（Box::leak 注册）——Copy 出闭包免借用逃逸
+        let window = WINDOWS
+            .with(|w| w.borrow().iter().find(|(k, _)| k == id).map(|(_, w)| *w))
+            .ok_or_else(|| format!("窗口 {id:?} 不存在（先 create_window_id）"))?;
+        let transparent = false;
+        create_screen_at(window, surface_settings, gpu_settings, transparent, id.to_string())
+            .await
+            .map(|_| ())
+            .map_err(|e| format!("GPU 装配失败: {e}"))
+    })
+}
+
+/// per-id Screen 装配内核（id → SCREENS 表；主窗通路复用）
+async fn create_screen_at(
+    window: &Window,
+    surface_settings: Option<SurfaceSettings>,
+    gpu_settings: Option<GpuSettings>,
+    transparent: bool,
+    id: String,
+) -> Result<&'static Screen, RenderContextError> {
+    let mut surface_settings = surface_settings.unwrap_or_default();
+    if let Ok(v) = std::env::var("PYGST_FRAME_LATENCY") {
+        if let Ok(lat) = v.parse::<u32>() {
+            if (1..=8).contains(&lat) {
+                surface_settings.desired_maximum_frame_latency = lat;
+            }
+        }
+    }
+    let mut gpu_settings = gpu_settings.unwrap_or_else(|| {
+        let mut g = GpuSettings::default();
+        if let Ok(h) = std::env::var("PYGST_MEMORY_HINTS") {
+            if h == "memory_usage" {
+                g.memory_hints = wgpu::MemoryHints::MemoryUsage;
+            }
+        }
+        if let Ok(p) = std::env::var("PYGST_POWER_PREF") {
+            if p == "low_power" || p == "low_energy" {
+                g.power_preference = wgpu::PowerPreference::LowPower;
+            } else if p == "none" {
+                g.power_preference = wgpu::PowerPreference::None;
+            }
+        }
+        g
+    });
+    #[cfg(target_os = "windows")]
+    if transparent {
+        surface_settings =
+            surface_settings.with_alpha_mode(wgpu::CompositeAlphaMode::PreMultiplied);
+        gpu_settings =
+            gpu_settings.with_dx12_swapchain_kind(wgpu::Dx12SwapchainKind::DxgiFromVisual);
+    }
+    let screen = Box::leak(Box::new(
+        Screen::new_with(window, surface_settings, gpu_settings).await?,
+    ));
+    if transparent {
+        screen.set_transparent_bg();
+    }
+    register_screen(id, screen);
+    Ok(screen)
+}
+
+/// 多窗窗口帧提交（per-id——flip 的多窗词汇）。
+pub fn flip_id(id: &str) {
+    screen(Some(id))
+        .unwrap_or_else(|| panic!("display.flip_id: 窗口 {id:?} 未装配"))
+        .present();
 }
 
 // ── 拆步装配口（2026-11-16 批次——GPU 装配挪脚本期；三口独立可组

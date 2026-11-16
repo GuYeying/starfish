@@ -144,7 +144,7 @@ pub fn pump() -> bool {
     // 慢排水哨兵（>50ms 才打点——逐帧噪声抑制；启动期归因用）
     let t_drain = starfish_std::debug::Stopwatch::now();
     let mut n_events = 0usize;
-    while let Some(ev) = poll_engine() {
+    for ev in poll_engine_all() {
         n_events += 1;
         if matches!(ev, Event::Quit) {
             quit = true;
@@ -213,22 +213,30 @@ pub fn post_text_dialog_done(text: String) {
 }
 
 /// 引擎窗口事件直取（仅 pump 使用——翻译 + 状态表喂入的唯一入口）。
-/// 原始事件顺带镜像给全部监听器——须在 `with_window` 借用内喂（消费者
-/// 拿到的 `&Window` 与泵同源）；translate 在借用内调用与既有行为一致
-/// （其内部只触 Screen/状态表，不回借 WINDOW）。
-fn poll_engine() -> Option<Event> {
-    crate::display::with_window(|w| {
-        let raw = w.poll_event();
-        if let Some(ref ev) = raw {
-            RAW_LISTENERS.with(|l| {
-                for (_, f) in l.borrow_mut().iter_mut() {
-                    f(w, ev);
+/// 原始事件顺带镜像给全部监听器——须在窗口借用内喂（消费者拿到的
+/// `&Window` 与泵同源）；translate 在借用内调用与既有行为一致（其内
+/// 部只触 Screen/状态表，不回借 WINDOW）。
+/// **多窗合流**（2026-11-16 批次）：遍历窗口注册表逐窗排空（we 泵纪
+/// 律 = 每帧每窗——漏 poll 的事件积压不丢失但该窗 UI 停摆）；单窗形
+/// 态表长 1 零分支。
+fn poll_engine_all() -> Vec<Event> {
+    crate::display::with_windows(|windows| {
+        let mut out = Vec::new();
+        for (_id, w) in windows {
+            while let Some(raw) = w.poll_event() {
+                RAW_LISTENERS.with(|l| {
+                    for (_, f) in l.borrow_mut().iter_mut() {
+                        f(w, &raw);
+                    }
+                });
+                if let Some(ev) = translate(raw) {
+                    out.push(ev);
                 }
-            });
+            }
         }
-        raw.and_then(translate)
+        out
     })
-    .flatten()
+    .unwrap_or_default()
 }
 
 /// 引擎事件 → pygame 事件（返回 None = 不上报给用户）。
