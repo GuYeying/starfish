@@ -16,12 +16,17 @@ use std::cell::RefCell;
 
 use starfish_render::render_entry::RenderContextError;
 use starfish_render::settings::{GpuSettings, SurfaceSettings};
-use starfish_we::Window;
+use starfish_we::{Window, WindowError, WindowFlags};
 use crate::render::Screen;
 
 thread_local! {
     static WINDOW: RefCell<Option<Window>> = const { RefCell::new(None) };
+    /// 主窗 Screen 快捷槽（老代码别名——注册表见表 SCREENS）
     static SCREEN: RefCell<Option<&'static Screen>> = const { RefCell::new(None) };
+    /// Screen 注册表（2026-11-16 拆口批次——"main" = 主窗；多窗口
+    /// 批次按 id 扩展。get_screen() = "main" 快捷——全绑定面零翻新）
+    static SCREENS: RefCell<std::collections::HashMap<&'static str, &'static Screen>>
+        = RefCell::new(std::collections::HashMap::new());
     /// 脚本级 GPU/表面配置暂存（2026-11-16 py 面透传——set_mode 脚本
     /// 侧经 pygame.display kwargs 注入，GPU 装配（set_mode_ex）时 take
     /// 消费；None = 平台默认。仅首次装配生效——交换链重开不吃新配置）
@@ -242,16 +247,152 @@ pub async fn set_mode_ex(size: (u32, u32), flags: u32) -> Result<(), RenderConte
         screen.set_transparent_bg();
     }
     WINDOW.with(|w| *w.borrow_mut() = Some(window));
-    SCREEN.with(|s| *s.borrow_mut() = Some(screen));
+    register_screen("main", screen);
     Ok(())
+}
+
+/// Screen 注册（SCREENS 表——"main" = 主窗；Box::leak 静态活。SCREEN
+/// 快捷槽同步写——老代码别名）
+fn register_screen(id: &'static str, screen: &'static Screen) {
+    SCREENS.with(|m| m.borrow_mut().insert(id, screen));
+    SCREEN.with(|s| *s.borrow_mut() = Some(screen));
 }
 
 /// 绘制终点（未 set_mode = 契约违例 panic，ADR-9）
 pub fn get_screen() -> &'static Screen {
-    SCREEN.with(|s| {
-        *s.borrow()
-            .as_ref()
-            .expect("display.get_screen: 须先 display.set_mode(...)")
+    screen(None).expect("display.get_screen: 须先 display.set_mode(...)")
+}
+
+/// screen(id) —— Screen 查询（None = 主窗 "main"；多窗口批次按 id
+/// 实义化——当前恒单窗，id 忽略）
+pub fn screen(id: Option<&str>) -> Option<&'static Screen> {
+    let _ = id;
+    SCREENS.with(|m| m.borrow().get("main").copied())
+}
+
+// ── 拆步装配口（2026-11-16 批次——GPU 装配挪脚本期；三口独立可组
+// 合：create_window → create_screen → screen(None)。set_mode_ex =
+// 串联糖的 async 形态（保留——web 宿主先行装配形态专用）；native
+// 脚本期走 set_mode_blocking（settings kwargs/env 在此真消费）──
+
+/// ① 窗口创建（we 层纯窗口——**不含 GPU**；flags = 窗口语义位
+/// RESIZABLE/FULLSCREEN/NOFRAME/HIDDEN/ALWAYS_ON_TOP/TRANSPARENT——
+/// 渲染后端位已迁 GpuSettings.backends，此口不再消费）
+pub async fn create_window(size: (u32, u32), flags: u32) -> Result<Window, WindowError> {
+    let mut wf = WindowFlags::from_bits(0);
+    for (bit, flag) in [
+        (RESIZABLE, WindowFlags::RESIZABLE),
+        (FULLSCREEN, WindowFlags::FULLSCREEN),
+        (NOFRAME, WindowFlags::NOFRAME),
+        (HIDDEN, WindowFlags::HIDDEN),
+        (ALWAYS_ON_TOP, WindowFlags::ALWAYS_ON_TOP),
+        (TRANSPARENT, WindowFlags::TRANSPARENT),
+    ] {
+        if flags & bit != 0 {
+            wf = wf.union(flag);
+        }
+    }
+    let window = Window::builder()
+        .title("starfish pygame")
+        .size(size)
+        .flags(wf)
+        .build()?;
+    Ok(window)
+}
+
+/// ② GPU 驱动创建（wgpu 装配 + Screen 静态注册——surface/gpu settings
+/// 显式（None = 平台默认 + env 三口）；transparent = 窗口创建期的透明
+/// 语义（DX12 DirectComposition + PreMultiplied 推导归此口））
+pub async fn create_screen(
+    window: &Window,
+    surface_settings: Option<SurfaceSettings>,
+    gpu_settings: Option<GpuSettings>,
+    transparent: bool,
+) -> Result<&'static Screen, RenderContextError> {
+    let mut surface_settings = surface_settings.unwrap_or_default();
+    if let Ok(v) = std::env::var("PYGST_FRAME_LATENCY") {
+        match v.parse::<u32>() {
+            Ok(lat) if (1..=8).contains(&lat) => {
+                surface_settings.desired_maximum_frame_latency = lat;
+            }
+            _ => starfish_debug::log_debug!(
+                "[display] PYGST_FRAME_LATENCY 非法（须 1..=8 数字，忽略）"
+            ),
+        }
+    }
+    let mut gpu_settings = gpu_settings.unwrap_or_else(|| {
+        // env 三口兜底（运存优化主通道——装配前可读，宿主/脚本两形态
+        // 通用：PYGST_MEMORY_HINTS / PYGST_POWER_PREF）
+        let mut g = GpuSettings::default();
+        if let Ok(h) = std::env::var("PYGST_MEMORY_HINTS") {
+            match h.as_str() {
+                "memory_usage" => g.memory_hints = wgpu::MemoryHints::MemoryUsage,
+                "performance" => g.memory_hints = wgpu::MemoryHints::Performance,
+                other => starfish_debug::log_debug!(format!(
+                    "[display] PYGST_MEMORY_HINTS 未识别：{other:?}（忽略）"
+                )),
+            }
+        }
+        if let Ok(p) = std::env::var("PYGST_POWER_PREF") {
+            match p.as_str() {
+                "low_power" | "low_energy" => {
+                    g.power_preference = wgpu::PowerPreference::LowPower;
+                }
+                "high_performance" => {
+                    g.power_preference = wgpu::PowerPreference::HighPerformance;
+                }
+                "none" => g.power_preference = wgpu::PowerPreference::None,
+                other => starfish_debug::log_debug!(format!(
+                    "[display] PYGST_POWER_PREF 未识别：{other:?}（忽略）"
+                )),
+            }
+        }
+        g
+    });
+    // 透明创建位推导（DX12 DirectComposition + PreMultiplied——创建期
+    // 透明语义归窗口，呈现系统推导归此口）
+    #[cfg(target_os = "windows")]
+    if transparent {
+        surface_settings =
+            surface_settings.with_alpha_mode(wgpu::CompositeAlphaMode::PreMultiplied);
+        gpu_settings =
+            gpu_settings.with_dx12_swapchain_kind(wgpu::Dx12SwapchainKind::DxgiFromVisual);
+    }
+    // Web：建窗初始位图 = 模板布局 × dpr——**set_size 先于装配**（装
+    // 配尺寸/set_size 尺寸错位 → BeginRenderPass 校验失败）
+    #[cfg(target_arch = "wasm32")]
+    window.set_size(window.size());
+    let screen = Box::leak(Box::new(
+        Screen::new_with(window, surface_settings, gpu_settings).await?,
+    ));
+    if transparent {
+        screen.set_transparent_bg();
+    }
+    register_screen("main", screen);
+    Ok(screen)
+}
+
+/// 串联糖（**native 同步**——block_on 三口；wasm 无阻塞模型不提供
+/// ——web 宿主先行装配走 set_mode_ex）。settings kwargs/env 在此真
+/// 消费（脚本期装配定约）。⚠️ 进程一次契约（重复调用 panic——同
+/// set_mode_ex）。
+#[cfg(not(target_arch = "wasm32"))]
+pub fn set_mode_blocking(
+    size: (u32, u32),
+    flags: u32,
+    surface_settings: Option<SurfaceSettings>,
+    gpu_settings: Option<GpuSettings>,
+) -> Result<(), String> {
+    starfish_std::app::block_on(async move {
+        let transparent = flags & TRANSPARENT != 0;
+        let window = create_window(size, flags)
+            .await
+            .map_err(|e| format!("建窗失败: {e}"))?;
+        create_screen(&window, surface_settings, gpu_settings, transparent)
+            .await
+            .map_err(|e| format!("GPU 装配失败: {e}"))?;
+        WINDOW.with(|w| *w.borrow_mut() = Some(window));
+        Ok(())
     })
 }
 
