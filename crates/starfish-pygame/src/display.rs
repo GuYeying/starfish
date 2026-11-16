@@ -15,12 +15,27 @@
 use std::cell::RefCell;
 
 use starfish_render::render_entry::RenderContextError;
+use starfish_render::settings::{GpuSettings, SurfaceSettings};
 use starfish_we::Window;
 use crate::render::Screen;
 
 thread_local! {
     static WINDOW: RefCell<Option<Window>> = const { RefCell::new(None) };
     static SCREEN: RefCell<Option<&'static Screen>> = const { RefCell::new(None) };
+    /// 脚本级 GPU/表面配置暂存（2026-11-16 py 面透传——set_mode 脚本
+    /// 侧经 pygame.display kwargs 注入，GPU 装配（set_mode_ex）时 take
+    /// 消费；None = 平台默认。仅首次装配生效——交换链重开不吃新配置）
+    static PENDING_SETTINGS: RefCell<Option<(Option<SurfaceSettings>, Option<GpuSettings>)>>
+        = const { RefCell::new(None) };
+}
+
+/// 注入脚本级 GPU/表面配置（pygame.display.set_mode kwargs 的承载口
+/// ——下一次 GPU 装配消费后清空；重复注入 = 后到覆盖）
+pub fn set_pending_settings(
+    surface: Option<SurfaceSettings>,
+    gpu: Option<GpuSettings>,
+) {
+    PENDING_SETTINGS.with(|s| *s.borrow_mut() = Some((surface, gpu)));
 }
 
 
@@ -106,8 +121,42 @@ pub async fn set_mode_ex(size: (u32, u32), flags: u32) -> Result<(), RenderConte
             wf = wf.union(flag);
         }
     }
-    // GPU 设置（后端声明位与透明呈现都在此承载）
-    let mut gpu_settings = GpuSettings::default();
+    // GPU 设置（后端声明位与透明呈现都在此承载；脚本级配置暂存优先
+    // ——pygame.display.set_mode kwargs 注入，take 消费后清空。
+    // ⚠️ 宿主先行装配形态（dev/runtime 壳在脚本执行前 set_mode_ex）
+    // 下脚本暂存永不存在——env 兜底：PYGST_MEMORY_HINTS /
+    // PYGST_POWER_PREF / PYGST_FRAME_LATENCY（装配前可读，运存优化
+    // 主通道）
+    let (pending_surface, pending_gpu) = PENDING_SETTINGS
+        .with(|s| s.borrow_mut().take())
+        .unwrap_or((None, None));
+    let mut gpu_settings = pending_gpu.unwrap_or_else(|| {
+        let mut g = GpuSettings::default();
+        if let Ok(h) = std::env::var("PYGST_MEMORY_HINTS") {
+            match h.as_str() {
+                "memory_usage" => g.memory_hints = wgpu::MemoryHints::MemoryUsage,
+                "performance" => g.memory_hints = wgpu::MemoryHints::Performance,
+                other => starfish_debug::log_debug!(format!(
+                    "[display] PYGST_MEMORY_HINTS 未识别：{other:?}（忽略）"
+                )),
+            }
+        }
+        if let Ok(p) = std::env::var("PYGST_POWER_PREF") {
+            match p.as_str() {
+                "low_power" | "low_energy" => {
+                    g.power_preference = wgpu::PowerPreference::LowPower;
+                }
+                "high_performance" => {
+                    g.power_preference = wgpu::PowerPreference::HighPerformance;
+                }
+                "none" => g.power_preference = wgpu::PowerPreference::None,
+                other => starfish_debug::log_debug!(format!(
+                    "[display] PYGST_POWER_PREF 未识别：{other:?}（忽略）"
+                )),
+            }
+        }
+        g
+    });
     // 后端声明位 → GpuSettings.backends（wgpu 位集内自动挑选；
     // 未声明 = Backends::all 平台最优。GL 位（OPENGL/OPENGLES）同语义，
     // 不可用隐式退化——旧"显式报错"垫底表已废）
@@ -140,7 +189,17 @@ pub async fn set_mode_ex(size: (u32, u32), flags: u32) -> Result<(), RenderConte
     // 透明时强制 DX12 后端（平台矩阵：Windows ✓；Linux/macOS 窗口后端
     // 未实现——透明随平台后端落地；Android/Web 排除）
     let transparent = flags & TRANSPARENT != 0;
-    let mut surface_settings = SurfaceSettings::default();
+    let mut surface_settings = pending_surface.unwrap_or_default();
+    if let Ok(v) = std::env::var("PYGST_FRAME_LATENCY") {
+        match v.parse::<u32>() {
+            Ok(lat) if (1..=8).contains(&lat) => {
+                surface_settings.desired_maximum_frame_latency = lat;
+            }
+            _ => starfish_debug::log_debug!(
+                "[display] PYGST_FRAME_LATENCY 非法（须 1..=8 数字，忽略）"
+            ),
+        }
+    }
     #[cfg(target_os = "windows")]
     if transparent {
         surface_settings = surface_settings.with_alpha_mode(wgpu::CompositeAlphaMode::PreMultiplied);
