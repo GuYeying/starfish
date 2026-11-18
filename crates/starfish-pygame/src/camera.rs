@@ -162,26 +162,9 @@ impl Camera {
 
     // ── 坐标映射（唯一出口——target.rs 不再散布 Fit::fit）────────
 
-    /// 逻辑点 → 物理点（正向：触摸注入 / 绘制映射）
-    pub fn logical_to_physical(&self, x: f64, y: f64) -> (f64, f64) {
-        self.fit.logical_to_physical(x, y)
-    }
-
     /// 物理点 → 逻辑点（逆向：事件坐标进脚本坐标系）
     pub fn physical_to_logical(&self, x: f64, y: f64) -> (f64, f64) {
         self.fit.physical_to_logical(x, y)
-    }
-
-    /// 逻辑裁剪矩形 → 物理像素裁剪（scissor 用）
-    pub fn map_scissor(&self, rect: [i32; 4]) -> [i32; 4] {
-        let (pw, ph) = (
-            self.physical_size.0.max(1) as i32,
-            self.physical_size.1.max(1) as i32,
-        );
-        let (mx, my) = self.fit.logical_to_physical(rect[0] as f64, rect[1] as f64);
-        let w = (rect[2] as f32 * self.fit.scale as f32) as i32;
-        let h = (rect[3] as f32 * self.fit.scale as f32) as i32;
-        [mx as i32, my as i32, w.min(pw), h.min(ph)]
     }
 
     // ── 尺寸/属性访问器 ──────────────────────────────────────────

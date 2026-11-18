@@ -126,11 +126,6 @@ impl RenderResourceAccess {
         self.queue.write_buffer(buffer, offset, data);
     }
 
-    /// 诊断：内部队列句柄指针（对照宿主 Gpu.queue 同一性）
-    pub fn queue_ptr(&self) -> usize {
-        Arc::as_ptr(&self.queue) as usize
-    }
-
 
     // =========================
     // 纹理数据更新

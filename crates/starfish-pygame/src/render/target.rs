@@ -462,6 +462,21 @@ impl Screen {
         self.camera.borrow().fit_ndc()
     }
 
+    /// 居中 letterbox 参数（**唯一计算点**——两段式第二段的数学基底；
+    /// present_fit / 输入映射 / 裁剪三处共用，2026-11-18 收敛）
+    /// 返回：(scale 等比, ox/oy 物理黑边偏移, sx/sy 画布→表面 NDC 缩放)
+    fn canvas_letterbox(&self) -> (f64, f64, f64, f32, f32) {
+        let (lw, lh) = (self.logical.get().0.max(1) as f64, self.logical.get().1.max(1) as f64);
+        let (pw, ph) = {
+            let (pw, ph) = self.surface.borrow().size();
+            (pw.max(1) as f64, ph.max(1) as f64)
+        };
+        let scale = (pw / lw).min(ph / lh);
+        let ox = (pw - lw * scale) * 0.5;
+        let oy = (ph - lh * scale) * 0.5;
+        (scale, ox, oy, (lw * scale / pw) as f32, (lh * scale / ph) as f32)
+    }
+
     /// 呈现拟合矩阵（**画布→表面 letterbox**，NDC 域仿射——两段式
     /// 定约的第二段，2026-11-18 统一）：**独立于 installed 相机**按
     /// （交换链面, 逻辑画布）现算——相机（含显式游戏相机）恒为
@@ -472,15 +487,7 @@ impl Screen {
     /// 误当呈现拟合复用 = 双重施压（Android 拉伸/cube_rotate 类
     /// 裸相机组合落空两宗实测根因）
     pub fn present_fit(&self) -> Mat4 {
-        let (lw, lh) = (self.logical.get().0.max(1) as f32, self.logical.get().1.max(1) as f32);
-        let (pw, ph) = {
-            let (pw, ph) = self.surface.borrow().size();
-            (pw.max(1) as f32, ph.max(1) as f32)
-        };
-        let scale = (pw / lw).min(ph / lh);
-        let sx = lw * scale / pw;
-        let sy = lh * scale / ph;
-        // 居中 letterbox（Fit::fit 恒居中）：NDC 平移恒零，纯缩放
+        let (_scale, _ox, _oy, sx, sy) = self.canvas_letterbox();
         Mat4::from_scale(Vec3::new(sx, sy, 1.0))
     }
 
@@ -498,13 +505,7 @@ impl Screen {
     /// 不再委托相机——2026-11-18 统一））
     pub(crate) fn map_point_to_logical(&self, x: f64, y: f64) -> (f64, f64) {
         let (lw, lh) = (self.logical.get().0.max(1) as f64, self.logical.get().1.max(1) as f64);
-        let (pw, ph) = {
-            let (pw, ph) = self.surface.borrow().size();
-            (pw.max(1) as f64, ph.max(1) as f64)
-        };
-        let scale = (pw / lw).min(ph / lh);
-        let ox = (pw - lw * scale) * 0.5;
-        let oy = (ph - lh * scale) * 0.5;
+        let (scale, ox, oy, _, _) = self.canvas_letterbox();
         (
             ((x - ox) / scale).clamp(0.0, lw),
             ((y - oy) / scale).clamp(0.0, lh),
@@ -693,23 +694,20 @@ impl Screen {
         // 待查。代价 = 越界绘制可见（会涂到黑边上），游戏侧自行剔除或
         // 覆盖；需要时从 git 历史（970faa9）恢复本段实现。
         let scissor = self.clip.get().and_then(|r| {
-            // 两段式：画布矩形 → 物理像素（独立 letterbox 数学，不再
-            // 委托相机——相机基底恒画布域）
+            // 两段式：画布矩形 → 物理像素（共享 canvas_letterbox 数学）
             let (lw, lh) = (self.logical.get().0.max(1) as f64, self.logical.get().1.max(1) as f64);
-            let (pw, ph) = {
-                let (pw, ph) = self.surface.borrow().size();
-                (pw.max(1) as f64, ph.max(1) as f64)
-            };
-            let scale = (pw / lw).min(ph / lh);
-            let ox = (pw - lw * scale) * 0.5;
-            let oy = (ph - lh * scale) * 0.5;
+            let (scale, ox, oy, _, _) = self.canvas_letterbox();
             let mapped: [i32; 4] = [
                 (r[0] as f64 * scale + ox) as i32,
                 (r[1] as f64 * scale + oy) as i32,
                 (r[2] as f64 * scale) as i32,
                 (r[3] as f64 * scale) as i32,
             ];
-            super::batch::scissor_from(mapped, (pw as u32, ph as u32))
+            let (pw, ph) = {
+                let (pw, ph) = self.surface.borrow().size();
+                (pw.max(1) as u32, ph.max(1) as u32)
+            };
+            super::batch::scissor_from(mapped, (pw, ph))
         });
         let cmd = {
             let batch = self.batch.borrow();
