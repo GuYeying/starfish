@@ -21,7 +21,7 @@
 use std::cell::{Cell, RefCell};
 use std::sync::Arc;
 
-use glam::Mat4;
+use glam::{Mat4, Vec3};
 
 use starfish_render::bind_group::bind_group::BindGroup;
 use starfish_render::render_entry::{RenderContextError, RenderEntry};
@@ -421,9 +421,7 @@ impl Screen {
     /// 拉伸满屏、letterbox 失效。物理面 = 设备事实（引擎所有权）——
     /// set 时即以当前物理表面重算 letterbox，投影/视图/逻辑面不动。
     pub fn set_game_camera(&self, camera: crate::camera::Camera) {
-        let mut cam = camera;
-        cam.resize(self.surface.borrow().size());
-        *self.camera.borrow_mut() = cam;
+        *self.camera.borrow_mut() = camera;
         self.camera_explicit.set(true);
     }
 
@@ -433,22 +431,22 @@ impl Screen {
     }
 
     /// 重建 Camera（logical/physical/camera_kind 变化时调用——
-    /// letterbox 数学的唯一来源）。显式相机（`set_game_camera` 已设）
-    /// **不按 wish 重建**——仅随新物理视口重算 letterbox（投影/视图/
-    /// 逻辑域保持脚本意志；显式优先于自动）
+    /// letterbox 数学的唯一来源）。**两段式定约（2026-11-18 统一）**：
+    /// 相机恒为 **world→画布** 基底（构造入参 = 逻辑画布；显式相机
+    /// 保持脚本构造基底不被改写——resize 对账曾把米制相机直接拟合到
+    /// native 面 = write_camera_mvp 双参（画布域裸相机）组合落空拉伸
+    /// 的根因，cube_rotate Android 实证）；画布→表面 letterbox 由
+    /// [`Self::present_fit`] 独立承担，消费侧统一组合两段
     fn refresh_camera(&self) {
         if self.camera_explicit.get() {
-            let physical = self.surface.borrow().size();
-            self.camera.borrow_mut().resize(physical);
-            return;
+            return; // 脚本构造基底全权（画布域）
         }
         let (lw, lh) = self.logical.get();
-        let (pw, ph) = self.surface.borrow().size();
         let wish = super::current_wish();
         let cam = if wish.dim3d {
-            GameCamera::perspective(wish.fov_deg, (lw, lh), (pw, ph), wish.near, wish.far)
+            GameCamera::perspective(wish.fov_deg, (lw, lh), (lw, lh), wish.near, wish.far)
         } else {
-            GameCamera::ortho((lw, lh), (pw, ph))
+            GameCamera::ortho((lw, lh), (lw, lh))
         };
         *self.camera.borrow_mut() = cam;
     }
@@ -464,23 +462,26 @@ impl Screen {
         self.camera.borrow().fit_ndc()
     }
 
-    /// 呈现拟合矩阵（NDC 域 clip 空间仿射——**自管相机的 letterbox
-    /// 对齐口**）：自绘管线经 write_buffer 直写的相机矩阵对引擎是不
-    /// 透明字节，无法被拦截组合——脚本自行左乘本矩阵即与主绘制同一
-    /// 映射：`final = present_fit() × 自管相机.mvp()`。逻辑==物理
-    /// （桌面/全屏/离屏）恒等。
-    ///
-    /// **显式游戏相机 = 恒等**（2026-11-18 标定实证）：set_game_camera
-    /// 后屏上相机 = 脚本相机，其 mvp() 已内聚完整 world→输出 拟合
-    ///（含手机 native 面对账）——引擎再左乘 fit_ndc = 相机自带世界
-    /// 拟合被二次施压（桌面 = 全场景压扁；手机 = 真 letterbox 被顶掉
-    /// → 拉伸满屏）。恒等 = 用户矩阵全权，引擎零追加；Auto 相机时
-    /// 仍返回 letterbox（自定义矩阵不含呈现拟合，照旧左乘）
+    /// 呈现拟合矩阵（**画布→表面 letterbox**，NDC 域仿射——两段式
+    /// 定约的第二段，2026-11-18 统一）：**独立于 installed 相机**按
+    /// （交换链面, 逻辑画布）现算——相机（含显式游戏相机）恒为
+    /// world→画布 基底，本矩阵把画布收进表面子矩形。逻辑==物理
+    /// （桌面/全屏/离屏）恒等；消费侧统一 `present_fit × 相机.mvp()`
+    /// 两段组合（write_camera_mvp 双参 / pack 段级 / debug / egui）。
+    /// 旧版取自 installed 相机 fit_ndc：显式米制相机的世界拟合被
+    /// 误当呈现拟合复用 = 双重施压（Android 拉伸/cube_rotate 类
+    /// 裸相机组合落空两宗实测根因）
     pub fn present_fit(&self) -> Mat4 {
-        if self.camera_explicit.get() {
-            return Mat4::IDENTITY;
-        }
-        self.fit_ndc()
+        let (lw, lh) = (self.logical.get().0.max(1) as f32, self.logical.get().1.max(1) as f32);
+        let (pw, ph) = {
+            let (pw, ph) = self.surface.borrow().size();
+            (pw.max(1) as f32, ph.max(1) as f32)
+        };
+        let scale = (pw / lw).min(ph / lh);
+        let sx = lw * scale / pw;
+        let sy = lh * scale / ph;
+        // 居中 letterbox（Fit::fit 恒居中）：NDC 平移恒零，纯缩放
+        Mat4::from_scale(Vec3::new(sx, sy, 1.0))
     }
 
     /// 呈现映射 MVP（逻辑 → 物理最终变换；egui 叠加合成消费——与 pack
@@ -493,9 +494,21 @@ impl Screen {
     }
 
     /// 物理点 → 逻辑点（输入坐标映射；呈现映射的逆变换——等比缩放 +
-    /// 居中）
+    /// 居中。**两段式定约下独立现算**（相机基底恒画布域，fit 恒等，
+    /// 不再委托相机——2026-11-18 统一））
     pub(crate) fn map_point_to_logical(&self, x: f64, y: f64) -> (f64, f64) {
-        self.camera.borrow().physical_to_logical(x, y)
+        let (lw, lh) = (self.logical.get().0.max(1) as f64, self.logical.get().1.max(1) as f64);
+        let (pw, ph) = {
+            let (pw, ph) = self.surface.borrow().size();
+            (pw.max(1) as f64, ph.max(1) as f64)
+        };
+        let scale = (pw / lw).min(ph / lh);
+        let ox = (pw - lw * scale) * 0.5;
+        let oy = (ph - lh * scale) * 0.5;
+        (
+            ((x - ox) / scale).clamp(0.0, lw),
+            ((y - oy) / scale).clamp(0.0, lh),
+        )
     }
 
     /// 窗口尺寸变化（交换链 + 深度重建；相机无需跟随——全局相机
@@ -680,9 +693,23 @@ impl Screen {
         // 待查。代价 = 越界绘制可见（会涂到黑边上），游戏侧自行剔除或
         // 覆盖；需要时从 git 历史（970faa9）恢复本段实现。
         let scissor = self.clip.get().and_then(|r| {
-            let (pw, ph) = self.surface.borrow().size();
-            let mapped = self.camera.borrow().map_scissor(r);
-            super::batch::scissor_from(mapped, (pw, ph))
+            // 两段式：画布矩形 → 物理像素（独立 letterbox 数学，不再
+            // 委托相机——相机基底恒画布域）
+            let (lw, lh) = (self.logical.get().0.max(1) as f64, self.logical.get().1.max(1) as f64);
+            let (pw, ph) = {
+                let (pw, ph) = self.surface.borrow().size();
+                (pw.max(1) as f64, ph.max(1) as f64)
+            };
+            let scale = (pw / lw).min(ph / lh);
+            let ox = (pw - lw * scale) * 0.5;
+            let oy = (ph - lh * scale) * 0.5;
+            let mapped: [i32; 4] = [
+                (r[0] as f64 * scale + ox) as i32,
+                (r[1] as f64 * scale + oy) as i32,
+                (r[2] as f64 * scale) as i32,
+                (r[3] as f64 * scale) as i32,
+            ];
+            super::batch::scissor_from(mapped, (pw as u32, ph as u32))
         });
         let cmd = {
             let batch = self.batch.borrow();
@@ -697,16 +724,17 @@ impl Screen {
                     fit.scale, fit.offset_x, fit.offset_y, scissor,
                 ));
             }
-            // 呈现映射（等比 letterbox，NDC 域统一组合）——**委托 Camera**
-            // （1.3 letterbox 收敛：fit_ndc + Auto MVP 组合全在 Camera 内部）
+            // 呈现映射（两段式统一 2026-11-18）：ctx.camera.mvp = 屏上
+            // 相机（world→画布 基底，mvp 不含呈现拟合）；fit = 独立
+            // present_fit（画布→表面 letterbox）——Some/None 段统一左乘
             let cam = self.camera.borrow();
-            let fit_ndc = cam.fit_ndc();
+            let fit_ndc = self.present_fit();
             let mut camera = self.gpu.camera.borrow_mut();
-            camera.mvp = cam.mvp(); // Camera::mvp = fit_ndc × projection × view
+            camera.mvp = cam.mvp();
             let mut ctx = EncodeCtx {
                 gpu: &self.gpu,
                 camera: &camera,
-                fit: fit_ndc, // 段级 set_camera 相机同一 letterbox（draw_stream 左乘）
+                fit: fit_ndc,
                 colors: vec![ColorAttachment {
                     view,
                     load: wgpu::LoadOp::Load, // 清屏由目标层负责（begin_frame）

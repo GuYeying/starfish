@@ -668,7 +668,9 @@ fn draw_stream(pass: &mut RenderPass, stream: &Stream, lines: bool, ctx: &Encode
         // Android 窗口化下与 Auto 同一 letterbox；桌面/离屏 fit 恒等）
         let mvp = match &seg.mvp {
             Some(custom) => ctx.fit * *custom,
-            None => ctx.camera.mvp,
+            // 两段式统一（2026-11-18）：None 段相机 = 屏上相机
+            // （world→画布基底）——与 Some 段同款左乘呈现拟合
+            None => ctx.fit * ctx.camera.mvp,
         };
         let seg_bind = seg_cam_bind(ctx.gpu, &mvp);
         pass.set_bind_group(0, &seg_bind);
