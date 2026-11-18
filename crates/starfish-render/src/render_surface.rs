@@ -472,6 +472,40 @@ impl RenderSurface{
                 Err(_) => Vec::new(),
             };
             buffer.unmap();
+            // 全帧 BMP 取证（诊断：环境变量 STARFISH_FB_BMP = 输出路径——
+            // 逐帧覆写，进程退出时 = 最后呈现帧的像素真值；标定案例
+            // 两链对齐裁决专用，绕过截图/DWM 全部环节）
+            if let Ok(path) = std::env::var("STARFISH_FB_BMP") {
+                if !data.is_empty() {
+                    // BMP 24bit：行底对齐 4 字节（RGB 3 通道自对齐——w=800
+                    // 时行宽 2400 已 4 对齐；通用起见仍按 padding 写）
+                    let row = (w * 3).div_ceil(4) * 4;
+                    let mut bmp = Vec::with_capacity(54 + row as usize * h as usize);
+                    let file = (54 + row * h) as u32;
+                    bmp.extend_from_slice(b"BM");
+                    bmp.extend_from_slice(&file.to_le_bytes());
+                    bmp.extend_from_slice(&[0u8; 4]);
+                    bmp.extend_from_slice(&54u32.to_le_bytes());
+                    bmp.extend_from_slice(&40u32.to_le_bytes());
+                    bmp.extend_from_slice(&(w as i32).to_le_bytes());
+                    bmp.extend_from_slice(&(h as i32).to_le_bytes());
+                    bmp.extend_from_slice(&1u16.to_le_bytes());
+                    bmp.extend_from_slice(&24u16.to_le_bytes());
+                    bmp.extend_from_slice(&[0u8; 24]);
+                    for y in (0..h).rev() {
+                        for x in 0..w {
+                            let off = y as usize * bpr as usize + x as usize * 4;
+                            bmp.push(data[off + 2]);
+                            bmp.push(data[off + 1]);
+                            bmp.push(data[off]);
+                        }
+                        for _ in (w * 3)..row {
+                            bmp.push(0);
+                        }
+                    }
+                    let _ = std::fs::write(&path, &bmp);
+                }
+            }
             let mut out = Vec::new();
             for gy in 0..5u32 {
                 for gx in 0..7u32 {

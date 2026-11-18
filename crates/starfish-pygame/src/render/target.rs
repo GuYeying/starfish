@@ -397,6 +397,14 @@ impl Screen {
     /// 值，物理表面恒原生窗口——呈现按等比缩放居中映射）。新画布 =
     /// 新会话：显式相机旗标清除，恢复 Auto（脚本重设走 set_game_camera）
     pub fn set_logical_size(&self, width: u32, height: u32) {
+        if self.logical.get() == (width, height) {
+            // 同尺寸事件（启动序列/DPI 抖动常发）：不丢显式相机——仅随
+            // 当前物理面重算 letterbox（显式 = cam.resize；Auto = 重建，
+            // 同参数恒等幂等）。2026-11-18 标定实证：无此守卫时空事件
+            // 即杀 set_game_camera → fit 漂移 → 一次性写入的链掉队
+            self.refresh_camera();
+            return;
+        }
         self.logical.set((width, height));
         self.camera_explicit.set(false);
         self.refresh_camera();
@@ -460,8 +468,18 @@ impl Screen {
     /// 对齐口**）：自绘管线经 write_buffer 直写的相机矩阵对引擎是不
     /// 透明字节，无法被拦截组合——脚本自行左乘本矩阵即与主绘制同一
     /// 映射：`final = present_fit() × 自管相机.mvp()`。逻辑==物理
-    /// （桌面/全屏/离屏）恒等
+    /// （桌面/全屏/离屏）恒等。
+    ///
+    /// **显式游戏相机 = 恒等**（2026-11-18 标定实证）：set_game_camera
+    /// 后屏上相机 = 脚本相机，其 mvp() 已内聚完整 world→输出 拟合
+    ///（含手机 native 面对账）——引擎再左乘 fit_ndc = 相机自带世界
+    /// 拟合被二次施压（桌面 = 全场景压扁；手机 = 真 letterbox 被顶掉
+    /// → 拉伸满屏）。恒等 = 用户矩阵全权，引擎零追加；Auto 相机时
+    /// 仍返回 letterbox（自定义矩阵不含呈现拟合，照旧左乘）
     pub fn present_fit(&self) -> Mat4 {
+        if self.camera_explicit.get() {
+            return Mat4::IDENTITY;
+        }
         self.fit_ndc()
     }
 
@@ -842,6 +860,55 @@ impl OverlayCtx {
             .begin_render_pass(label, &color_refs, depth_att, None, None, None);
         draw(&mut pass);
         pass.end();
+    }
+
+    /// GPU 缓冲回读（**诊断口**——draw 时点真值取证；写链二分专用）。
+    /// 独立 encoder 即刻提交：staged `write_buffer` 在本 submit 前生效，
+    /// 回读内容 = 随后 overlay submit 将见到的缓冲状态。
+    pub fn readback_buffer(&mut self, src: &wgpu::Buffer, size: u64) -> Vec<u8> {
+        let rb = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("overlay_readback"),
+            size,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut enc = self.device.create_command_encoder(&Default::default());
+        enc.copy_buffer_to_buffer(src, 0, &rb, 0, size);
+        self.queue.submit([enc.finish()]);
+        let (tx, rx) = std::sync::mpsc::channel();
+        rb.slice(..).map_async(wgpu::MapMode::Read, move |res| {
+            let _ = tx.send(res);
+        });
+        self.device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        });
+        let _ = rx.recv();
+        let data = rb
+            .get_mapped_range(..)
+            .map(|v| v.to_vec())
+            .unwrap_or_default();
+        rb.unmap();
+        data
+    }
+
+    /// 一次性内联相机 bind group（**每帧新建**：64B mat4 数据在 buffer
+    /// 创建时即定（create_buffer_init），绕开共享缓冲的任何写入时序
+    /// 问题——blit_fullscreen_with 同款一次性资源模式）。布局与
+    /// starfish-gfx 管线契约一致（group0/b0 uniform 64B）。
+    pub fn inline_camera_bind(&self, mvp: [[f32; 4]; 4]) -> starfish_render::bind_group::bind_group::BindGroup {
+        use wgpu::util::DeviceExt;
+        let cam_buf = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("overlay_inline_camera_mvp"),
+                contents: bytemuck::bytes_of(&mvp),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
+        self.access
+            .bind_group_builder()
+            .uniform_raw(0, std::sync::Arc::new(cam_buf), 64)
+            .build(Some("overlay_inline_camera_bind"))
     }
 
     /// 开一条计算通道执行 `draw`（compute pipeline 直绘——Dispatch 语义；
