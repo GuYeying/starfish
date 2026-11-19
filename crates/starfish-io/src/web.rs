@@ -132,6 +132,20 @@ pub(super) async fn write(path: &str, data: Vec<u8>) -> Result<(), IoError> {
         .map(|_| ())
 }
 
+# size/read_range：Web 端退化不支持（fetch 全量承载——wasm 无分块
+# 流式需求，2026-11-19 定约）
+pub(super) async fn size(path: &str) -> Result<u64, IoError> {
+    Err(IoError::Backend("web 端不提供 size（fetch 全量承载）".into()))
+}
+
+pub(super) async fn read_range(
+    _path: &str,
+    _offset: u64,
+    _len: u64,
+) -> Result<Vec<u8>, IoError> {
+    Err(IoError::Backend("web 端不提供区间读（fetch 全量承载）".into()))
+}
+
 pub(super) async fn exists(path: &str) -> Result<bool, IoError> {
     let url = resolve_url(path);
     let window = web_sys::window().ok_or(IoError::Backend("无 window".into()))?;

@@ -130,6 +130,47 @@ pub fn read_sync(path: &str) -> Result<Vec<u8>, IoError> {
 pub fn read_sync(path: &str) -> Result<Vec<u8>, IoError> {
     imp::read_sync(path)
 }
+#[cfg(target_arch = "wasm32")]
+pub fn read_sync(path: &str) -> Result<Vec<u8>, IoError> {
+    imp::read_sync(path)
+}
+
+/// 文件大小（字节）——native fs metadata（分块流式加载的分块判定）；
+/// **Web 端不支持**（fetch 全量承载——wasm 无分块流式需求，2026-11-19
+/// 定约：native 分块循环每帧一块交出控制权，wasm 直接退化全量）
+pub async fn size(path: &str) -> Result<u64, IoError> {
+    imp::size(path).await
+}
+
+/// 区间同步读（offset 起读 len 字节）——**native 分块流式加载的帧级口**
+///（每帧一块不超帧预算）；Web 端不支持（退化 Err）。明文读——加密资产
+///（SFXE1）不支持分块，走全量解密面
+#[cfg(not(target_arch = "wasm32"))]
+pub fn read_sync_range(path: &str, offset: u64, len: u64) -> Result<Vec<u8>, IoError> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(resolve(path))
+        .map_err(|e| IoError::Backend(format!("open {path}: {e}")))?;
+    f.seek(SeekFrom::Start(offset))
+        .map_err(|e| IoError::Backend(format!("seek {path}: {e}")))?;
+    let mut buf = vec![0u8; len.max(1) as usize];
+    let mut total = 0usize;
+    while total < buf.len() {
+        let n = f
+            .read(&mut buf[total..])
+            .map_err(|e| IoError::Backend(format!("read {path}: {e}")))?;
+        if n == 0 {
+            break;
+        }
+        total += n;
+    }
+    buf.truncate(total);
+    Ok(buf)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn read_sync_range(_path: &str, _offset: u64, _len: u64) -> Result<Vec<u8>, IoError> {
+    Err(IoError::Backend("web 端不提供区间读（fetch 全量承载）".into()))
+}
 
 /// 写入全部字节（覆盖）
 ///

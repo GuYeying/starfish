@@ -37,6 +37,37 @@ pub(super) async fn exists(path: &str) -> Result<bool, IoError> {
     Ok(resolve(path).exists())
 }
 
+/// 文件大小（字节）——native fs metadata（分块流式加载的分块判定用）
+pub(super) async fn size(path: &str) -> Result<u64, IoError> {
+    std::fs::metadata(resolve(path))
+        .map(|m| m.len())
+        .map_err(|e| IoError::Backend(format!("size {path}: {e}")))
+}
+
+/// 区间同步读（offset 起读 len 字节——**分块流式加载的帧级口**：
+/// 每帧一块的量级不超帧预算；明文读——加密资产不支持分块，走全量
+/// 解密面）
+pub(super) async fn read_range(path: &str, offset: u64, len: u64) -> Result<Vec<u8>, IoError> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(resolve(path))
+        .map_err(|e| IoError::Backend(format!("open {path}: {e}")))?;
+    f.seek(SeekFrom::Start(offset))
+        .map_err(|e| IoError::Backend(format!("seek {path}: {e}")))?;
+    let mut buf = vec![0u8; len.max(1) as usize];
+    let mut total = 0usize;
+    while total < buf.len() {
+        let n = f
+            .read(&mut buf[total..])
+            .map_err(|e| IoError::Backend(format!("read {path}: {e}")))?;
+        if n == 0 {
+            break; // EOF（请求区间超文件尾——截断返回实读）
+        }
+        total += n;
+    }
+    buf.truncate(total);
+    Ok(buf)
+}
+
 /// 测试专用：清除基准目录（恢复 CWD 相对）
 #[cfg(test)]
 pub(super) fn clear_base_dir() {
