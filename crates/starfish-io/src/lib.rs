@@ -168,6 +168,19 @@ pub fn read_sync_range(_path: &str, _offset: u64, _len: u64) -> Result<Vec<u8>, 
     Err(IoError::Backend("web 端不提供区间读（fetch 全量承载）".into()))
 }
 
+/// exists 同步版——native fs；**wasm 同步 XHR HEAD**（与 read_sync 同款
+/// 退化定约：wasm 同步口承载而非 Err，2026-11-19）
+#[cfg(target_arch = "wasm32")]
+pub fn exists_sync(path: &str) -> Result<bool, IoError> {
+    imp::exists_sync(path)
+}
+
+/// exists 同步版（native）
+#[cfg(not(target_arch = "wasm32"))]
+pub fn exists_sync(path: &str) -> Result<bool, IoError> {
+    imp::exists_sync(path)
+}
+
 /// 写入全部字节（覆盖）
 ///
 /// - 原生：std::fs::write（覆盖写，自动创建文件）

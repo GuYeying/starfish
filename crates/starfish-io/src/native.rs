@@ -37,6 +37,11 @@ pub(super) async fn exists(path: &str) -> Result<bool, IoError> {
     Ok(resolve(path).exists())
 }
 
+/// exists 同步版（native fs metadata）
+pub(super) fn exists_sync(path: &str) -> Result<bool, IoError> {
+    Ok(resolve(path).exists())
+}
+
 /// 文件大小（字节）——native fs metadata（分块流式加载的分块判定用）
 pub(super) async fn size(path: &str) -> Result<u64, IoError> {
     std::fs::metadata(resolve(path))

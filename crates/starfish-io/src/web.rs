@@ -146,6 +146,19 @@ pub(super) async fn read_range(
     Err(IoError::Backend("web 端不提供区间读（fetch 全量承载）".into()))
 }
 
+/// exists 的同步 XHR 版（**wasm 同步退化面**——与 read_sync 同款：
+/// async=false 阻塞 JS 主线程直到 HEAD 返回，2026-11-19 用户定约：
+/// wasm 同步口退化全量承载而非 Err）
+pub(super) fn exists_sync(path: &str) -> Result<bool, IoError> {
+    let url = resolve_url(path);
+    let xhr = web_sys::XmlHttpRequest::new()
+        .map_err(|e| IoError::Backend(format!("XHR 构造失败: {e:?}")))?;
+    xhr.open("HEAD", &url)
+        .map_err(|e| IoError::Backend(format!("XHR open 失败: {e:?}")))?;
+    xhr.send().map_err(|e| IoError::Backend(format!("XHR send 失败: {e:?}")))?;
+    Ok((xhr.status().unwrap_or(0) as u16 / 100) == 2)
+}
+
 pub(super) async fn exists(path: &str) -> Result<bool, IoError> {
     let url = resolve_url(path);
     let window = web_sys::window().ok_or(IoError::Backend("无 window".into()))?;
