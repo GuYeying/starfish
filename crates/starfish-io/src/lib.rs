@@ -130,10 +130,6 @@ pub fn read_sync(path: &str) -> Result<Vec<u8>, IoError> {
 pub fn read_sync(path: &str) -> Result<Vec<u8>, IoError> {
     imp::read_sync(path)
 }
-#[cfg(target_arch = "wasm32")]
-pub fn read_sync(path: &str) -> Result<Vec<u8>, IoError> {
-    imp::read_sync(path)
-}
 
 /// 文件大小（字节）——native fs metadata（分块流式加载的分块判定）；
 /// **Web 端不支持**（fetch 全量承载——wasm 无分块流式需求，2026-11-19
