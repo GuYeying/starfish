@@ -132,8 +132,8 @@ pub(super) async fn write(path: &str, data: Vec<u8>) -> Result<(), IoError> {
         .map(|_| ())
 }
 
-# size/read_range：Web 端退化不支持（fetch 全量承载——wasm 无分块
-# 流式需求，2026-11-19 定约）
+// size/read_range：Web 端退化不支持（fetch 全量承载——wasm 无分块
+// 流式需求，2026-11-19 定约）
 pub(super) async fn size(path: &str) -> Result<u64, IoError> {
     Err(IoError::Backend("web 端不提供 size（fetch 全量承载）".into()))
 }
