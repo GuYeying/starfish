@@ -237,10 +237,14 @@ pub trait DrawTarget {
         self.with_batch(|b| b.set_mvp(Some(camera.mvp())));
     }
 
-    /// 清除会话相机覆盖（clear_camera——2026-11-12 改名：Auto 兜底
-    /// 已退役，本口语义 = 摘除段级显式相机，回到按目标尺寸正交）
+    /// 目标逻辑尺寸（像素基线段 / clear_camera 的正交来源）
+    fn logical_size(&self) -> (u32, u32);
+
+    /// 清除会话相机覆盖（clear_camera——v3.1：**显式回落像素基线段**，
+    /// 画布正交按目标逻辑尺寸现算；未声明域 = None 段 = NDC 直通）
     fn clear_camera(&self) {
-        self.with_batch(|b| b.reset_mvp());
+        let pixel = super::pixel_ortho_mvp(self.logical_size());
+        self.with_batch(|b| b.set_mvp(Some(pixel)));
     }
 
     /// 会话变换（后续绘制顶点 CPU 烘此矩阵）
@@ -676,14 +680,15 @@ impl Screen {
                     scale, ox, oy, scissor,
                 ));
             }
-            // 呈现映射（域分层 v3 2026-11-19）：None 段 = **恒像素域**——
-            // pygame 图元 API 内置换算（present_fit × 像素正交，不读
-            // 相机）；Some 段 = 会话快照 MVP（gfxdraw.set_camera）。显式
-            // Screen 相机不再进 pack（恒像素 API 与相机彻底解耦——HUD
-            // 域冲突修正定约）
+            // 呈现映射（域分层 v3.1 2026-11-19，**全显式收敛**）：None 段
+            // = fit × Screen.camera.mvp()（图元 API 与显式相机同一公式，
+            // 无例外面）；无相机 → present_mvp 内部落 NDC 恒等（裸管
+            // 线原生域直通，错位显眼易诊断）；Some 段 = 会话快照 MVP
+            // （gfxdraw.set_camera）。像素域 = 显式 set_camera（像素正
+            // 交相机）声明，不再有内置像素隐式默认
             let fit_ndc = self.present_fit();
             let mut camera = self.gpu.camera.borrow_mut();
-            camera.mvp = super::pixel_ortho_mvp(self.logical.get());
+            camera.mvp = self.present_mvp();
             let mut ctx = EncodeCtx {
                 gpu: &self.gpu,
                 camera: &camera,
@@ -1070,20 +1075,25 @@ impl OverlayCtx {
 }
 
 impl DrawTarget for Screen {
+    fn logical_size(&self) -> (u32, u32) {
+        Screen::logical_size(self)
+    }
+
     fn fill(&self, color: impl Into<Color>) {
         // fill 覆盖对象是脚本画布（set_mode 语义尺寸）——batch 顶点在
         // pack 时统一过呈现映射（正交(物理) × 平移 × 缩放），故必须
         // 用逻辑尺寸：桌面逻辑==物理恒等不受影响；Android 窗口化
         // 逻辑<物理，用物理尺寸会把 letterbox 右/下黑边一起涂成
         // 画布色（真机实测：黑边只剩左侧半条）。
-        // **恒用 Auto 兜底段**（盖满语义不受会话相机影响——保存/恢复）
+        // **结构性像素段**（v3.1：盖满的是画布不是世界——显式置像素
+        // 正交，不随会话/全局相机漂移；保存/恢复）
         let (w, h) = self.logical_size();
+        let pixel = super::pixel_ortho_mvp((w, h));
         self.with_batch(|b| {
             let saved = b.mvp_snapshot();
-            b.reset_mvp();
+            b.set_mvp(Some(pixel));
             // 远平面填充 quad（2026-11-12：深度会话 fill 若 z=0 → 全屏
             // 写深度 0.0 = 3D 全拒黑屏；背景恒最远 z=1.0）
-            // 恒像素段（reset_mvp → None 段 = present_fit × 恒像素正交）
             b.push_fill_quad(-(w as f32) / 2.0, -(h as f32) / 2.0, w as f32, h as f32, rgba(color));
             b.set_mvp(saved);
         });
@@ -1254,10 +1264,12 @@ impl<'a> RenderPass<'a> {
         self.with_batch(|b| b.set_mvp(Some(camera.mvp())));
     }
 
-    /// 清除会话相机覆盖（按目标尺寸正交——resize 天然跟随；
-    /// 2026-11-12 改名 clear_camera：无隐式兜底语义，"clear" 才是实义）
+    /// 清除会话相机覆盖（**显式回落像素基线段**——v3.1：画布正交是
+    /// clear 的落点语义（pygame 画布基线），非隐式默认；未声明域 =
+    /// None 段 = NDC 直通。resize 天然跟随——像素基线按逻辑画布现算）
     pub fn clear_camera(&self) {
-        self.with_batch(|b| b.reset_mvp());
+        let pixel = super::pixel_ortho_mvp(self.logical_size());
+        self.with_batch(|b| b.set_mvp(Some(pixel)));
     }
 
     /// 会话变换（后续 push 的顶点 CPU 烘此矩阵——位置/旋转/缩放/3D
@@ -1353,6 +1365,14 @@ impl Drop for RenderPass<'_> {
 }
 
 impl DrawTarget for RenderPass<'_> {
+    fn logical_size(&self) -> (u32, u32) {
+        match &self.kind {
+            PassKind::Screen(s) => s.logical_size(),
+            PassKind::Surface(s) => s.size,
+            PassKind::Mrt { .. } => self.size(),
+        }
+    }
+
     fn fill(&self, color: impl Into<Color>) {
         match &self.kind {
             PassKind::Screen(s) => s.fill(color),
@@ -1753,6 +1773,10 @@ impl Surface {
     //     DrawTarget::blit(self, src, dest)
     // }
 
+    fn logical_size(&self) -> (u32, u32) {
+        self.size
+    }
+
     pub fn size32(&self) -> (f32, f32) {
         (self.size.0 as f32, self.size.1 as f32)
     }
@@ -1765,6 +1789,10 @@ impl Surface {
 }
 
 impl DrawTarget for Surface {
+    fn logical_size(&self) -> (u32, u32) {
+        self.size
+    }
+
     fn fill(&self, color: impl Into<Color>) {
         let (w, h) = self.size32();
         self.with_batch(|b| {
