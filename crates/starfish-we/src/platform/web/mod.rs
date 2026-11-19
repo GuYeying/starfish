@@ -310,7 +310,14 @@ impl WindowInner {
         } else if let Some(doc) =
             web_sys::window().and_then(|w| w.document())
         {
-            doc.exit_fullscreen();
+            // 仅在全屏态才调退出（2026-11-19 wasm 实测修）：Chrome 对
+            // 非 active document 的 exitFullscreen 抛同步 TypeError
+            //（穿透 = Uncaught in promise——非全屏 set_mode 的无条件
+            // set_fullscreen(false) 走到这里 = 视频启动链被打断）；
+            // 非全屏态 fullscreen_element 为空 = 本就无可退出
+            if doc.fullscreen_element().is_some() {
+                doc.exit_fullscreen();
+            }
         }
     }
 
