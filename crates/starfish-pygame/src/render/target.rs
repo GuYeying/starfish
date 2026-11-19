@@ -34,7 +34,6 @@ use starfish_we::Window;
 use crate::{Color, IRect};
 
 use super::batch::{encode, Batch, BatchTopology, EncodeCtx, GeometryKind, SpriteVertex};
-use super::camera::Camera;
 use crate::camera::Camera as GameCamera;
 use super::texture::Texture;
 use super::{init_gpu, gpu, Coord, Gpu};
@@ -57,7 +56,7 @@ fn rgba(c: impl Into<Color>) -> [f32; 4] {
 /// ——不是即时上屏。需要显式打包边界用 [`Screen::render`] /
 /// [`Surface::render`]（Rust 版 with 语法）。
 pub trait DrawTarget {
-    /// 填充整个目标（恒用 Auto 兜底相机——盖满语义不受会话相机影响）
+    /// 填充整个目标（恒像素段——盖满语义不受会话相机/显式相机影响）
     fn fill(&self, color: impl Into<Color>);
     /// 画一张离屏面（渲染统一 draw 面的 texture 通道）：源面 quad
     /// (0,0)-(sw,sh) 按 **会话 transform**（`set_transform` 的 cur_model）
@@ -232,8 +231,9 @@ pub trait DrawTarget {
         Mat4::IDENTITY
     }
 
-    /// 会话相机切换（渲染统一 draw 面——per-draw 相机段；默认转发 batch）
-    fn set_camera(&self, camera: &Camera) {
+    /// 会话相机切换（渲染统一 draw 面——per-draw 相机段；默认转发 batch。
+    /// 域分层 v3：收 GameCamera 唯一类型）
+    fn set_camera(&self, camera: &GameCamera) {
         self.with_batch(|b| b.set_mvp(Some(camera.mvp())));
     }
 
@@ -322,12 +322,9 @@ pub struct Screen {
     /// 逻辑画布尺寸（脚本 set_mode 语义尺寸——Android 嵌入下物理表面
     /// 恒原生窗口、逻辑独立；呈现 = 等比缩放居中）
     logical: Cell<(u32, u32)>,
-    /// 显式相机（阶段一 1.2：letterbox 内聚——MVP/坐标映射/裁剪全在此）
-    pub(crate) camera: RefCell<GameCamera>,
-    /// 显式相机旗标（`set_game_camera` 置位——显式优先于自动：
-    /// refresh_camera 不再按 wish 重建，仅随物理视口重算 letterbox；
-    /// set_mode 新画布 = 新会话，旗标清除恢复 Auto）
-    camera_explicit: Cell<bool>,
+    /// 显式相机（域分层 v3：**None = 无相机**——呈现走 NDC 恒等默认域；
+    /// set_camera 一次设置跨会话/resize/换画布缓存）
+    pub(crate) camera: RefCell<Option<GameCamera>>,
     /// 首包映射参数打点哨兵（呈现排障；一次性）
     pack_logged: Cell<bool>,
     /// 延迟叠加队列（[`Screen::defer_overlay`] 的排程；present 时统一执行）
@@ -373,8 +370,7 @@ impl Screen {
             samples,
             transparent_bg: Cell::new(false),
             logical: Cell::new(physical),
-            camera: RefCell::new(GameCamera::ortho(physical, physical)),
-            camera_explicit: Cell::new(false),
+            camera: RefCell::new(None),
             pack_logged: Cell::new(false),
             pending_overlays: RefCell::new(Vec::new()),
         })
@@ -394,72 +390,29 @@ impl Screen {
     }
 
     /// 逻辑画布尺寸登记（set_mode 语义尺寸；Android 嵌入下 = 脚本请求
-    /// 值，物理表面恒原生窗口——呈现按等比缩放居中映射）。新画布 =
-    /// 新会话：显式相机旗标清除，恢复 Auto（脚本重设走 set_game_camera）
+    /// 值，物理表面恒原生窗口——呈现按等比缩放居中映射）。
+    /// **域分层 v3**：相机与画布尺寸解耦——present_fit 独立现算（
+    /// canvas_letterbox 每帧现算），显式相机跨画布变化缓存不动。
     pub fn set_logical_size(&self, width: u32, height: u32) {
-        if self.logical.get() == (width, height) {
-            // 同尺寸事件（启动序列/DPI 抖动常发）：不丢显式相机——仅随
-            // 当前物理面重算 letterbox（显式 = cam.resize；Auto = 重建，
-            // 同参数恒等幂等）。2026-11-18 标定实证：无此守卫时空事件
-            // 即杀 set_game_camera → fit 漂移 → 一次性写入的链掉队
-            self.refresh_camera();
-            return;
-        }
         self.logical.set((width, height));
-        self.camera_explicit.set(false);
-        self.refresh_camera();
     }
 
-    /// **显式设置 Camera**（阶段一 1.2 定约——渲染会话必传，无兜底）。
-    /// 脚本通过 pygame.render.game_camera_ortho/perspective 构造后传入。
-    /// 设置后 refresh_camera 不再按 wish 重建（显式优先于自动）——
-    /// 仅随物理视口重算 letterbox（投影/视图/逻辑域保持脚本意志）。
-    ///
-    /// **物理面对账**（2026-11-11 手机实证）：构造入参的 pw/ph 只是
-    /// 设计意图（桌面恰好等于窗口尺寸）；跨设备（手机物理面 ≠ 桌面
-    /// 800×600）若不重对账，fit_ndc 用错误物理面算出恒等映射 → 内容
-    /// 拉伸满屏、letterbox 失效。物理面 = 设备事实（引擎所有权）——
-    /// set 时即以当前物理表面重算 letterbox，投影/视图/逻辑面不动。
+    /// **显式设置 Camera**（域分层 v3：唯一域切换口，一次设置缓存）。
+    /// 脚本通过 pygame.render.game_camera_ortho/perspective 构造后传入；
+    /// 跨会话/resize/换画布恒定（物理面 = 设备事实由 present_fit 独立
+    /// 现算承担，相机基底 = world→画布 脚本构造意图不被改写）。
     pub fn set_game_camera(&self, camera: crate::camera::Camera) {
-        *self.camera.borrow_mut() = camera;
-        self.camera_explicit.set(true);
+        *self.camera.borrow_mut() = Some(camera);
     }
 
-    /// 当前 Camera 的克隆（绑定层获取 MVP/坐标映射用）
-    pub fn get_camera(&self) -> crate::camera::Camera {
+    /// 当前显式相机（None = 未设置——绑定层回写跳过）
+    pub fn get_camera(&self) -> Option<crate::camera::Camera> {
         self.camera.borrow().clone()
-    }
-
-    /// 重建 Camera（logical/physical/camera_kind 变化时调用——
-    /// letterbox 数学的唯一来源）。**两段式定约（2026-11-18 统一）**：
-    /// 相机恒为 **world→画布** 基底（构造入参 = 逻辑画布；显式相机
-    /// 保持脚本构造基底不被改写——resize 对账曾把米制相机直接拟合到
-    /// native 面 = write_camera_mvp 双参（画布域裸相机）组合落空拉伸
-    /// 的根因，cube_rotate Android 实证）；画布→表面 letterbox 由
-    /// [`Self::present_fit`] 独立承担，消费侧统一组合两段
-    fn refresh_camera(&self) {
-        if self.camera_explicit.get() {
-            return; // 脚本构造基底全权（画布域）
-        }
-        let (lw, lh) = self.logical.get();
-        let wish = super::current_wish();
-        let cam = if wish.dim3d {
-            GameCamera::perspective(wish.fov_deg, (lw, lh), (lw, lh), wish.near, wish.far)
-        } else {
-            GameCamera::ortho((lw, lh), (lw, lh))
-        };
-        *self.camera.borrow_mut() = cam;
     }
 
     /// 逻辑画布尺寸（`get_size()` 的返回语义）
     pub fn logical_size(&self) -> (u32, u32) {
         self.logical.get()
-    }
-
-    /// 逻辑画布 → 物理呈现的 NDC 域拟合矩阵——**委托 Camera**（1.3
-    /// letterbox 收敛：唯一计算点在 Camera 内部）
-    fn fit_ndc(&self) -> Mat4 {
-        self.camera.borrow().fit_ndc()
     }
 
     /// 居中 letterbox 参数（**唯一计算点**——两段式第二段的数学基底；
@@ -491,13 +444,16 @@ impl Screen {
         Mat4::from_scale(Vec3::new(sx, sy, 1.0))
     }
 
-    /// 呈现映射 MVP（逻辑 → 物理最终变换；egui 叠加合成消费——与 pack
-    /// 主绘制同一映射，游戏内容与 UI 永远对齐）。Auto/Manual 相机统一
-    /// 定约：相机一律解算在逻辑画布域（set_mode 语义尺寸），呈现
-    /// letterbox 由 fit_ndc 统一施加——Manual 仍全权接管投影（视角/
-    /// 纵横比用户定，按逻辑画布构造），仅输出被收进画布子矩形
+    /// 呈现映射 MVP（write_camera_mvp 单参 / rapier debug follow 消费
+    /// ——与 pack 主绘制同一两段式）。**显式相机 = 其 mvp()（world→画布
+    /// 基底）；未显式 = NDC 恒等**（域分层 v3：无相机默认域——raw 顶点
+    /// 直通 NDC，本口组合 present_fit 后 = 纯 letterbox 单段）。
     pub fn present_mvp(&self) -> Mat4 {
-        self.camera.borrow().mvp()
+        self.camera
+            .borrow()
+            .as_ref()
+            .map(|c| c.mvp())
+            .unwrap_or_else(GameCamera::ndc_mvp)
     }
 
     /// 物理点 → 逻辑点（输入坐标映射；呈现映射的逆变换——等比缩放 +
@@ -512,11 +468,10 @@ impl Screen {
         )
     }
 
-    /// 窗口尺寸变化（交换链 + 深度重建；相机无需跟随——全局相机
-    /// Auto 状态 pack 时按目标尺寸现算，resize 天然生效）
+    /// 窗口尺寸变化（交换链 + 深度重建；相机不动——present_fit 独立
+    /// 现算按新表面适配，显式相机跨 resize 缓存，域分层 v3）
     pub fn resize(&self, width: u32, height: u32) {
         self.surface.borrow_mut().resize(width, height);
-        self.refresh_camera();
     }
 
     /// 帧边界安全的 resize 请求（批次二十三）：帧进行中（begun）时挂起，
@@ -711,24 +666,24 @@ impl Screen {
         });
         let cmd = {
             let batch = self.batch.borrow();
-            let cam = self.camera.borrow();
             if !self.pack_logged.get() {
                 self.pack_logged.set(true);
-                let fit = cam.fit();
-                let (lw, lh) = cam.logical_size();
-                let (pw, ph) = cam.physical_size();
+                let (scale, ox, oy, _, _) = self.canvas_letterbox();
+                let (pw, ph) = self.surface.borrow().size();
+                let (lw, lh) = self.logical.get();
                 starfish_debug::log_debug!(&format!(
                     "[present] 物理={pw}x{ph} 逻辑={lw}x{lh} scale={:.3} ox={:.1} oy={:.1} scissor={:?}",
-                    fit.scale, fit.offset_x, fit.offset_y, scissor,
+                    scale, ox, oy, scissor,
                 ));
             }
-            // 呈现映射（两段式统一 2026-11-18）：ctx.camera.mvp = 屏上
-            // 相机（world→画布 基底，mvp 不含呈现拟合）；fit = 独立
-            // present_fit（画布→表面 letterbox）——Some/None 段统一左乘
-            let cam = self.camera.borrow();
+            // 呈现映射（域分层 v3 2026-11-19）：None 段 = **恒像素域**——
+            // pygame 图元 API 内置换算（present_fit × 像素正交，不读
+            // 相机）；Some 段 = 会话快照 MVP（gfxdraw.set_camera）。显式
+            // Screen 相机不再进 pack（恒像素 API 与相机彻底解耦——HUD
+            // 域冲突修正定约）
             let fit_ndc = self.present_fit();
             let mut camera = self.gpu.camera.borrow_mut();
-            camera.mvp = cam.mvp();
+            camera.mvp = super::pixel_ortho_mvp(self.logical.get());
             let mut ctx = EncodeCtx {
                 gpu: &self.gpu,
                 camera: &camera,
@@ -1001,21 +956,21 @@ impl OverlayCtx {
         pass.end();
     }
 
-    /// 全屏纹理合成（**全局相机定约的客人侧落点**）：`src` 以整面 quad
-    /// 经引擎 sprite 管线画到本上下文目标——MVP = [`super::camera_mvp_for`]
-    ///（Auto = 按目标尺寸正交 → 像素级 1:1 全屏；`set_camera` 后全体
-    /// 跟随）。中间面方案（egui 等自带管线客人）的合成段。
+    /// 全屏纹理合成（**恒像素域单点的客人侧落点**）：`src` 以整面 quad
+    /// 经引擎 sprite 管线画到本上下文目标——MVP = [`super::pixel_ortho_mvp`]
+    ///（按目标尺寸正交 → 像素级 1:1 全屏，不读相机——域分层 v3）。中间面
+    /// 方案（egui 等自带管线客人）的合成段。
     /// **注意**：MVP 在**调用时点**现算——排程类客人（defer_overlay 到
     /// 收口才执行）若帧内多次 set_camera，收口时的全局相机可能已非排
     /// 程时的值；精确时序用 [`Self::blit_fullscreen_with`]（排程时快照）。
     pub fn blit_fullscreen(&mut self, src: &Surface) {
-        // Surface 逻辑==物理 → letterbox 恒等 → 纯正交 MVP
-        let mvp = GameCamera::ortho(self.size(), self.size()).mvp();
+        // Surface 逻辑==物理 → letterbox 恒等 → 恒像素正交（域分层 v3 单点）
+        let mvp = super::pixel_ortho_mvp(self.size());
         self.blit_fullscreen_with(src, mvp.to_cols_array_2d());
     }
 
     /// 全屏纹理合成（**快照 MVP 形态**）：矩阵由调用方在排程时点解算
-    /// 快照（如 `camera_mvp_for(目标尺寸)` 的产出），执行时点原样使用
+    /// 快照（如 `pixel_ortho_mvp(目标尺寸)` 的产出），执行时点原样使用
     ///——"draw 时相机"的精确语义（同帧 A 相机画主屏、B 相机画离屏
     /// 各得其所）。
     pub fn blit_fullscreen_with(&mut self, src: &Surface, mvp: [[f32; 4]; 4]) {
@@ -1128,6 +1083,7 @@ impl DrawTarget for Screen {
             b.reset_mvp();
             // 远平面填充 quad（2026-11-12：深度会话 fill 若 z=0 → 全屏
             // 写深度 0.0 = 3D 全拒黑屏；背景恒最远 z=1.0）
+            // 恒像素段（reset_mvp → None 段 = present_fit × 恒像素正交）
             b.push_fill_quad(-(w as f32) / 2.0, -(h as f32) / 2.0, w as f32, h as f32, rgba(color));
             b.set_mvp(saved);
         });
@@ -1255,8 +1211,8 @@ impl<'a> RenderPass<'a> {
                 return;
             }
             let mut camera = gpu.camera.borrow_mut();
-            // Surface 逻辑==物理 → letterbox 恒等 → MVP = 纯正交
-            camera.mvp = GameCamera::ortho(self.size(), self.size()).mvp();
+            // Surface 逻辑==物理 → letterbox 恒等 → 恒像素正交（单点）
+            camera.mvp = super::pixel_ortho_mvp(self.size());
             let mut ctx = EncodeCtx {
                 gpu,
                 camera: &camera,
@@ -1291,8 +1247,10 @@ impl<'a> RenderPass<'a> {
     // 旧全局 `set_default_camera`（CameraState::Manual）随此接口退役。
 
     /// 会话相机切换（后续 push 进新段；影响本会话剩余绘制——**仅本
-    /// 会话/本目标**，其他会话与其他目标不受影响）
-    pub fn set_camera(&self, camera: &Camera) {
+    /// 会话/本目标**，其他会话与其他目标不受影响）。**域分层 v3**：
+    /// 收 GameCamera（唯一相机类型——render::camera::Camera 已退役；
+    /// 构造 logical==physical 时 fit 恒等 = 纯投影，会话段数学不变）
+    pub fn set_camera(&self, camera: &GameCamera) {
         self.with_batch(|b| b.set_mvp(Some(camera.mvp())));
     }
 
@@ -1403,7 +1361,7 @@ impl DrawTarget for RenderPass<'_> {
                 // MRT：全部绘制走会话自己的 batch（一次 pass 写所有目标）——
                 // 不可绕道各 Surface 的 fill（各自 batch 会被后续 draw_surface
                 // 的自动 flush 二次提交，覆盖 MRT pass 输出，批次十五实测）。
-                // 恒默认段（盖满语义）
+                // 恒像素段（reset_mvp → None 段，盖满语义）
                 let (w, h) = (self.size().0 as f32, self.size().1 as f32);
                 self.with_batch(|b| {
                     let saved = b.mvp_snapshot();
@@ -1730,8 +1688,8 @@ impl Surface {
                 return;
             }
             let mut camera = self.gpu.camera.borrow_mut();
-            // Surface 逻辑==物理 → letterbox 恒等 → MVP = 纯正交
-            camera.mvp = GameCamera::ortho(self.size(), self.size()).mvp();
+            // Surface 逻辑==物理 → letterbox 恒等 → 恒像素正交（单点）
+            camera.mvp = super::pixel_ortho_mvp(self.size);
             let depth_att = if depth {
                 self.depth.as_ref().map(|(_, view)| DepthAttachment {
                     view: view.clone(),

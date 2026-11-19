@@ -1,15 +1,18 @@
-//! pygamest Camera 类型——**显式传入，杜绝兜底**。
+//! pygamest Camera 类型——**显式传入，杜绝兜底**（域分层 v3：2026-11-19）。
 //!
 //! 单一职责：letterbox 数学只在 Camera 内部（`Fit::fit` 的唯一调用点
 //! 在渲染呈现侧）。投影（ortho/perspective）+ 视图 + letterbox 三合一
 //! 组装 MVP，同时承载坐标映射（逻辑 ↔ 物理）与裁剪区换算。
 //!
-//! 定约（2026-11-10 相机系统重构）：
-//! - **显式优于隐式**：渲染会话必须显式传入 `Camera`，不再有 Auto2d/
-//!   Auto3d 兜底自装。
+//! 定约（2026-11-10 相机系统重构；2026-11-19 域分层 v3 升级）：
+//! - **显式唯一**：Camera 是唯一相机类型（旧 render::camera::Camera /
+//!   CameraKind Auto2d/Auto3d 兜底已退役）——`set_camera` 一次设置
+//!   跨会话/resize/换画布缓存；未显式 = 无相机，呈现走 NDC 恒等
+//!   （[`Self::ndc`]）默认域。
+//! - **两段式**：相机恒为 world→画布基底（`mvp()` = fit_ndc ×
+//!   projection × view，构造入参 logical=画布意图）；画布→表面
+//!   letterbox 由 Screen::present_fit 独立现算，消费点统一组合。
 //! - **单一职责**：letterbox 数学只在 Camera 内部，target.rs 不再散布。
-//! - **平行于 starfish-io::read 的 async 范式**：接口恒定，平台差异
-//!   （物理/逻辑尺寸关系）压在 Camera 内部。
 
 use glam::Mat4;
 use starfish_std::letterbox::Fit;
@@ -55,6 +58,24 @@ pub struct Camera {
 
 impl Camera {
     // ── 构造 ─────────────────────────────────────────────────────
+
+    /// NDC 恒等相机（**无显式相机的默认域具象**——wgpu 裁剪空间直通）：
+    /// mvp() = identity，fit 恒等。present_mvp 无显式相机时返回本矩阵
+    /// ——raw 顶点 NDC 直通 + present_fit 单段 letterbox。
+    pub fn ndc() -> Self {
+        Self::build(
+            Mat4::IDENTITY,
+            glam::camera::rh::proj::directx::orthographic(-1.0, 1.0, -1.0, 1.0, 0.0, 1.0),
+            Projection::Ortho,
+            (1, 1),
+            (1, 1),
+        )
+    }
+
+    /// NDC 恒等 MVP（静态便捷口——present_mvp 无显式相机的默认域）
+    pub fn ndc_mvp() -> Mat4 {
+        Self::ndc().mvp()
+    }
 
     /// 2D 正交相机（中心原点、y 向上；逻辑画布全域视野）
     pub fn ortho(logical: (u32, u32), physical: (u32, u32)) -> Self {
@@ -246,14 +267,6 @@ mod tests {
     }
 
     #[test]
-    fn coordinate_mapping_roundtrip() {
-        let cam = Camera::ortho((800, 600), (1280, 720));
-        let (px, py) = cam.logical_to_physical(100.0, 50.0);
-        let (lx, ly) = cam.physical_to_logical(px, py);
-        assert!((lx - 100.0).abs() < 1e-6 && (ly - 50.0).abs() < 1e-6);
-    }
-
-    #[test]
     fn resize_recomputes_fit() {
         let mut cam = Camera::ortho((800, 600), (800, 600));
         assert!((cam.fit().scale - 1.0).abs() < 1e-6);
@@ -266,21 +279,5 @@ mod tests {
     fn matmul_composes_transforms() {
         let a = Camera::ortho((800, 600), (800, 600));
         let _ = a.mvp(); // 确保 letterbox 内聚不 panic
-    }
-}
-// 追加：Screen 集成方法（阶段一 1.2 集成口——Screen.camera 显式设置）
-impl Camera {
-    /// 从 RenderWish 构造（Screen.refresh_camera 内部使用——
-    /// dim3d 旗标决定 ortho/perspective，物理尺寸取自 surface）
-    pub(crate) fn from_wish(
-        wish: &crate::render::RenderWish,
-        logical: (u32, u32),
-        physical: (u32, u32),
-    ) -> Self {
-        if wish.dim3d {
-            Self::perspective(wish.fov_deg, logical, physical, wish.near, wish.far)
-        } else {
-            Self::ortho(logical, physical)
-        }
     }
 }

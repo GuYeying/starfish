@@ -9,33 +9,35 @@
 //! - [`Screen`] / [`Surface`] / [`DrawTarget`]：绘制终点统一抽象
 //!   （Screen = 交换链背板进程唯一；Surface = 离屏画布 + 空间可放置
 //!   纹理对象）
-//! - [`Camera`] / [`CameraKind`]：MVP 组装（ortho/perspective 同型，
-//!   唯一上传变换量）+ Auto 兜底形态（Auto2d/Auto3d；**相机选择是
-//!   会话级**——`RenderPass::set_camera`，每会话/每目标独立）
+//! - [`Camera`]：MVP 组装（letterbox 内聚——ortho/perspective 同型，
+//!   唯一上传变换量；**域分层 v3**：显式唯一相机类型——旧
+//!   render::camera::Camera / CameraKind Auto2d/Auto3d 兜底已退役）
 //! - [`Batch`]：批处理执行体（纹理 × 相机切换即段边界；即时 API ×
 //!   延迟提交；`set_mvp`/`set_model` 绘制状态机）
 //! - [`SpriteMaterial`]（内部）：pygame 固定渲染管线的状态材质（管线
 //!   变体矩阵惰性缓存；不对外暴露——定制管线走 RenderResourceAccess）
 //!
-//! **相机定约（渲染统一 draw 面）**：相机 uniform（`@group(0)@binding(0)
-//! 64B mat4x4 MVP`）**段级**——pack 时按段解出（None 段 = [`CameraKind`]
-//! Auto 按目标尺寸隐式；Some 段 = 会话 `set_camera` override，段边界 =
-//! 纹理 × 相机切换）。sprite/调试线/font 管线同构共享；egui 客人经
-//! 适配层跟随。同一画布多相机 = 会话内多次 `set_camera` 分段绘制。
+//! **相机定约（域分层 v3，2026-11-19）**：相机 uniform（`@group(0)
+//! @binding(0) 64B mat4x4 MVP`）**段级**——None 段 = **恒像素域**
+//! （[`pixel_ortho_mvp`] 内置换算，pygame 图元 API 与相机彻底解耦）；
+//! Some 段 = 会话 `set_camera` override（GameCamera，段边界 = 纹理 ×
+//! 相机切换）。sprite/调试线/font 管线同构共享；egui 客人经适配层
+//! 跟随。同一画布多相机 = 会话内多次 `set_camera` 分段绘制。
+//! Screen 级显式相机（world→画布基底）只消费于 raw 段便捷口
+//! （write_camera_mvp 单参）与 rapier debug follow——一次设置缓存。
 //!
 //! GPU 槽（ADR-6 display 全局槽的前置形态）：[`Screen::new`] 建立
 //! 进程级 Gpu 句柄，[`Surface`]/[`Texture`]/pygame::font 等经 [`gpu`]
 //! 取用——pygame 签名不带 GPU 参数的依托。
 
 pub mod batch;
-pub mod camera;
 pub mod material;
 pub mod session;
 pub mod target;
 pub mod texture;
 
 pub use batch::{Batch, BatchTopology, GeometryKind, SpriteVertex};
-pub use camera::{Camera, CameraKind};
+pub use crate::camera::Camera;
 pub use material::{SpriteBlend, SPRITE_MRT_WGSL, SPRITE_WGSL};
 pub use session::{begin_screen, begin_targets, end_screen, end_targets, with_screen,
     with_targets, NoActiveSession};
@@ -227,19 +229,16 @@ pub fn gpu_info() -> Option<GpuInfo> {
     })
 }
 
-// ── Auto 兜底相机（段级相机 None 段的解算源）──────────────────────
+// ── 恒像素域单点（域分层 v3，2026-11-19）─────────────────────────
 
-/// 兼容口：Surface 场景的 MVP（逻辑==物理 → letterbox 恒等 → 纯正交）。
-/// Screen 场景应用 Screen.camera.mvp()（含 letterbox）。
-/// 兼容口：主屏 MVP（脚本  调用——
-/// Screen.camera 的 letterbox MVP；无 Screen 时退化为正交）
-pub fn camera_mvp() -> Mat4 {
-    let size = crate::display::get_screen().size();
-    camera_mvp_for(size)
-}
-
-pub fn camera_mvp_for(size: (u32, u32)) -> Mat4 {
-    crate::camera::Camera::ortho(size, size).mvp()
+/// 恒像素域 MVP（**pygame 图元 API 的内置像素换算**）：逻辑画布正交，
+/// 中心原点 y 上。与 present_fit 组合 = 旧 Auto 相机数学逐位等价；
+/// **不读 Screen.camera**——像素 API 与相机彻底解耦（HUD 域冲突修正
+/// 定约）。消费面：pack None 段 / blit_fullscreen / pack_mrt /
+/// Surface pack / egui compose / physics draw_debug Surface 口——
+/// 全体像素正交基底同走本单点。
+pub fn pixel_ortho_mvp(logical: (u32, u32)) -> Mat4 {
+    crate::camera::Camera::ortho(logical, logical).mvp()
 }
 
 impl Gpu {
