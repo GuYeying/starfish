@@ -81,11 +81,13 @@ pub unsafe fn detach_external_window(env: *mut std::ffi::c_void, surface: *mut s
         return;
     }
     *EXTERNAL.lock().unwrap_or_else(|p| p.into_inner()) = None;
-    // 槽位引用（attach 时 +1）的对消延迟到引擎完全停止（防
-    // present-after-release）：暂存指针，壳收尾经
-    // release_pending_external 归还
+    // 槽位引用（attach 时 +1）的**对消延迟到引擎完全停止**（壳收尾经
+    // release_pending_external 归还）：曾在此立即 release——对消后
+    // ANativeWindow 失效，而帧循环的当前 swap 还在飞（stop 是帧边界
+    // 标志）→ "swap_buffers failed: Surface argument does not name a
+    // valid surface"（tasks_test 真机实测 2026-11-19）。引用保持 +1
+    // 到最后一帧 swap 完，无泄漏（收尾归还）
     *PENDING_RELEASE.lock().unwrap_or_else(|p| p.into_inner()) = Some(query as usize);
-    unsafe { ANativeWindow_release(query) };
     PENDING
         .lock()
         .unwrap_or_else(|p| p.into_inner())
