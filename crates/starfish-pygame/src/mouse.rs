@@ -85,6 +85,18 @@ pub fn get_visible() -> bool {
     VISIBLE.with(|s| s.get())
 }
 
+/// 鼠标抓取（限定客户区逃不出——FPS 沉浸式定约 2026-11-20；Windows =
+/// ClipCursor，macOS = CG 关联开关；web = no-op 降级[Pointer Lock 挂账]，
+/// 移动端 = no-op 无鼠标语义）
+pub fn set_grab(grabbed: bool) {
+    let _ = super::display::with_window(|w| w.set_mouse_grabbed(grabbed));
+}
+
+/// 鼠标抓取态（窗口层真值；web/移动恒 false）
+pub fn get_grab() -> bool {
+    super::display::with_window(|w| w.is_mouse_grabbed()).unwrap_or(false)
+}
+
 /// 窗口鼠标聚焦态（简化：与键盘聚焦同源——FocusGained/Lost 事件）
 pub fn get_focused() -> bool {
     super::key::get_focused()

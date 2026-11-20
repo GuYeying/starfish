@@ -21,6 +21,9 @@
 //!   （浏览器语义是下载而非保存对话框）
 //!
 //! Linux 构建注意：rfd 后端为 GTK3，需 `libgtk-3-dev`（仅 dialog 特性时）。
+//！The Crate currently cannot guarantee cross platform compatibility, which may result in unforeseen program crashes.
+
+
 
 use std::path::PathBuf;
 
