@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::sync::Arc;
 
 use wgpu::{Buffer, BufferUsages, IndexFormat, Queue};
@@ -24,7 +25,10 @@ pub struct Mesh {
     layout: BufferLayout,
 
     vertex_count: u32,
-    index_count: u32,
+    /// **写时自动重设**（write_index_data 按字节数推导——几何缩小时计数
+    // 同步缩 = draw_indexed 不再画尾部旧索引脏面；创建时的计数值仅
+    // 为初值，2026-11-20 voxel_mc 脏面实锤修）
+    index_count: Cell<u32>,
 
     
 }
@@ -48,7 +52,7 @@ impl Mesh {
             index_buffer_usages,
             layout,
             vertex_count,
-            index_count,
+            index_count: Cell::new(index_count),
             index_format
         }
     }
@@ -91,7 +95,7 @@ impl Mesh {
 
     #[inline]
     pub fn index_count(&self) -> u32 {
-        self.index_count
+        self.index_count.get()
     }
 
     #[inline]
@@ -136,6 +140,14 @@ impl Mesh {
             data,
         );
 
+        // **写时自动重设计数**（按格式字宽推导——几何缩小时 draw_indexed
+        // 范围同步缩 = 尾部旧索引不再成脏面；曾创建时定格永不更新 =
+        // voxel_mc 放置一摞再删除后已删面残留，2026-11-20 实锤修）
+        let fmt_size = match self.index_format {
+            Some(IndexFormat::Uint32) => 4,
+            _ => 2,
+        };
+        self.index_count.set((data.len() / fmt_size) as u32);
 
         Ok(())
     }
