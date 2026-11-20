@@ -1483,6 +1483,10 @@ pub struct Surface {
     /// 延迟叠加排程（`defer_overlay`；flush 在 batch pack 之后统一执行
     /// ——batch 空也执行，纯 UI/纯调试线的表面由此成立）
     pending_overlays: RefCell<Vec<Box<dyn FnOnce(&mut OverlayCtx)>>>,
+    /// 会话清屏旗标（`set_clear_bg` 设置——**下一条 pack** 的颜色附件
+    /// load = Clear(色)——离屏面的 GPU 清屏（曾 write_texture 上传捷径
+    /// = 每帧全尺寸 CPU→GPU 拷贝，2026-11-20 HUD 覆盖面实测改 GPU 清屏）
+    clear_bg: Cell<Option<[f32; 4]>>,
 }
 
 impl Drop for Surface {
@@ -1533,6 +1537,7 @@ impl Surface {
             alpha: Cell::new(255),
             cpu_alpha: None,
             pending_overlays: RefCell::new(Vec::new()),
+            clear_bg: Cell::new(None),
         }
     }
 
@@ -1634,6 +1639,15 @@ impl Surface {
         self.clip.get()
     }
 
+    /// 会话清屏色（**下一条 pack** 生效——颜色附件 load = Clear(色)）：
+    /// 离屏面的 GPU 清屏——pack 恒 Load 承接（透明底画布），alpha-blend
+    /// fill 无法穿透已写像素（跨帧堆叠），曾走 write_texture 上传捷径 =
+    /// 每帧全尺寸 CPU→GPU 拷贝（2048×1280 = 10.5MB/帧），2026-11-20 改
+    /// GPU 清屏。色 = 归一化 [r,g,b,a]，None = 恢复 Load 承接。
+    pub fn set_clear_bg(&self, color: Option<[f32; 4]>) {
+        self.clear_bg.set(color);
+    }
+
     /// 显式提交点（ADR-5；通常无需调用——blit 源自动触发）。
     /// **延迟叠加收口**：batch pack 之后统一执行 `defer_overlay` 排程
     /// （登记序即画家序，恒在本面游戏内容之上；batch 空/帧无绘制也执行
@@ -1721,13 +1735,24 @@ impl Surface {
             } else {
                 None
             };
+            // 会话清屏旗标（set_clear_bg）→ 颜色附件 load = Clear(色)——
+            // 离屏面的 GPU 清屏；消费即清（单次语义）
+            let load = match self.clear_bg.replace(None) {
+                Some(c) => wgpu::LoadOp::Clear(wgpu::Color {
+                    r: c[0] as f64,
+                    g: c[1] as f64,
+                    b: c[2] as f64,
+                    a: c[3] as f64,
+                }),
+                None => wgpu::LoadOp::Load, // 承接已绘内容（透明底画布）
+            };
             let mut ctx = EncodeCtx {
                 gpu: &self.gpu,
                 camera: &camera,
                 fit: Mat4::IDENTITY, // 离屏 Surface 逻辑==物理
                 colors: vec![ColorAttachment {
                     view: self.view.clone(),
-                    load: wgpu::LoadOp::Load, // 承接已绘内容（透明底画布）
+                    load, // 旗标 = Clear(色)；否则承接已绘内容
                     store: wgpu::StoreOp::Store,
                     resolve_target: None,
                     depth_slice: None,
