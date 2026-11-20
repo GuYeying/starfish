@@ -320,12 +320,18 @@ impl Batch {
         self.push_quad_uv(x, y, w, h, [0.0, 0.0, 1.0, 1.0], color, texture);
     }
 
-    /// 背景填充 quad（**远平面 z=1.0**——深度会话语义 2026-11-12 修）：
-    /// fill 是"背景"而非普通图元——普通 quad 的 z=0 在深度会话 =
-    /// 深度 0.0（最近），全屏写满后 3D 内容（深度 0.1~0.98）Less/LessEqual
-    /// 全拒 = 深度会话黑屏（gfx3d_demo 0/35 像素实证）。背景恒最远：
-    /// z=1.0 → 深度 1.0，后续 3D 全部通过（LessEqual 1.0）。普通会话
-    /// 无深度测试，z 值无感。
+    /// 背景填充 quad（**远平面 z_view=-1.0**——深度会话语义 2026-11-12
+    /// 修 / 2026-11-20 纠偏）：fill 是"背景"而非普通图元——普通 quad 的
+    /// z=0 在深度会话 = 深度 0.0（最近），全屏写满后 3D 内容（深度
+    /// 0.1~0.98）Less/LessEqual 全拒 = 深度会话黑屏（gfx3d_demo 0/35
+    /// 像素实证）。背景恒最远：RH 视空间前方恒负 z，far=1 正交映射下
+    /// **z_view=-1.0 → NDC z=+1.0（最远）→ 深度 1.0**，后续 3D 全部通过
+    /// （LessEqual 1.0）。普通会话无深度测试，z 值无感。
+    /// ⚠️ 曾写 z=+1.0——RH directx 正交 z 映射 = -2·z_view-1（glam
+    /// orthographic::<true,false,false>，near=0 far=1），+1.0 在相机
+    /// **背后** → NDC z=-3 → 裁剪面剔除 = **fill 全部消失**（11-18 两段
+    /// 式统一换 ortho 变体后显形；所有案例 fill 恒近黑故两日无人察觉
+    /// ——BMP 像素真值取证实锤 2026-11-20）
     pub fn push_fill_quad(
         &mut self,
         x: f32,
@@ -335,7 +341,7 @@ impl Batch {
         color: [f32; 4],
     ) {
         let v = |px: f32, py: f32| SpriteVertex {
-            pos: [px, py, 1.0],
+            pos: [px, py, -1.0],
             uv: [0.5, 0.5],
             color,
         };
