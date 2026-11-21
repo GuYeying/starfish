@@ -152,6 +152,7 @@ pub(crate) trait DecodeBackend {
 ///
 /// Rust 侧在 start 中以 `VideoModule` 打开 [`Video`] 句柄；
 /// Python 侧对应 `pygame.video.init()` + `pygame.video.open(...)`。
+#[derive(Clone)]
 pub struct VideoModule {
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,

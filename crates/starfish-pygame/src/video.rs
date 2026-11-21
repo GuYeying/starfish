@@ -45,6 +45,12 @@ impl VideoSystem {
             frame_cache: std::cell::RefCell::new(None),
         })
     }
+
+    /// VideoModule 访问器（wasm 异步 open 的 spawn_local 闭包用——
+    /// VideoModule Clone 化后可跨 async 块共享，2026-11-21）
+    pub fn module(&self) -> starfish_video::VideoModule {
+        self.inner.clone()
+    }
 }
 
 /// 视频播放器（硬解解码 + 帧纹理载体）
@@ -57,6 +63,16 @@ pub struct Video {
 }
 
 impl Video {
+    /// 从 BaseVideo 包装（**wasm 异步 open 的完成侧接线口**——pollster::
+    /// block_on 在 wasm 主线程不可用，open 拆两半：spawn_local 发起 +
+    /// _open_take 完成侧经此包装，2026-11-21 video wasm 接线批次）
+    pub fn from_base(base: starfish_video::Video) -> Self {
+        Self {
+            inner: base,
+            frame_cache: std::cell::RefCell::new(None),
+        }
+    }
+
     /// 推进解码与帧上传（每帧调用；dt = 距上次 update 的时长）
     pub fn update(&mut self, dt: Duration) -> Result<(), VideoError> {
         self.inner.update(dt)
@@ -107,7 +123,9 @@ impl Video {
 
     /// 是否播放结束
     pub fn ended(&self) -> bool {
-        self.inner.ended()
+        let e = self.inner.ended();
+        starfish_debug::log_info!(&format!("[video] ended 查询 = {e}"));
+        e
     }
 
     /// 视频/解码开关（暂停 = 关）
