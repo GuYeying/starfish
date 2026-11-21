@@ -17,6 +17,10 @@ pub struct SurfaceSettings {
     /// 表面多重采样数（1 = 关闭 MSAA；常用 4）。渲染进该表面的管线需以
     /// 相同 `sample_count` 创建（`RenderPipelineBuilder::sample_count`）
     pub sample_count: u32,
+    /// 清屏色（**主屏 begin/present 的 LoadOp::Clear 直出**——内容层
+    /// 的填充 quad 可删，pass 数 2→1，2026-11-21 填充 pass 消除批次）。
+    /// None = 引擎默认黑；归一化 [r,g,b,a]
+    pub clear_color: Option<[f32; 4]>,
 }
 
 impl Default for SurfaceSettings {
@@ -30,6 +34,7 @@ impl Default for SurfaceSettings {
             desired_maximum_frame_latency: 2,
             color_space: SurfaceColorSpace::Auto,
             sample_count: 1,
+            clear_color: None,
         }
     }
 }

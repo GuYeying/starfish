@@ -323,6 +323,9 @@ pub struct Screen {
     /// 透明底模式（TRANSPARENT 创建旗标；begin_frame 清屏改 alpha 0
     ///——桌宠/悬浮件形态，配表面 alpha 合成）
     transparent_bg: Cell<bool>,
+    /// 会话清屏色（SurfaceSettings.clear_color 注入 / set_clear_color
+    /// 运行时改——ensure_begun 的 LoadOp::Clear 直出；透明底旗标优先）
+    clear_color: Cell<Option<[f32; 4]>>,
     /// 逻辑画布尺寸（脚本 set_mode 语义尺寸——Android 嵌入下物理表面
     /// 恒原生窗口、逻辑独立；呈现 = 等比缩放居中）
     logical: Cell<(u32, u32)>,
@@ -347,6 +350,7 @@ impl Screen {
         surface_settings: SurfaceSettings,
         gpu_settings: GpuSettings,
     ) -> Result<Self, RenderContextError> {
+        let cfg_clear_color = surface_settings.clear_color;
         let (context, access, surface) =
             RenderEntry::async_new(window, surface_settings, gpu_settings).await?;
         let format = surface.color_format();
@@ -375,6 +379,7 @@ impl Screen {
             transparent_bg: Cell::new(false),
             logical: Cell::new(physical),
             camera: RefCell::new(None),
+            clear_color: Cell::new(cfg_clear_color),
             pack_logged: Cell::new(false),
             pending_overlays: RefCell::new(Vec::new()),
         })
@@ -384,6 +389,12 @@ impl Screen {
     ///（桌宠/悬浮件形态；须配表面 alpha 合成——set_mode_ex 已设）
     pub(crate) fn set_transparent_bg(&self) {
         self.transparent_bg.set(true);
+    }
+
+    /// 会话清屏色运行时改（归一化 [r,g,b,a]；下一帧 ensure_begun 生效
+    /// ——填充 pass 消除的内容层底色直出，2026-11-21）
+    pub fn set_clear_color(&self, color: [f32; 4]) {
+        self.clear_color.set(Some(color));
     }
 
     /// 主屏 RenderSurface 访问缝（绑定层"主屏 attachment"入口——
@@ -591,9 +602,19 @@ impl Screen {
         // 曾用透明清屏——Android 合成器把未初始化/空帧合成时常显示为白
         // （2026-09-29 批次 D 真机白闪根因之一）；黑与 Web 页黑背景一致，
         // 视觉无差异。
-        // 透明底模式清屏 alpha 0（TRANSPARENT 创建旗标——透明合成透出桌面）
+        // 透明底模式清屏 alpha 0（TRANSPARENT 创建旗标——透明合成透出桌面）。
+        // **配置清屏色直出**（SurfaceSettings.clear_color / set_clear_color
+        // 运行时改——内容层填充 quad 可删 = pass 数 2→1，2026-11-21 填充
+        // pass 消除批次）；未配置 = 不透明黑（既有定约）。
         let clear = if self.transparent_bg.get() {
             wgpu::Color::TRANSPARENT
+        } else if let Some(c) = self.clear_color.get() {
+            wgpu::Color {
+                r: c[0] as f64,
+                g: c[1] as f64,
+                b: c[2] as f64,
+                a: c[3] as f64,
+            }
         } else {
             wgpu::Color::BLACK
         };
