@@ -521,7 +521,7 @@ impl Screen {
             starfish_debug::log_warn!("[screen] present 跳过（未 begin）");
             return;
         }
-        self.pack(false);
+        self.pack(true); // 兜底 pack 与 render 会话同形态（主屏深度恒开）
         // 延迟叠加（定约见 defer_overlay）：本帧全部 pack 之后、present
         // 之前执行——登记序即画家序，恒在游戏内容之上。
         // ⚠️ 必须在 begun 复位**之前**运行：run_overlay 的 ensure_begun
@@ -548,14 +548,17 @@ impl Screen {
     /// 打包（顺带 acquire 交换链纹理），[`RenderPass::end`] / Drop 完成
     /// 打包（编码挂入待提交队列），[`Self::present`] 上屏。Python 绑定
     /// 形态 = `with screen:`（`__enter__`=本方法 / `__exit__`=finish）。
+    /// **主屏深度恒开**（2026-11-21 用户定夺：设备不缺深度开销，主屏
+    /// 直接可画 gfxdraw 3D 内容；2D 重叠无闪烁——图元 z 恒常量 0
+    /// （fill 背景 1.0），LessEqual 对相等深度判过 = 后画稳定覆盖，
+    /// 零浮点抖动无 z-fight 条件）
     pub fn render(&self) -> RenderPass<'_> {
         self.ensure_begun();
-        RenderPass::screen(self, false)
+        RenderPass::screen(self, true)
     }
 
-    /// 深度会话：绘制走深度测试管线（Standard + 写入），深度缓冲由
-    /// base 帧清屏（每帧 begin 清 1.0）。3D 内容 / 2.5D 遮挡用；
-    /// 相机经 [`super::set_default_camera`]（全局）换透视。
+    /// 深度会话：与 [`Self::render`] 同形态（主屏深度恒开后等价——
+    /// 保留为兼容口）。
     pub fn render_depth(&self) -> RenderPass<'_> {
         self.ensure_begun();
         RenderPass::screen(self, true)
@@ -847,9 +850,9 @@ impl OverlayCtx {
     /// 内容深度测试用；本上下文的深度附件只供一条通道——第二条起为
     /// None）。**深度恒清 1.0**（不承接宿主深度）：客人叠加语义 = 恒在
     /// 游戏内容之上，3D 客人自管遮挡（LessEqual）——宿主深度恒不清的
-    /// 场景（主屏 present 走 pack(false)）若 Load 承接 = wgpu 零初始化
-    /// 0.0（最近平面）→ 3D 客人全被无声剔除（2026-10-24 实测：主屏 +
-    /// Surface 的 3D 调试线从未显示的根因）。
+    /// 场景若 Load 承接 = wgpu 零初始化 0.0（最近平面）→ 3D 客人全被
+    /// 无声剔除（2026-10-24 实测：主屏 + Surface 的 3D 调试线从未显示
+    /// 的根因）。
     /// **深度契约按自绘管线分支**：管线深度关闭者（如 2D 线
     /// 管线）必须传 `false`——wgpu 对管线深度目标与通道附件做严格
     /// 相等校验。
