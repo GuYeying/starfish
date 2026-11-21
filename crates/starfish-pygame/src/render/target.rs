@@ -34,6 +34,8 @@ use starfish_we::Window;
 use crate::{Color, IRect};
 
 use super::batch::{encode, Batch, BatchTopology, EncodeCtx, GeometryKind, SpriteVertex};
+use super::material::SpriteBlend;
+use starfish_render::pipeline::CullMode;
 use crate::camera::Camera as GameCamera;
 use super::texture::Texture;
 use super::{init_gpu, gpu, Coord, Gpu};
@@ -1048,8 +1050,18 @@ impl OverlayCtx {
         let (format, samples) = (self.format, self.samples);
         let vbo = Arc::new(vbo);
         self.with_pass("overlay_compose", false, |pass| {
-            let pipeline =
-                gpu.material.pipeline(&gpu, &cam_bind, format, samples, false, false);
+            // 覆盖面合成 = **引擎内部 pass**——混合/剔除显式参数（恒 alpha
+            // / none），不受 gfxdraw 场景状态污染
+            let pipeline = gpu.material.pipeline_with(
+                &gpu,
+                &cam_bind,
+                format,
+                samples,
+                false,
+                false,
+                SpriteBlend::Alpha,
+                CullMode::None,
+            );
             pass.set_pipeline(&pipeline);
             pass.set_bind_group(0, &cam_bind);
             let binds = gpu.binds.borrow();

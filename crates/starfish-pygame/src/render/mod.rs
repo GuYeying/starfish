@@ -134,20 +134,15 @@ const BIND_CACHE_CAP: usize = 4096;
 // 挡在编译期。
 thread_local! {
     static GPU_SLOT: RefCell<Option<Arc<Gpu>>> = const { RefCell::new(None) };
-    /// 渲染愿望槽（pygame.render.init / pygame.init(dim)——set_mode 前
-    /// 配置，Gpu 装配时消费一次；后设优先）
+    /// 渲染愿望槽（Rust 层愿望——set_mode 前配置，Gpu 装配时消费一次；
+    /// py 层配置经 SurfaceSettings 面）
     static WISH_SLOT: RefCell<RenderWish> = RefCell::new(RenderWish::DEFAULT);
 }
 
-/// 渲染愿望（创建期细粒度控制——剔除/混合/相机维；Gpu 装配消费一次）
+/// 渲染愿望（创建期细粒度控制——剔除/混合；Gpu 装配消费一次。
+/// 运行期状态走 set_blend_mode / set_cull_mode——变体惰性编译）
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RenderWish {
-    /// dim=3（透视默认相机）；false = 2D 正交（默认）
-    pub dim3d: bool,
-    /// Auto3d 透视参数（fov 度数制）
-    pub fov_deg: f32,
-    pub near: f32,
-    pub far: f32,
     /// 剔除（默认 None——镜像矩阵绕序天然安全；开 back/front 后镜像
     /// quad 背面消失属物理正确）
     pub cull: CullMode,
@@ -157,19 +152,14 @@ pub struct RenderWish {
 
 impl RenderWish {
     pub const DEFAULT: Self = Self {
-        dim3d: false,
-        fov_deg: 60.0,
-        near: 0.1,
-        far: 100.0,
         cull: CullMode::None,
         blend: SpriteBlend::Alpha,
     };
 
 }
 
-/// 渲染愿望写入（pygame.render.init——set_mode 前配置；整只覆盖）。
-/// GPU 槽已装配时**同步更新 Auto 相机种类**（init(dim=) 运行期改维的
-/// 即时生效路径——旧 reset_camera 全局口退役后的承接）
+/// 渲染愿望写入（Rust 层愿望槽——宿主壳/内部用；py 层经 SurfaceSettings
+/// 走 set_mode 面注入；整只覆盖）
 pub fn store_wish(wish: RenderWish) {
     WISH_SLOT.with(|w| *w.borrow_mut() = wish);
 }
@@ -177,6 +167,42 @@ pub fn store_wish(wish: RenderWish) {
 /// 当前渲染愿望（含未配置的默认值）
 pub fn current_wish() -> RenderWish {
     WISH_SLOT.with(|w| *w.borrow())
+}
+
+/// gfxdraw 内容层**场景混合模式**运行时切换（"alpha" / "opaque" /
+/// "premultiplied"——管线变体按需编译；未知值返回 Err）。
+/// 场景级 sticky 状态——设置后持续到再次设置。
+pub fn set_blend_mode(mode: &str) -> Result<(), String> {
+    let blend = match mode {
+        "alpha" => SpriteBlend::Alpha,
+        "opaque" => SpriteBlend::Opaque,
+        "premultiplied" => SpriteBlend::Premultiplied,
+        other => return Err(format!("blend_mode 未识别：{other:?}（alpha/opaque/premultiplied）")),
+    };
+    GPU_SLOT.with(|slot| {
+        if let Some(g) = slot.borrow().as_ref() {
+            g.material.set_blend_mode(blend);
+        }
+    });
+    Ok(())
+}
+
+/// gfxdraw 内容层**场景剔除模式**运行时切换（"none" / "back" / "front"）。
+/// ⚠️ 内容层默认 none——镜像 blit 的绕序翻转依赖它，开 back/front 会
+/// 让镜像贴图背面消失（2D 场景慎用；3D 场景走 raw 管线自己的 cull）。
+pub fn set_cull_mode(mode: &str) -> Result<(), String> {
+    let cull = match mode {
+        "none" => CullMode::None,
+        "back" => CullMode::Back,
+        "front" => CullMode::Front,
+        other => return Err(format!("cull_mode 未识别：{other:?}（none/back/front）")),
+    };
+    GPU_SLOT.with(|slot| {
+        if let Some(g) = slot.borrow().as_ref() {
+            g.material.set_cull_mode(cull);
+        }
+    });
+    Ok(())
 }
 
 /// 建立（或复用）GPU 槽（`Screen::new` 调用；首次为准——愿望随首次
@@ -248,7 +274,7 @@ impl Gpu {
         access: Arc<RenderResourceAccess>,
         offscreen_access: Arc<RenderResourceAccess>,
     ) -> Self {
-        // 愿望消费（一次定型：剔除/混合进材质，相机维进 Auto 种类初值）
+        // 愿望消费（一次定型：剔除/混合进材质）
         let wish = current_wish();
         let material = SpriteMaterial::new(&access, wish.cull, wish.blend);
         let sampler = Arc::new(

@@ -179,6 +179,7 @@ fn chunk_init(data: &[u8], pts_us: f64, key: bool) -> Result<Object, JsValue> {
 
 impl WebDecoder {
     pub(crate) fn open(path: &str) -> Result<Self, VideoError> {
+        starfish_debug::log_info!(&format!("[video-wasm] WebDecoder::open 进入 path={path}"));
         let frames: Rc<RefCell<VecDeque<VideoFrame>>> = Rc::new(RefCell::new(VecDeque::new()));
         let state: Rc<RefCell<State>> = Rc::new(RefCell::new(State::Loading));
         let inner: Rc<RefCell<Option<Inner>>> = Rc::new(RefCell::new(None));
@@ -278,6 +279,7 @@ impl WebDecoder {
                     _on_error: on_error,
                 });
                 *state.borrow_mut() = State::Ready;
+                starfish_debug::log_info!("[video-wasm] fetch+configure 完成 → Ready");
             });
         }
 
@@ -295,10 +297,22 @@ impl WebDecoder {
 impl DecodeBackend for WebDecoder {
     fn poll_frame(&mut self) -> Result<Poll, VideoError> {
         match &*self.state.borrow() {
-            State::Loading => return Ok(Poll::Pending),
-            State::NoHardware => return Err(VideoError::NoHardwareDecoder),
-            State::Failed(msg) => return Err(VideoError::Backend(msg.clone())),
-            State::Eos => return Ok(Poll::Eos),
+            State::Loading => {
+                starfish_debug::log_info!("[video-wasm] poll: Loading→Pending");
+                return Ok(Poll::Pending);
+            }
+            State::NoHardware => {
+                starfish_debug::log_info!("[video-wasm] poll: NoHardware");
+                return Err(VideoError::NoHardwareDecoder);
+            }
+            State::Failed(msg) => {
+                starfish_debug::log_info!(&format!("[video-wasm] poll: Failed {msg}"));
+                return Err(VideoError::Backend(msg.clone()));
+            }
+            State::Eos => {
+                starfish_debug::log_info!("[video-wasm] poll: Eos");
+                return Ok(Poll::Eos);
+            }
             State::Ready => {}
         }
 

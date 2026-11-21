@@ -16,7 +16,7 @@
 //! MRT（多渲染目标）：`shader/sprite_mrt.wgsl` 双输出着色器 + N 颜色
 //! 目标管线（v1 镜像双写；异构输出走自定义材质）。
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -40,7 +40,7 @@ pub const SPRITE_MRT_WGSL: &str = include_str!("shader/sprite_mrt.wgsl");
 pub(crate) const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24Plus;
 
 /// 混合愿望（render.init 的 "blend" 档位；一次定型）
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SpriteBlend {
     /// alpha 混合（默认——pygame blit 语义）
     Alpha,
@@ -67,12 +67,19 @@ pub(crate) struct SpriteMaterial {
     shader_mrt: Arc<ShaderModule>,
     /// 顶点布局模板（1 零顶点——管线布局从示例对象推导的引擎既有设计）
     template: Mesh,
-    /// 剔除愿望（默认 None：2D 精灵/镜像矩阵天然安全；用户可开 back/front）
-    cull: CullMode,
-    /// 混合愿望（默认 Alpha）
-    blend: SpriteBlend,
-    /// 管线变体矩阵缓存（主线程契约；Gpu 槽为线程局部，无 Sync 界）
-    pipelines: RefCell<HashMap<(wgpu::TextureFormat, u32, bool, bool), Arc<RenderPipeline>>>,
+    /// 剔除模式（默认 None：2D 精灵/镜像矩阵天然安全）——**运行时可变**
+    /// （set_cull_mode 场景切换；并入管线缓存键 = 变体惰性编译）
+    cull: Cell<CullMode>,
+    /// 混合模式（默认 Alpha）——**运行时可变**（set_blend_mode 场景切换；
+    /// alpha/opaque/additive/multiply 变体惰性编译）
+    blend: Cell<SpriteBlend>,
+    /// 管线变体矩阵缓存（键 = 格式 × 采样 × 拓扑 × 深度 × **剔除 × 混合**
+    /// ——运行时状态并入键，变体按需编译；主线程契约；Gpu 槽为线程局部，
+    /// 无 Sync 界）
+    pipelines: RefCell<HashMap<
+        (wgpu::TextureFormat, u32, bool, bool, CullMode, SpriteBlend),
+        Arc<RenderPipeline>,
+    >>,
     /// MRT 管线缓存（键 = 双颜色格式 × 采样 × 拓扑；v1 恒无深度）
     mrt_pipelines: RefCell<HashMap<((wgpu::TextureFormat, wgpu::TextureFormat), u32, bool), Arc<RenderPipeline>>>,
 }
@@ -93,15 +100,17 @@ impl SpriteMaterial {
             shader,
             shader_mrt,
             template,
-            cull,
-            blend,
+            cull: Cell::new(cull),
+            blend: Cell::new(blend),
             pipelines: RefCell::new(HashMap::new()),
             mrt_pipelines: RefCell::new(HashMap::new()),
         }
     }
 
     /// 取（或建）管线变体：`lines` = LineList 线拓扑；`depth` = 深度测试
-    /// 开（Standard + 写入，深度格式 [`DEPTH_FORMAT`]，pass 须带深度附件）
+    /// 开（Standard + 写入，深度格式 [`DEPTH_FORMAT`]，pass 须带深度附件）。
+    /// 混合 / 剔除 = **运行时状态**（set_blend_mode / set_cull_mode 场景
+    /// 切换——gfxdraw 状态口写入，变体并入缓存键惰性编译）。
     ///
     /// `camera_bind` 仅用于管线布局推导（bind group layout 一致性：
     /// 全部相机 bind 同构，任一示例即可——全局相机化后即全局 rig 本体）。
@@ -114,7 +123,45 @@ impl SpriteMaterial {
         lines: bool,
         depth: bool,
     ) -> Arc<RenderPipeline> {
-        let key = (format, samples, lines, depth);
+        self.pipeline_with(
+            gpu,
+            camera_bind,
+            format,
+            samples,
+            lines,
+            depth,
+            self.blend.get(),
+            self.cull.get(),
+        )
+    }
+
+    /// 参数化变体（**显式混合 / 剔除**——覆盖面合成等引擎内部 pass 用：
+    /// 恒 alpha / none，不受 gfxdraw 场景状态污染）
+    /// 场景混合模式写口（gfxdraw set_blend_mode 状态机——sticky 到再次
+    /// 设置；管线变体按需编译）
+    pub(crate) fn set_blend_mode(&self, blend: SpriteBlend) {
+        self.blend.set(blend);
+    }
+
+    /// 场景剔除模式写口（gfxdraw set_cull_mode 状态机）
+    pub(crate) fn set_cull_mode(&self, cull: CullMode) {
+        self.cull.set(cull);
+    }
+
+    /// 参数化变体（**显式混合 / 剔除**——覆盖面合成等引擎内部 pass 用：
+    /// 恒 alpha / none，不受 gfxdraw 场景状态污染）
+    pub(crate) fn pipeline_with(
+        &self,
+        gpu: &Gpu,
+        camera_bind: &BindGroup,
+        format: wgpu::TextureFormat,
+        samples: u32,
+        lines: bool,
+        depth: bool,
+        blend: SpriteBlend,
+        cull: CullMode,
+    ) -> Arc<RenderPipeline> {
+        let key = (format, samples, lines, depth, cull, blend);
         if let Some(p) = self.pipelines.borrow().get(&key) {
             return p.clone();
         }
@@ -126,7 +173,7 @@ impl SpriteMaterial {
             } else {
                 PrimitiveTopology::TriangleList
             })
-            .cull(self.cull)
+            .cull(cull)
             .sample_count(samples.max(1));
         let mut builder = if depth {
             builder
@@ -139,7 +186,7 @@ impl SpriteMaterial {
         // 混合 = 创建期愿望（默认 alpha）
         builder.color_targets(&vec![Some(ColorTargetState {
             format,
-            blend: self.blend.state(),
+            blend: blend.state(),
             write_mask: ColorWrites::ALL,
         })]);
         // 白纹理 bind 作第二组布局示例（全部纹理 bind 同构）
@@ -173,7 +220,7 @@ impl SpriteMaterial {
             } else {
                 PrimitiveTopology::TriangleList
             })
-            .cull(self.cull)
+            .cull(self.cull.get())
             .sample_count(samples.max(1));
         let mut builder = builder;
         let targets: Vec<Option<ColorTargetState>> = formats
@@ -181,7 +228,7 @@ impl SpriteMaterial {
             .map(|f| {
                 Some(ColorTargetState {
                     format: *f,
-                    blend: self.blend.state(),
+                    blend: self.blend.get().state(),
                     write_mask: ColorWrites::ALL,
                 })
             })
