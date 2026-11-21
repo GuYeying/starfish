@@ -275,6 +275,31 @@ pub trait DrawTarget {
     fn set_draw_wireframe(&self, enabled: bool) {
         self.with_batch(|b| b.set_wireframe(enabled));
     }
+
+    /// push 流拓扑状态（sticky——push 口持续生效；None = 回默认
+    /// Triangles。draw 函数族不经此状态——函数名即拓扑）
+    fn set_topology(&self, topo: Option<super::batch::BatchTopology>) {
+        self.with_batch(|b| b.set_topology(topo));
+    }
+
+    /// 当前 push 拓扑（None = 默认 Triangles）
+    fn current_topology(&self) -> Option<super::batch::BatchTopology> {
+        let mut out = None;
+        self.with_batch(|b| out = b.cur_topology);
+        out
+    }
+
+    /// 顶点位置流入批（gfxdraw push 底层口——sticky 语义，状态跨 push
+    /// 持续；points = 扁平 [x,y,z × N]，indices 空切片 = 逐 3/逐 2 解释）
+    fn push_stream(
+        &self,
+        topo: super::batch::BatchTopology,
+        points: &[f32],
+        indices: &[u16],
+        color: [f32; 4],
+    ) {
+        self.with_batch(|b| b.push_stream(topo, points, indices, color));
+    }
 }
 
 /// 相机 rig：uniform 缓冲 + bind group + 当前 MVP（**全局唯一**——

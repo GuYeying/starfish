@@ -170,6 +170,9 @@ pub struct Batch {
     pub cur_wireframe: bool,
     /// one-shot 绘制色（gfxdraw 图元用；默认紫色，draw 后重置）
     pub cur_color: [f32; 4],
+    /// push 流拓扑状态（sticky——push 口用；None = 默认 Triangles。
+    /// draw 函数族不经此状态——函数名即拓扑）
+    pub cur_topology: Option<BatchTopology>,
 }
 
 /// gfxdraw 图元默认色（调试紫——开发者忘 set_color 时一眼可辨）
@@ -184,6 +187,7 @@ impl Batch {
             cur_model: Mat4::IDENTITY,
             cur_wireframe: false,
             cur_color: DEFAULT_DRAW_COLOR,
+            cur_topology: None,
         }
     }
 
@@ -225,6 +229,17 @@ impl Batch {
     /// one-shot 绘制色（下一次 gfxdraw 图元用此色；draw 后重置回紫色）
     pub fn set_color(&mut self, color: [f32; 4]) {
         self.cur_color = color;
+    }
+
+    /// push 流拓扑状态（sticky——push 口持续生效直至再设；None = 回
+    /// 默认 Triangles。与 draw 函数族无耦合——函数名即拓扑）
+    pub fn set_topology(&mut self, topo: Option<BatchTopology>) {
+        self.cur_topology = topo;
+    }
+
+    /// 当前 push 拓扑（None = 默认 Triangles）
+    pub fn topology(&self) -> BatchTopology {
+        self.cur_topology.unwrap_or(BatchTopology::Triangles)
     }
 
     /// 当前 model 矩阵（调用方组合用：`cur_model × local` 的便捷入口）
@@ -453,6 +468,19 @@ impl Batch {
         offset: [f32; 2],
         color: [f32; 4],
     ) {
+        self.expand_geometry(kind, geometry, offset, color);
+        self.end_draw();
+    }
+
+    /// 展开共用体（push_geometry / push_stream 共用——GLES 退化四边形
+    /// 序列 / 线流展开；变换烘 cur_model）
+    fn expand_geometry(
+        &mut self,
+        kind: GeometryKind,
+        geometry: &Geometry,
+        offset: [f32; 2],
+        color: [f32; 4],
+    ) {
         // 会话 transform 烘进几何（恒等时零拷贝快路径——transformed 返回新
         // Vec，恒等判断跳过分配）
         let owned;
@@ -483,11 +511,19 @@ impl Batch {
                 } else {
                     for idx in geometry.indices.chunks(3) {
                         if idx.len() == 3 {
-                            tris.push([
-                                v(&geometry.vertices[idx[0] as usize]),
-                                v(&geometry.vertices[idx[1] as usize]),
-                                v(&geometry.vertices[idx[2] as usize]),
-                            ]);
+                            // 越界防御（push 口收用户任意数据——索引越界
+                            // 跳过该组，不 panic 崩解释器）
+                            let n = geometry.vertices.len();
+                            if (idx[0] as usize) < n
+                                && (idx[1] as usize) < n
+                                && (idx[2] as usize) < n
+                            {
+                                tris.push([
+                                    v(&geometry.vertices[idx[0] as usize]),
+                                    v(&geometry.vertices[idx[1] as usize]),
+                                    v(&geometry.vertices[idx[2] as usize]),
+                                ]);
+                            }
                         }
                     }
                 }
@@ -503,19 +539,50 @@ impl Batch {
                 }
             }
             GeometryKind::Line => {
+                let n = geometry.vertices.len();
                 let verts: Vec<SpriteVertex> = if geometry.indices.is_empty() {
                     geometry.vertices.iter().map(|sv| v(sv)).collect()
                 } else {
+                    // 越界防御（同 Filled 分支——push 口用户数据不 panic）
                     geometry
                         .indices
                         .iter()
+                        .filter(|&&i| (i as usize) < n)
                         .map(|&i| v(&geometry.vertices[i as usize]))
                         .collect()
                 };
                 self.push_vertices(BatchTopology::Lines, None, &verts);
             }
         }
-        self.end_draw();
+    }
+
+    /// 顶点位置流入批（gfxdraw push 主口的底层；**sticky 语义——不触发
+    /// end_draw 状态重置**，color/model/wireframe/topology 跨 push 持续，
+    /// 与 draw 函数族的 one-shot 分立）。
+    ///
+    /// points = 扁平 f32 `[x,y,z × N]`；indices = 索引（空切片 = 逐 3
+    /// 一切三角 / 逐 2 一切线段）；topo 由会话状态传入（draw_test
+    /// push 用例的断言通道）。
+    pub fn push_stream(
+        &mut self,
+        topo: BatchTopology,
+        points: &[f32],
+        indices: &[u16],
+        color: [f32; 4],
+    ) {
+        // pos 流 → ShapeVertex（死色占位——push_geometry 同款：色由调用
+        // 参数统一烘焙）
+        let verts: Vec<starfish_gfx::ShapeVertex> = points
+            .chunks_exact(3)
+            .map(|p| starfish_gfx::ShapeVertex::new([p[0], p[1], p[2]], color))
+            .collect();
+        let geometry = Geometry::indexed(verts, indices.to_vec());
+        let kind = match topo {
+            BatchTopology::Triangles => GeometryKind::Filled,
+            BatchTopology::Lines => GeometryKind::Line,
+        };
+        self.expand_geometry(kind, &geometry, [0.0, 0.0], color);
+        // sticky：不调 end_draw——状态跨 push 持续
     }
 
     /// 待提交 quad 数（诊断用；图元按 3 顶点折算）
