@@ -473,7 +473,10 @@ impl Batch {
     }
 
     /// 展开共用体（push_geometry / push_stream 共用——GLES 退化四边形
-    /// 序列 / 线流展开；变换烘 cur_model）
+    /// 序列 / 线流展开）。⚠️ **会话变换由 push_vertices 的 bake 统一烘**
+    /// （单烘定约 2026-11-21——曾在此预烘 cur_model + push_vertices 再
+    /// 烘 = 双重平移，带 set_transform 的图元平移翻倍出屏，恒等时无害
+    /// 故长期潜伏；gen_*+push 迁移引入 transform 组合后显形）
     fn expand_geometry(
         &mut self,
         kind: GeometryKind,
@@ -481,15 +484,6 @@ impl Batch {
         offset: [f32; 2],
         color: [f32; 4],
     ) {
-        // 会话 transform 烘进几何（恒等时零拷贝快路径——transformed 返回新
-        // Vec，恒等判断跳过分配）
-        let owned;
-        let geometry = if self.cur_model == Mat4::IDENTITY {
-            geometry
-        } else {
-            owned = geometry.transformed(&self.cur_model);
-            &owned
-        };
         let v = |sv: &starfish_gfx::ShapeVertex| SpriteVertex {
             pos: [sv.pos[0] + offset[0], sv.pos[1] + offset[1], sv.pos[2]],
             // 白纹理全域白，uv 取值不影响纯色输出
