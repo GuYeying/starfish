@@ -280,4 +280,37 @@ mod tests {
         let a = Camera::ortho((800, 600), (800, 600));
         let _ = a.mvp(); // 确保 letterbox 内聚不 panic
     }
+
+    #[test]
+    fn perspective_floor_plane_ndc_probe() {
+        // gfx3d 地板 plane 缺渲染取证（水平 quad y 恒定透视不渲染挂账）：
+        // 透视相机（55°/画布 800×600/near 0.1 far 100）+ 场景平移
+        // (0,1.6,-7)——水平 quad 顶点 y=-1、x/z ±4 的 NDC 输出。y 应随
+        // z_dist 变化（投影为梯形非水平线）；z NDC 须在 [0,1]（directx）。
+        let cam = Camera::perspective(55.0, (800, 600), (800, 600), 0.1, 100.0)
+            .with_view(Mat4::from_translation(glam::Vec3::new(0.0, 1.6, -7.0)));
+        let m = cam.mvp();
+        let proj = |x: f32, y: f32, z: f32| -> (f32, f32, f32) {
+            let p = m * Vec4::new(x, y, z, 1.0);
+            (p.x / p.w, p.y / p.w, p.z / p.w)
+        };
+        let near = proj(-4.0, -1.0, -4.0);
+        let far = proj(4.0, -1.0, 4.0);
+        println!("plane NDC near={:?} far={:?}", near, far);
+        assert!(near.1.is_finite() && far.1.is_finite());
+        // y NDC 随 z_dist 变化（梯形非水平线）——全等 = 投影 y 行退化
+        assert!(
+            (near.1 - far.1).abs() > 1e-3,
+            "y NDC 退化：水平面投影成线（{} vs {}）",
+            near.1,
+            far.1
+        );
+        assert!(near.1.abs() <= 1.0 && far.1.abs() <= 1.0, "y NDC 出界");
+        assert!(
+            (0.0..=1.0).contains(&near.2) && (0.0..=1.0).contains(&far.2),
+            "z NDC 出界：{:?} {:?}",
+            near.2,
+            far.2
+        );
+    }
 }
