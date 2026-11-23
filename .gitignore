@@ -17,3 +17,4 @@ Thumbs.db
 /crates/demos/target
 /crates/demos/jniLibs
 examples/demos/jniLibs/
+starfish.log
