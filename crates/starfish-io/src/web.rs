@@ -132,6 +132,33 @@ pub(super) async fn write(path: &str, data: Vec<u8>) -> Result<(), IoError> {
         .map(|_| ())
 }
 
+/// write 的同步 XHR 版（**wasm 同步退化面**——与 read_sync/exists_sync
+/// 同款定约 2026-11-23：同步口承载而非 Err；POST 到保存端点 = async
+/// write 的 fetch POST 同语义同步形态，Content-Type 对齐
+/// application/octet-stream；服务端无保存能力时由状态码如实报错）
+pub(super) fn write_sync(path: &str, data: Vec<u8>) -> Result<(), IoError> {
+    let url = resolve_url(path);
+    let xhr = web_sys::XmlHttpRequest::new()
+        .map_err(|e| IoError::Backend(format!("XHR 构造失败: {e:?}")))?;
+    xhr.open_with_async("POST", &url, false)
+        .map_err(|e| IoError::Backend(format!("XHR open 失败: {e:?}")))?;
+    xhr.set_request_header("Content-Type", "application/octet-stream")
+        .map_err(|e| IoError::Backend(format!("XHR 头设置失败: {e:?}")))?;
+    let body = js_sys::Uint8Array::from(data.as_slice());
+    xhr.send_with_opt_js_u8_array(Some(&body))
+        .map_err(|e| IoError::Backend(format!("XHR send 失败: {e:?}")))?;
+    let status = xhr
+        .status()
+        .map_err(|e| IoError::Backend(format!("XHR status 失败: {e:?}")))?;
+    if (200..300).contains(&status) {
+        Ok(())
+    } else {
+        Err(IoError::Backend(format!(
+            "write {path}: HTTP {status}（POST 保存端点未就绪？）"
+        )))
+    }
+}
+
 // size/read_range：Web 端退化不支持（fetch 全量承载——wasm 无分块
 // 流式需求，2026-11-19 定约）
 pub(super) async fn size(path: &str) -> Result<u64, IoError> {

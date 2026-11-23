@@ -33,6 +33,11 @@ pub(super) async fn write(path: &str, data: Vec<u8>) -> Result<(), IoError> {
     std::fs::write(resolve(path), data).map_err(|e| IoError::Backend(format!("write {path}: {e}")))
 }
 
+/// write 同步版（native fs 直写——与 async write 同语义的同步形态）
+pub(super) fn write_sync(path: &str, data: Vec<u8>) -> Result<(), IoError> {
+    std::fs::write(resolve(path), data).map_err(|e| IoError::Backend(format!("write {path}: {e}")))
+}
+
 pub(super) async fn exists(path: &str) -> Result<bool, IoError> {
     Ok(resolve(path).exists())
 }

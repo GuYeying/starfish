@@ -189,6 +189,19 @@ pub async fn write(path: &str, data: impl Into<Vec<u8>>) -> Result<(), IoError> 
     imp::write(path, data.into()).await
 }
 
+/// write 同步版（raw）：native = 基准目录 fs 直写；wasm = **同步 XHR
+/// POST**（与 read_sync/exists_sync 同款退化定约 2026-11-23：同步口
+/// 承载而非 Err——POST 到保存端点，与异步 write 同语义同步形态）
+#[cfg(not(target_arch = "wasm32"))]
+pub fn write_sync(path: &str, data: impl Into<Vec<u8>>) -> Result<(), IoError> {
+    imp::write_sync(path, data.into())
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn write_sync(path: &str, data: impl Into<Vec<u8>>) -> Result<(), IoError> {
+    imp::write_sync(path, data.into())
+}
+
 /// 目标是否存在
 ///
 /// - 原生：路径存在性（文件或目录）
