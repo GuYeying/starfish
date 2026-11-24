@@ -12,3 +12,7 @@
 
 pub mod json;
 pub mod toml;
+
+// serde_json 重导出（pygame.parse 绑定层的值模型类型面——直接依赖
+// 不出 starfish 侧）
+pub use serde_json;
