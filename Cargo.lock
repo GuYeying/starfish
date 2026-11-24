@@ -4031,6 +4031,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "starfish-codec"
+version = "0.9.76"
+dependencies = [
+ "flate2",
+ "sha2",
+ "starfish-debug",
+]
+
+[[package]]
 name = "starfish-debug"
 version = "0.9.76"
 dependencies = [
@@ -4054,6 +4063,13 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+]
+
+[[package]]
+name = "starfish-ds"
+version = "0.9.76"
+dependencies = [
+ "starfish-debug",
 ]
 
 [[package]]
@@ -4110,6 +4126,16 @@ dependencies = [
  "starfish-permission",
  "wasm-bindgen",
  "web-sys",
+]
+
+[[package]]
+name = "starfish-parse"
+version = "0.9.76"
+dependencies = [
+ "serde",
+ "serde_json",
+ "starfish-debug",
+ "toml 0.8.2",
 ]
 
 [[package]]
@@ -4177,6 +4203,13 @@ dependencies = [
  "thiserror 2.0.21",
  "web-sys",
  "wgpu",
+]
+
+[[package]]
+name = "starfish-rng"
+version = "0.9.76"
+dependencies = [
+ "starfish-debug",
 ]
 
 [[package]]
