@@ -1,0 +1,12 @@
+[package]
+name = "starfish-parse"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "结构化数据解析层（stdlite 定界：数据序列化格式）：json / toml——纯数据存储解析，资产格式（建模/图像/音频）归领域加载器"
+
+[dependencies]
+serde_json = "1"
+toml = "0.8"
+serde = { version = "1", features = ["derive"] }
+starfish-debug = { workspace = true }

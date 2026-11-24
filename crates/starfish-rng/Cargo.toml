@@ -1,0 +1,9 @@
+[package]
+name = "starfish-rng"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "确定性随机数层（stdlite 定界）：PCG32 核心 + 分布 + 2D/3D 助手 + 批量口——跨平台同 seed 同序列（wasm 无 OS 熵依赖）"
+
+[dependencies]
+starfish-debug = { workspace = true }

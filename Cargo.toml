@@ -18,6 +18,8 @@ starfish-time = { path = "crates/starfish-time" }
 starfish-permission = { path = "crates/starfish-permission" }
 starfish-io = { path = "crates/starfish-io" }
 starfish-net = { path = "crates/starfish-net" }
+starfish-parse = { path = "crates/starfish-parse" }
+starfish-rng = { path = "crates/starfish-rng" }
 starfish-dialog = { path = "crates/starfish-dialog" }
 starfish-gamepad = { path = "crates/starfish-gamepad" }
 starfish-render = { path = "crates/starfish-render" }
