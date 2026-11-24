@@ -1,0 +1,9 @@
+[package]
+name = "starfish-ds"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "数据结构层（stdlite 定界）：Heap（二叉堆——A* open list）/ SortedList（二分插入）/ UnionFind——Rust 直算零 py 编组"
+
+[dependencies]
+starfish-debug = { workspace = true }

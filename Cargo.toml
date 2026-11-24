@@ -20,6 +20,8 @@ starfish-io = { path = "crates/starfish-io" }
 starfish-net = { path = "crates/starfish-net" }
 starfish-parse = { path = "crates/starfish-parse" }
 starfish-rng = { path = "crates/starfish-rng" }
+starfish-ds = { path = "crates/starfish-ds" }
+starfish-codec = { path = "crates/starfish-codec" }
 starfish-dialog = { path = "crates/starfish-dialog" }
 starfish-gamepad = { path = "crates/starfish-gamepad" }
 starfish-render = { path = "crates/starfish-render" }

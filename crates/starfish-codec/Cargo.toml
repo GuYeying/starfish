@@ -1,0 +1,11 @@
+[package]
+name = "starfish-codec"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "编解码层（stdlite 定界）：hash（sha256——存档校验）/ zlib（flate2——存档压缩）/ base64（字节编码）——字节变换家族"
+
+[dependencies]
+sha2 = "0.10"
+flate2 = "1"
+starfish-debug = { workspace = true }
