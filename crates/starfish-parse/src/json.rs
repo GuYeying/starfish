@@ -3,6 +3,7 @@
 //! 值模型 = serde_json::Value（py 侧映射 dict/list/str/num/bool/None）。
 
 use serde_json::Value;
+pub use serde_json::Value;   // 值模型公开（绑定层 value_to_py/py_to_value 用）
 
 /// 解析 json 文本 → Value（解析失败 = Err 带行列定位）
 pub fn parse(text: &str) -> Result<Value, String> {
