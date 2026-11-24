@@ -101,6 +101,32 @@ pub fn polyline(points: &[Vec2], closed: bool, color: [f32; 4]) -> Geometry {
     g
 }
 
+/// 圆弧线（LineList 折线，索引式——polyline 同构；度数制起止角，
+/// 0° = +x 方向逆时针；`segments` = 折线段数，0 归 1）
+pub fn arc(
+    center: Vec2,
+    radius: f32,
+    start_deg: f32,
+    stop_deg: f32,
+    segments: u32,
+    color: [f32; 4],
+) -> Geometry {
+    let seg = segments.max(1);
+    let mut g = Geometry::default();
+    for i in 0..=seg {
+        let a = start_deg.to_radians()
+            + (stop_deg - start_deg).to_radians() * i as f32 / seg as f32;
+        g.push(
+            [center.x + radius * a.cos(), center.y + radius * a.sin(), 0.0],
+            color,
+        );
+    }
+    for i in 0..seg {
+        g.extend_indices(&[i as u16, (i + 1) as u16]);
+    }
+    g
+}
+
 /// 正多边形（填充）：`sides` ≥ 3
 pub fn regular_polygon(
     center: Vec2,
