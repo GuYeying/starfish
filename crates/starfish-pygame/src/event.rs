@@ -153,9 +153,30 @@ pub fn pump() -> bool {
     }
     let ms_drain = t_drain.ms();
     if ms_drain > 50 {
-        starfish_debug::log_warn!(&format!(
-            "[event] pump 排水 {n_events} 条事件耗时 {ms_drain}ms"
-        ));
+        // **10s 节流**（2026-11-26）：0 事件偶发慢排水多为 DispatchMessageW
+        // 同步等 DWM/IME/设备枚举的系统层代价（PeekMessage 空转本身 µs 级）
+        // ——逐帧重复打印在 conhost 慢终端再吃几十 ms 加剧卡顿（用户
+        // 实报"输出一次卡一次"）；保首条信号 + 周期去刷屏
+        thread_local! {
+            static LAST_SLOW_WARN: std::cell::Cell<Option<std::time::Instant>> =
+                const { std::cell::Cell::new(None) };
+        }
+        let should_warn = LAST_SLOW_WARN.with(|l| match l.get() {
+            Some(t) if t.elapsed() >= std::time::Duration::from_secs(10) => {
+                l.set(Some(std::time::Instant::now()));
+                true
+            }
+            None => {
+                l.set(Some(std::time::Instant::now()));
+                true   // 首条（启动期归因语义保留）
+            }
+            _ => false,
+        });
+        if should_warn {
+            starfish_debug::log_warn!(&format!(
+                "[event] pump 排水 {n_events} 条事件耗时 {ms_drain}ms（系统层 DWM/IME 代价，10s 节流）"
+            ));
+        }
     }
     // 桌面 letterbox 开发热键 snoop——**cfg 门控**（生产编译期剔除）且
     // gate 前置：钩子未激活 = 零 clone 零调用（此前每帧白 clone 整个
