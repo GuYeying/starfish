@@ -29,6 +29,8 @@ use starfish_render::render_pass::render_pass::RenderPass;
 use wgpu::util::DeviceExt;
 
 use super::texture::Texture;
+use super::material::{DrawState, SpriteBlend};
+use starfish_render::pipeline::CullMode;
 use super::Gpu;
 
 /// 图元几何的拓扑归类（base [`Geometry`] 不携带拓扑，由调用方声明）
@@ -72,6 +74,10 @@ pub(crate) struct Segment {
     pub key: Option<usize>,
     pub view: Option<Arc<wgpu::TextureView>>,
     pub mvp: Option<Mat4>,
+    /// 段级混合/剔除（管线变体选择键——2026-11-27 per-call 参数化：
+    /// draw_batch/draw_surface 的 blend/cull kwargs 落此，省全局状态）
+    pub blend: SpriteBlend,
+    pub cull: CullMode,
     pub start: u32,
     pub end: u32,
 }
@@ -100,6 +106,8 @@ impl Stream {
         &mut self,
         texture: Option<&Texture>,
         mvp: Option<Mat4>,
+        blend: SpriteBlend,
+        cull: CullMode,
         vs: impl IntoIterator<Item = SpriteVertex>,
     ) -> std::ops::Range<u32> {
         let vs: Vec<_> = vs.into_iter().collect();
@@ -107,11 +115,13 @@ impl Stream {
             let end = self.vertices.len() as u32;
             return end..end;
         }
-        // 段边界判定：纹理切换 ∪ 相机切换（含 None ↔ Some）即开新段
+
         let key = texture.map(Texture::cache_key);
         let need_new = match (self.segments.last(), &key, &mvp) {
             (None, _, _) => true,
-            (Some(last), k, m) => last.key != *k || last.mvp != *m,
+            (Some(last), k, m) => {
+                last.key != *k || last.mvp != *m || last.blend != blend || last.cull != cull
+            }
         };
         let start = self.vertices.len() as u32;
         self.vertices.extend(vs);
@@ -121,6 +131,8 @@ impl Stream {
                 key,
                 view: texture.map(Texture::view),
                 mvp,
+                blend,
+                cull,
                 start,
                 end,
             });
@@ -271,12 +283,28 @@ impl Batch {
     ///   Lines = 每 **2** 顶点一线段。不对齐尾组会被管线丢弃——上层
     ///   展开时保证整组。
     /// - `texture`：None = 1×1 白纹理（纯色路径）。
-    /// - 段边界：同流内纹理/相机切换；返回本组流内区间（诊断/高级用法）。
+    /// - 段边界：同流内纹理/相机/状态切换；返回本组流内区间。
+    ///
+    /// 本口沿用会话线框态（旧 draw 函数族）；统一绘制口走
+    /// [`Batch::push_vertices_state`] 显式携带状态。
     pub fn push_vertices(
         &mut self,
         topo: BatchTopology,
         texture: Option<&Texture>,
         vertices: &[SpriteVertex],
+    ) -> std::ops::Range<u32> {
+        let wireframe = self.cur_wireframe;
+        self.push_vertices_state(topo, texture, vertices, DrawState::default(), wireframe)
+    }
+
+    /// 显式状态的顶点入流（**段级记录**：混合/剔除随段走，提交不读全局）
+    pub fn push_vertices_state(
+        &mut self,
+        topo: BatchTopology,
+        texture: Option<&Texture>,
+        vertices: &[SpriteVertex],
+        state: DrawState,
+        wireframe: bool,
     ) -> std::ops::Range<u32> {
         let mvp = self.cur_mvp;
         let mut baked: Vec<SpriteVertex> = vertices
@@ -286,8 +314,8 @@ impl Batch {
                 SpriteVertex { pos: p, ..*v }
             })
             .collect();
-        // one-shot 线框：三角形 → 三条边（6 顶点入线流）
-        if self.cur_wireframe && topo == BatchTopology::Triangles {
+        // 线框：三角形 → 三条边（6 顶点入线流）
+        if wireframe && topo == BatchTopology::Triangles {
             let mut edges: Vec<SpriteVertex> = Vec::with_capacity(baked.len() * 2);
             for tri in baked.chunks(3) {
                 if tri.len() == 3 {
@@ -296,11 +324,11 @@ impl Batch {
                     edges.push(tri[2]); edges.push(tri[0]);
                 }
             }
-            return self.lines.push(texture, mvp, edges);
+            return self.lines.push(texture, mvp, state.blend, state.cull, edges);
         }
         match topo {
-            BatchTopology::Triangles => self.tris.push(texture, mvp, baked),
-            BatchTopology::Lines => self.lines.push(texture, mvp, baked),
+            BatchTopology::Triangles => self.tris.push(texture, mvp, state.blend, state.cull, baked),
+            BatchTopology::Lines => self.lines.push(texture, mvp, state.blend, state.cull, baked),
         }
     }
 
@@ -417,6 +445,27 @@ impl Batch {
         color: [f32; 4],
         texture: Option<&Texture>,
     ) {
+        let wireframe = self.cur_wireframe;
+        self.push_quad_corners_3d_state(
+            corners,
+            uvs,
+            color,
+            texture,
+            DrawState::default(),
+            wireframe,
+        );
+    }
+
+    /// 显式状态的任意四角 quad（draw_surface 统一口）
+    pub fn push_quad_corners_3d_state(
+        &mut self,
+        corners: [[f32; 3]; 4],
+        uvs: [[f32; 2]; 4],
+        color: [f32; 4],
+        texture: Option<&Texture>,
+        state: DrawState,
+        wireframe: bool,
+    ) {
         let v = |p: [f32; 3], t: [f32; 2]| SpriteVertex {
             pos: p, // 不在这里烘——push_vertices 统一 bake（双烘 = 矩阵平方 = 镜像抵消/旋转加倍 bug）
             uv: [t[0], 1.0 - t[1]], // v 翻：y up 世界 BL 角配纹理底
@@ -424,7 +473,7 @@ impl Batch {
         };
         let [c0, c1, c2, c3] = corners;
         let [u0, u1, u2, u3] = uvs;
-        self.push_vertices(
+        self.push_vertices_state(
             BatchTopology::Triangles,
             texture,
             &[
@@ -435,6 +484,8 @@ impl Batch {
                 v(c2, u2),
                 v(c3, u3),
             ],
+            state,
+            wireframe,
         );
         self.end_draw();
     }
@@ -453,7 +504,8 @@ impl Batch {
         offset: [f32; 2],
         color: [f32; 4],
     ) {
-        self.expand_geometry(kind, geometry, offset, color);
+        let wireframe = self.cur_wireframe;
+        self.expand_geometry(kind, geometry, offset, color, DrawState::default(), wireframe);
         self.end_draw();
     }
 
@@ -468,6 +520,8 @@ impl Batch {
         geometry: &Geometry,
         offset: [f32; 2],
         color: [f32; 4],
+        state: DrawState,
+        wireframe: bool,
     ) {
         let v = |sv: &starfish_gfx::ShapeVertex| SpriteVertex {
             pos: [sv.pos[0] + offset[0], sv.pos[1] + offset[1], sv.pos[2]],
@@ -507,13 +561,15 @@ impl Batch {
                     }
                 }
                 for tri in &tris {
-                    self.push_vertices(
+                    self.push_vertices_state(
                         BatchTopology::Triangles,
                         None,
                         &[
                             tri[0], tri[1], tri[2], // (a,b,c)
                             tri[0], tri[2], tri[2], // (a,c,c)=退化
                         ],
+                        state,
+                        wireframe,
                     );
                 }
             }
@@ -530,7 +586,7 @@ impl Batch {
                         .map(|&i| v(&geometry.vertices[i as usize]))
                         .collect()
                 };
-                self.push_vertices(BatchTopology::Lines, None, &verts);
+                self.push_vertices_state(BatchTopology::Lines, None, &verts, state, false);
             }
         }
     }
@@ -549,6 +605,21 @@ impl Batch {
         indices: &[u16],
         color: [f32; 4],
     ) {
+        let wireframe = self.cur_wireframe;
+        self.push_stream_state(topo, points, indices, color, DrawState::default(), wireframe);
+        // sticky：不调 end_draw——状态跨 push 持续
+    }
+
+    /// 显式状态的 push 流（统一绘制口入口——线框也随调用走，不落回会话）
+    pub fn push_stream_state(
+        &mut self,
+        topo: BatchTopology,
+        points: &[f32],
+        indices: &[u16],
+        color: [f32; 4],
+        state: DrawState,
+        wireframe: bool,
+    ) {
         // pos 流 → ShapeVertex（死色占位——push_geometry 同款：色由调用
         // 参数统一烘焙）
         let verts: Vec<starfish_gfx::ShapeVertex> = points
@@ -560,8 +631,8 @@ impl Batch {
             BatchTopology::Triangles => GeometryKind::Filled,
             BatchTopology::Lines => GeometryKind::Line,
         };
-        self.expand_geometry(kind, &geometry, [0.0, 0.0], color);
-        // sticky：不调 end_draw——状态跨 push 持续
+        self.expand_geometry(kind, &geometry, [0.0, 0.0], color, state, wireframe);
+        // 不调 end_draw——变换/色仍为会话态（与旧 push 语义一致）
     }
 
     /// 待提交 quad 数（诊断用；图元按 3 顶点折算）
@@ -647,7 +718,6 @@ pub(crate) fn encode(batch: &Batch, ctx: &mut EncodeCtx) -> Option<wgpu::Command
         }
     }
 
-    let mrt = ctx.colors.len() > 1;
     let color_attachments: Vec<Option<ColorAttachment>> =
         ctx.colors.iter().map(|c| Some(c.clone())).collect();
     let depth_attachment = ctx.depth.clone();
@@ -684,21 +754,21 @@ pub(crate) fn encode(batch: &Batch, ctx: &mut EncodeCtx) -> Option<wgpu::Command
 
 fn draw_stream(pass: &mut RenderPass, stream: &Stream, lines: bool, ctx: &EncodeCtx) {
     let depth = ctx.depth.is_some();
-    let pipeline = if ctx.colors.len() > 1 {
-        ctx.gpu
-            .material
-            .pipeline_mrt(ctx.gpu, &ctx.camera.bind, &ctx.formats, ctx.samples, lines)
-    } else {
-        ctx.gpu.material.pipeline(
-            ctx.gpu,
-            &ctx.camera.bind,
-            ctx.formats[0],
-            ctx.samples,
-            lines,
-            depth,
-        )
+    // 逐段管线变体选择（2026-11-27 per-call blend/cull 参数化——段级
+    // 记录驱动；变体按需编译缓存命中 = 切换零重建）
+    let seg_pipeline = |seg: &Segment, ctx: &EncodeCtx| -> Arc<starfish_render::pipeline::RenderPipeline> {
+        // MRT 路径暂不参数化 blend/cull（罕见场景挂账）——恒全局态
+        if ctx.colors.len() > 1 {
+            ctx.gpu
+                .material
+                .pipeline_mrt(ctx.gpu, &ctx.camera.bind, &ctx.formats, ctx.samples, lines)
+        } else {
+            ctx.gpu.material.pipeline_with(
+                ctx.gpu, &ctx.camera.bind, ctx.formats[0], ctx.samples, lines,
+                depth, seg.blend, seg.cull,
+            )
+        }
     };
-    pass.set_pipeline(&pipeline);
     // 顶点数据内联一次性 buffer：命令缓冲引用各自独立的数据，天然免疫
     // "同帧多次 pack 的 write_buffer 互相覆盖"（批次九实测坑）。
     // P3 优化位：append-only arena + slice 偏移（需 base RenderPass 支持）。
@@ -724,7 +794,12 @@ fn draw_stream(pass: &mut RenderPass, stream: &Stream, lines: bool, ctx: &Encode
             // （world→画布基底）——与 Some 段同款左乘呈现拟合
             None => ctx.fit * ctx.camera.mvp,
         };
+        // 逐段管线变体（2026-11-27 per-call blend/cull——段级记录驱动，
+        // 变体按需编译缓存命中 = 切换零重建）
+        let pipeline = seg_pipeline(seg, ctx);
+        pass.set_pipeline(&pipeline);
         let seg_bind = seg_cam_bind(ctx.gpu, &mvp);
+        // group0 = 相机（段级 MVP）；group1 = 纹理/白纹理
         pass.set_bind_group(0, &seg_bind);
         match (&seg.key, &seg.view) {
             (Some(key), _) => {

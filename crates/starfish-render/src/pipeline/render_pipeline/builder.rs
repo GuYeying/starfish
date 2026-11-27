@@ -101,6 +101,11 @@ pub struct RenderPipelineBuilder {
 
     /// 面剔除
     pub cull: CullMode,
+    /// 正面绕序（wgpu 在**帧缓冲坐标**（y 向下）判绕序；默认 `Ccw`。
+    /// 想要"外向面 = 正面"的管线须按自己的坐标域实测极性，不要照抄
+    /// 结论：`starfish-pygame` 内容层管线在 y 向下画面 + CCW 外向几何
+    /// 下实测需要 `Ccw`（2026-11-27 双三角像素裁决），不是 `Cw`。）
+    pub front_face: wgpu::FrontFace,
     /// 三角形拓扑
     pub topology: PrimitiveTopology,
     /// 线框模式
@@ -161,6 +166,7 @@ impl RenderPipelineBuilder {
             depth_write:true,
             // raster
             cull:CullMode::Back,
+            front_face:wgpu::FrontFace::Ccw,
             topology:PrimitiveTopology::TriangleList,
             wireframe:false,
             // blend
@@ -198,6 +204,7 @@ impl RenderPipelineBuilder {
             depth_mode:DepthMode::Disabled,
             depth_write:false,
             cull:CullMode::None,
+            front_face:wgpu::FrontFace::Ccw,
             topology:PrimitiveTopology::TriangleList,
             wireframe:false,
             blend:BlendMode::Alpha,
@@ -222,6 +229,11 @@ impl RenderPipelineBuilder {
     pub fn depth_write(mut self,enable: bool,) -> Self {self.depth_write = enable;self}
     pub fn blend(mut self,blend: BlendMode,) -> Self {self.blend = blend;self}
     pub fn cull(mut self,cull: CullMode,) -> Self {self.cull = cull;self}
+
+    /// 正面绕序（见字段注释：y 翻转需 Cw 才能让外向面成为正面）
+    pub fn front_face(mut self,front_face: wgpu::FrontFace,) -> Self {
+        self.front_face = front_face; self
+    }
     /// 线框模式（需 `Features::POLYGON_MODE_LINE`，`features::core()` 默认愿望已含；
     /// 未获得该位时管线创建将报 wgpu validation 错误，请以 `RenderContext::features()` 自查）
     pub fn wireframe(mut self,wireframe: bool,) -> Self {self.wireframe = wireframe;self}
@@ -347,7 +359,7 @@ impl RenderPipelineBuilder {
 
             strip_index_format: None,
 
-            front_face: wgpu::FrontFace::Ccw,
+            front_face: self.front_face,
 
             cull_mode: match self.cull {
                 CullMode::Front => Some(wgpu::Face::Front),

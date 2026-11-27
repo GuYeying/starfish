@@ -64,8 +64,8 @@ pub fn sphere(
             let b = a + su + 1;
             let c = a + 1;
             let d = b + 1;
-            g.extend_indices(&[a as u16, b as u16, c as u16]);
-            g.extend_indices(&[b as u16, d as u16, c as u16]);
+            g.extend_indices(&[a as u16, c as u16, b as u16]);
+            g.extend_indices(&[b as u16, c as u16, d as u16]);
         }
     }
     g
@@ -125,8 +125,8 @@ pub fn cylinder(
         let j = (i + 1) % seg as u16;
         let bi = i;
         let bj = j;
-        g.extend_indices(&[top_center, top_start + bi, top_start + bj]);
-        g.extend_indices(&[bottom_center, bj, bi]);
+        g.extend_indices(&[top_center, top_start + bj, top_start + bi]);
+        g.extend_indices(&[bottom_center, bi, bj]);
     }
     g
 }
@@ -159,9 +159,9 @@ pub fn cone(
     for i in 0..seg as u16 {
         let j = i + 1;
         // 侧面
-        g.extend_indices(&[apex, ring_start + i, ring_start + j]);
+        g.extend_indices(&[apex, ring_start + j, ring_start + i]);
         // 底面
-        g.extend_indices(&[base_center_idx, ring_start + j, ring_start + i]);
+        g.extend_indices(&[base_center_idx, ring_start + i, ring_start + j]);
     }
     g
 }
@@ -229,20 +229,20 @@ pub fn capsule(
         let (s0, s1) = (ring_starts[r_i], ring_starts[r_i + 1]);
         for i in 0..seg as u16 {
             let j = i + 1;
-            g.extend_indices(&[s0 + i, s1 + i, s1 + j]);
-            g.extend_indices(&[s0 + i, s1 + j, s0 + j]);
+            g.extend_indices(&[s0 + i, s1 + j, s1 + i]);
+            g.extend_indices(&[s0 + i, s0 + j, s1 + j]);
         }
     }
     // 极点扇形
     let first = ring_starts[0];
     for i in 0..seg as u16 {
         let j = i + 1;
-        g.extend_indices(&[pole_a, first + i, first + j]);
+        g.extend_indices(&[pole_a, first + j, first + i]);
     }
     let last = *ring_starts.last().unwrap();
     for i in 0..seg as u16 {
         let j = i + 1;
-        g.extend_indices(&[pole_b, last + j, last + i]);
+        g.extend_indices(&[pole_b, last + i, last + j]);
     }
     g
 }
@@ -286,3 +286,74 @@ pub fn polygon_3d(points: &[Vec3], color: [f32; 4]) -> Geometry {
     g.extend_indices(&indices);
     g
 }
+
+#[cfg(test)]
+mod winding_tests {
+    use super::*;
+
+    /// 逐三角面外向检查：面法向须背离内部点（凸/闭合形状适用；
+    /// 退化三角面跳过）。返回（内翻面数, 有效面数）
+    fn inward_faces(g: &Geometry, inside: Vec3) -> (usize, usize) {
+        let (mut bad, mut total) = (0usize, 0usize);
+        for t in g.indices.chunks(3) {
+            let a = Vec3::from(g.vertices[t[0] as usize].pos);
+            let b = Vec3::from(g.vertices[t[1] as usize].pos);
+            let c = Vec3::from(g.vertices[t[2] as usize].pos);
+            let n = (b - a).cross(c - a);
+            if n.length_squared() < 1e-12 {
+                continue;
+            }
+            total += 1;
+            let centroid = (a + b + c) / 3.0;
+            if n.dot(centroid - inside) < 0.0 {
+                bad += 1;
+            }
+        }
+        (bad, total)
+    }
+
+    #[test]
+    fn closed_shapes_are_outward_wound() {
+        let white = [1.0f32; 4];
+        let shapes: [(&str, Geometry, Vec3); 5] = [
+            (
+                "cube",
+                cube(Vec3::splat(-1.0), Vec3::splat(1.0), white),
+                Vec3::ZERO,
+            ),
+            ("sphere", sphere(Vec3::ZERO, 1.0, 16, 12, white), Vec3::ZERO),
+            (
+                "cylinder",
+                cylinder(Vec3::ZERO, 0.5, 1.0, 24, white),
+                Vec3::new(0.0, 0.5, 0.0),
+            ),
+            (
+                "cone",
+                cone(Vec3::ZERO, 0.5, 1.0, 24, white),
+                Vec3::new(0.0, 0.25, 0.0),
+            ),
+            (
+                "capsule",
+                capsule(
+                    Vec3::new(0.0, -1.0, 0.0),
+                    Vec3::new(0.0, 1.0, 0.0),
+                    0.5,
+                    24,
+                    4,
+                    white,
+                ),
+                Vec3::ZERO,
+            ),
+        ];
+        let mut fails = Vec::new();
+        for (name, g, inside) in shapes {
+            let (bad, total) = inward_faces(&g, inside);
+            println!("{name}: inward {bad}/{total}");
+            if bad > 0 {
+                fails.push(format!("{name}:{bad}/{total}"));
+            }
+        }
+        assert!(fails.is_empty(), "绕序内翻（back cull 会剔正面）：{fails:?}");
+    }
+}
+

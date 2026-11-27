@@ -14,8 +14,9 @@
 //!   render::camera::Camera / CameraKind Auto2d/Auto3d 兜底已退役）
 //! - [`Batch`]：批处理执行体（纹理 × 相机切换即段边界；即时 API ×
 //!   延迟提交；`set_mvp`/`set_model` 绘制状态机）
-//! - [`SpriteMaterial`]（内部）：pygame 固定渲染管线的状态材质（管线
-//!   变体矩阵惰性缓存；不对外暴露——定制管线走 RenderResourceAccess）
+//! - [`SpriteMaterial`]（内部）：pygame 固定渲染管线的**无状态材质工厂**
+//!   （管线变体矩阵惰性缓存；混合/剔除由 [`DrawState`] 逐绘制携带；
+//!   不对外暴露——定制管线走 RenderResourceAccess）
 //!
 //! **相机定约（域分层 v3，2026-11-19）**：相机 uniform（`@group(0)
 //! @binding(0) 64B mat4x4 MVP`）**段级**——None 段 = **恒像素域**
@@ -38,7 +39,7 @@ pub mod texture;
 
 pub use batch::{Batch, BatchTopology, GeometryKind, SpriteVertex};
 pub use crate::camera::Camera;
-pub use material::{SpriteBlend, SPRITE_MRT_WGSL, SPRITE_WGSL};
+pub use material::{DrawState, SpriteBlend, SPRITE_MRT_WGSL, SPRITE_WGSL};
 pub use session::{begin_screen, begin_targets, end_screen, end_targets, with_screen,
     with_targets, NoActiveSession};
 pub use target::{render_targets, render_targets_arc, DrawTarget, OverlayCtx, RenderPass, Screen,
@@ -68,7 +69,6 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use glam::Mat4;
-use starfish_render::pipeline::CullMode;
 use starfish_render::sampler_desc::SamplerDescriptor;
 
 use material::SpriteMaterial;
@@ -98,7 +98,7 @@ pub(crate) struct Gpu {
     /// Rgba8——"管线按 (color_format, sample_count) 分套"多窗口定约的
     /// 叠加目标版。
     pub offscreen_access: Arc<RenderResourceAccess>,
-    /// 固定管线状态材质（cull/blend 创建期愿望定型）
+    /// 固定管线无状态材质（混合/剔除由 DrawState 逐绘制携带）
     pub material: SpriteMaterial,
     /// 默认相机 rig（uniform + bind；mvp 由 pack 按 CameraKind 现写）
     pub camera: RefCell<target::CameraRig>,
@@ -134,79 +134,9 @@ const BIND_CACHE_CAP: usize = 4096;
 // 挡在编译期。
 thread_local! {
     static GPU_SLOT: RefCell<Option<Arc<Gpu>>> = const { RefCell::new(None) };
-    /// 渲染愿望槽（Rust 层愿望——set_mode 前配置，Gpu 装配时消费一次；
-    /// py 层配置经 SurfaceSettings 面）
-    static WISH_SLOT: RefCell<RenderWish> = RefCell::new(RenderWish::DEFAULT);
 }
 
-/// 渲染愿望（创建期细粒度控制——剔除/混合；Gpu 装配消费一次。
-/// 运行期状态走 set_blend_mode / set_cull_mode——变体惰性编译）
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct RenderWish {
-    /// 剔除（默认 None——镜像矩阵绕序天然安全；开 back/front 后镜像
-    /// quad 背面消失属物理正确）
-    pub cull: CullMode,
-    /// 混合（默认 Alpha）
-    pub blend: SpriteBlend,
-}
-
-impl RenderWish {
-    pub const DEFAULT: Self = Self {
-        cull: CullMode::None,
-        blend: SpriteBlend::Alpha,
-    };
-
-}
-
-/// 渲染愿望写入（Rust 层愿望槽——宿主壳/内部用；py 层经 SurfaceSettings
-/// 走 set_mode 面注入；整只覆盖）
-pub fn store_wish(wish: RenderWish) {
-    WISH_SLOT.with(|w| *w.borrow_mut() = wish);
-}
-
-/// 当前渲染愿望（含未配置的默认值）
-pub fn current_wish() -> RenderWish {
-    WISH_SLOT.with(|w| *w.borrow())
-}
-
-/// gfxdraw 内容层**场景混合模式**运行时切换（"alpha" / "opaque" /
-/// "premultiplied"——管线变体按需编译；未知值返回 Err）。
-/// 场景级 sticky 状态——设置后持续到再次设置。
-pub fn set_blend_mode(mode: &str) -> Result<(), String> {
-    let blend = match mode {
-        "alpha" => SpriteBlend::Alpha,
-        "opaque" => SpriteBlend::Opaque,
-        "premultiplied" => SpriteBlend::Premultiplied,
-        other => return Err(format!("blend_mode 未识别：{other:?}（alpha/opaque/premultiplied）")),
-    };
-    GPU_SLOT.with(|slot| {
-        if let Some(g) = slot.borrow().as_ref() {
-            g.material.set_blend_mode(blend);
-        }
-    });
-    Ok(())
-}
-
-/// gfxdraw 内容层**场景剔除模式**运行时切换（"none" / "back" / "front"）。
-/// ⚠️ 内容层默认 none——镜像 blit 的绕序翻转依赖它，开 back/front 会
-/// 让镜像贴图背面消失（2D 场景慎用；3D 场景走 raw 管线自己的 cull）。
-pub fn set_cull_mode(mode: &str) -> Result<(), String> {
-    let cull = match mode {
-        "none" => CullMode::None,
-        "back" => CullMode::Back,
-        "front" => CullMode::Front,
-        other => return Err(format!("cull_mode 未识别：{other:?}（none/back/front）")),
-    };
-    GPU_SLOT.with(|slot| {
-        if let Some(g) = slot.borrow().as_ref() {
-            g.material.set_cull_mode(cull);
-        }
-    });
-    Ok(())
-}
-
-/// 建立（或复用）GPU 槽（`Screen::new` 调用；首次为准——愿望随首次
-/// 装配消费定型）
+/// 建立（或复用）GPU 槽（`Screen::new` 调用；首次为准）
 pub(crate) fn init_gpu(
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
@@ -274,9 +204,8 @@ impl Gpu {
         access: Arc<RenderResourceAccess>,
         offscreen_access: Arc<RenderResourceAccess>,
     ) -> Self {
-        // 愿望消费（一次定型：剔除/混合进材质）
-        let wish = current_wish();
-        let material = SpriteMaterial::new(&access, wish.cull, wish.blend);
+        // 材质 = 无状态管线变体工厂（混合/剔除由每次绘制的 DrawState 携带）
+        let material = SpriteMaterial::new(&access);
         let sampler = Arc::new(
             access.create_sampler("pygame_sampler", &SamplerDescriptor::linear_clamp()),
         );
