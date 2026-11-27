@@ -170,9 +170,6 @@ pub struct Batch {
     pub cur_wireframe: bool,
     /// one-shot 绘制色（gfxdraw 图元用；默认紫色，draw 后重置）
     pub cur_color: [f32; 4],
-    /// push 流拓扑状态（sticky——push 口用；None = 默认 Triangles。
-    /// draw 函数族不经此状态——函数名即拓扑）
-    pub cur_topology: Option<BatchTopology>,
 }
 
 /// gfxdraw 图元默认色（调试紫——开发者忘 set_color 时一眼可辨）
@@ -187,7 +184,6 @@ impl Batch {
             cur_model: Mat4::IDENTITY,
             cur_wireframe: false,
             cur_color: DEFAULT_DRAW_COLOR,
-            cur_topology: None,
         }
     }
 
@@ -229,17 +225,6 @@ impl Batch {
     /// one-shot 绘制色（下一次 gfxdraw 图元用此色；draw 后重置回紫色）
     pub fn set_color(&mut self, color: [f32; 4]) {
         self.cur_color = color;
-    }
-
-    /// push 流拓扑状态（sticky——push 口持续生效直至再设；None = 回
-    /// 默认 Triangles。与 draw 函数族无耦合——函数名即拓扑）
-    pub fn set_topology(&mut self, topo: Option<BatchTopology>) {
-        self.cur_topology = topo;
-    }
-
-    /// 当前 push 拓扑（None = 默认 Triangles）
-    pub fn topology(&self) -> BatchTopology {
-        self.cur_topology.unwrap_or(BatchTopology::Triangles)
     }
 
     /// 当前 model 矩阵（调用方组合用：`cur_model × local` 的便捷入口）

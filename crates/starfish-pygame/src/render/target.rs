@@ -278,16 +278,9 @@ pub trait DrawTarget {
 
     /// push 流拓扑状态（sticky——push 口持续生效；None = 回默认
     /// Triangles。draw 函数族不经此状态——函数名即拓扑）
-    fn set_topology(&self, topo: Option<super::batch::BatchTopology>) {
-        self.with_batch(|b| b.set_topology(topo));
-    }
-
-    /// 当前 push 拓扑（None = 默认 Triangles）
-    fn current_topology(&self) -> Option<super::batch::BatchTopology> {
-        let mut out = None;
-        self.with_batch(|b| out = b.cur_topology);
-        out
-    }
+    // ── sticky 拓扑状态口已删（2026-11-27——拓扑随数据走：push_points/
+    //    push_vertices 直传 topo 参数，draw_batch 读 VertexBuf 自带；
+    //    全局 set_topology/current_topology 随 push 口删除退役）──
 
     /// 顶点位置流入批（gfxdraw push 底层口——sticky 语义，状态跨 push
     /// 持续；points = 扁平 [x,y,z × N]，indices 空切片 = 逐 3/逐 2 解释）
