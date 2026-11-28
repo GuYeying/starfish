@@ -41,6 +41,13 @@ pub fn preloaded(name: &str) -> Option<Vec<u8>> {
     PRELOADED.with(|c| c.borrow().get(name).cloned())
 }
 
+/// 默认字体字节（Antonio-Regular，SIL OFL 许可——许可证随附
+/// `resources/font/SIL Open Font License.txt`）：`Font::new(None, size)`
+/// 的回落原料。资源随 crate 内嵌（同 `resources/audio/bleep.wav`
+/// 惯例）——宿主零配置即得默认字体，多宿主（pygamest/生产壳）共
+/// 用一份，接口行为一致。
+pub const DEFAULT_FONT: &[u8] = include_bytes!("../resources/font/Antonio-Regular.ttf");
+
 /// 缓存的字形位图（像素空间，y 向下）
 #[derive(Clone)]
 struct CachedGlyph {
