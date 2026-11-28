@@ -13,7 +13,7 @@
 //!   唯一上传变换量；**域分层 v3**：显式唯一相机类型——旧
 //!   render::camera::Camera / CameraKind Auto2d/Auto3d 兜底已退役）
 //! - [`Batch`]：批处理执行体（纹理 × 相机切换即段边界；即时 API ×
-//!   延迟提交；`set_mvp`/`set_model` 绘制状态机）
+//!   延迟提交；`set_mvp` 绘制状态机——会话 model 变换已删除 2026-11-28）
 //! - [`SpriteMaterial`]（内部）：pygame 固定渲染管线的**无状态材质工厂**
 //!   （管线变体矩阵惰性缓存；混合/剔除由 [`DrawState`] 逐绘制携带；
 //!   不对外暴露——定制管线走 RenderResourceAccess）

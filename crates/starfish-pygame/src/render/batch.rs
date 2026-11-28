@@ -10,8 +10,6 @@
 //!   ——pack 时按目标尺寸现算）；group0 相机 bind 从 pass 级降到**段级**
 //!   （先例 = group1 纹理段级切换；material 管线缓存 key 不含相机 bind
 //!   ——bind 仅作布局推导，零膨胀）
-//! - `set_model(m)` = 会话级变换状态机：**CPU 烘顶点**（`blit_transform`
-//!   先例路径——WebGL2 无 push constants，图元/文字顶点量小，零兼容坑）
 //!
 //! 纯色路径（`texture: None`）解析到 Gpu 的 1×1 白纹理——三路（精灵/
 //! 图元/文字图集）同一着色器同一管线族（见 `shader/sprite.wgsl`）。
@@ -168,16 +166,15 @@ pub enum BatchTopology {
 /// 契约 §六 标注 pub(crate)，因验收探针在 examples/ 独立 crate 需要
 /// 公开面，P3 draw::* 仍在其上包 pygame 词汇，见 changelog 批次六）
 ///
-/// **绘制状态机（渲染统一 draw 面）**：`set_mvp` / `set_model` 为会话级
-/// 状态（Batch 挂在目标上，状态跨 push 持续；会话开始由 RenderPass 重置
-/// 为 Auto/Identity 兜底）——后续全部 push 按 `cur_mvp`（段边界）分组、
-/// 按 `cur_model` CPU 烘顶点。
+/// **绘制状态机（渲染统一 draw 面）**：`set_mvp` 为会话级状态（Batch
+/// 挂在目标上，状态跨 push 持续；会话开始由 RenderPass 重置）——后续
+/// 全部 push 按 `cur_mvp`（段边界）分组。会话 model 变换已删除
+/// （2026-11-28——set_transform 退役，per-call transform= py 侧烘焙）。
 #[derive(Default)]
 pub struct Batch {
     tris: Stream,
     lines: Stream,
     cur_mvp: Option<Mat4>,
-    cur_model: Mat4,
     /// one-shot 线框模式（true = 下一次 draw 渲染为三角网格边线）
     pub cur_wireframe: bool,
     /// one-shot 绘制色（gfxdraw 图元用；默认紫色，draw 后重置）
@@ -193,7 +190,6 @@ impl Batch {
             tris: Stream::new(),
             lines: Stream::new(),
             cur_mvp: None,
-            cur_model: Mat4::IDENTITY,
             cur_wireframe: false,
             cur_color: DEFAULT_DRAW_COLOR,
         }
@@ -217,17 +213,6 @@ impl Batch {
         self.cur_mvp
     }
 
-    /// 会话级变换（后续 push 的顶点 CPU 烘此矩阵——`pos → model × pos`）
-    pub fn set_model(&mut self, model: Mat4) {
-
-        self.cur_model = model;
-    }
-
-    /// 回恒等变换
-    pub fn reset_model(&mut self) {
-        self.cur_model = Mat4::IDENTITY;
-    }
-
     /// one-shot 线框模式（下一次 draw 渲染为三角网格边线——呈现原始
     /// 三角化的边，是什么形式就是什么形式）
     pub fn set_wireframe(&mut self, enabled: bool) {
@@ -237,11 +222,6 @@ impl Batch {
     /// one-shot 绘制色（下一次 gfxdraw 图元用此色；draw 后重置回紫色）
     pub fn set_color(&mut self, color: [f32; 4]) {
         self.cur_color = color;
-    }
-
-    /// 当前 model 矩阵（调用方组合用：`cur_model × local` 的便捷入口）
-    pub fn model(&self) -> Mat4 {
-        self.cur_model
     }
 
     /// 是否无待提交绘制
@@ -256,28 +236,19 @@ impl Batch {
         self.lines.clear();
     }
 
-    /// draw 消费收口：**one-shot transform**——顶层绘制口执行完自动回
-    /// 恒等（物体级变换零泄漏：忘 set 不会复用上一个物体的矩阵；同变换
-    /// 多物体就重复 set——64B 矩阵写，廉价）。camera **不在此清**（视角
-    /// 级语义：一个会话一个视角，多视角靠 set_camera 分段）。
+    /// draw 消费收口：one-shot 状态复位（线框/色——物体级零泄漏）。
+    /// camera **不在此清**（视角级语义：一个会话一个视角，多视角靠
+    /// set_camera 分段）。
     fn end_draw(&mut self) {
-        self.cur_model = Mat4::IDENTITY;
         self.cur_wireframe = false;
         self.cur_color = DEFAULT_DRAW_COLOR;
-    }
-
-    /// model 变换一个点（收集层 CPU 烘的单点入口）
-    fn bake(&self, x: f32, y: f32, z: f32) -> [f32; 3] {
-        let p = self.cur_model.transform_point3(glam::Vec3::new(x, y, z));
-
-        [p.x, p.y, p.z]
     }
 
     // ── 基层接口：顶点组直入 ────────────────────────────────────────
     // quad/triangle/线段/几何 全部经此入流——上层只负责把图元展开成
     // 顶点组；纹理切段、相机切段、拓扑分仓、打包上屏由流统一处理。
 
-    /// 顶点组直入（基层接口；顶点按 `cur_model` 烘、按 `cur_mvp` 分段）。
+    /// 顶点组直入（基层接口；顶点按 `cur_mvp` 分段）。
     ///
     /// - `topo`：Triangles = 每 **3** 顶点一三角（三角形列表管线）；
     ///   Lines = 每 **2** 顶点一线段。不对齐尾组会被管线丢弃——上层
@@ -307,17 +278,10 @@ impl Batch {
         wireframe: bool,
     ) -> std::ops::Range<u32> {
         let mvp = self.cur_mvp;
-        let mut baked: Vec<SpriteVertex> = vertices
-            .iter()
-            .map(|v| {
-                let p = self.bake(v.pos[0], v.pos[1], v.pos[2]);
-                SpriteVertex { pos: p, ..*v }
-            })
-            .collect();
         // 线框：三角形 → 三条边（6 顶点入线流）
         if wireframe && topo == BatchTopology::Triangles {
-            let mut edges: Vec<SpriteVertex> = Vec::with_capacity(baked.len() * 2);
-            for tri in baked.chunks(3) {
+            let mut edges: Vec<SpriteVertex> = Vec::with_capacity(vertices.len() * 2);
+            for tri in vertices.chunks(3) {
                 if tri.len() == 3 {
                     edges.push(tri[0]); edges.push(tri[1]);
                     edges.push(tri[1]); edges.push(tri[2]);
@@ -327,13 +291,12 @@ impl Batch {
             return self.lines.push(texture, mvp, state.blend, state.cull, edges);
         }
         match topo {
-            BatchTopology::Triangles => self.tris.push(texture, mvp, state.blend, state.cull, baked),
-            BatchTopology::Lines => self.lines.push(texture, mvp, state.blend, state.cull, baked),
+            BatchTopology::Triangles => self.tris.push(texture, mvp, state.blend, state.cull, vertices.to_vec()),
+            BatchTopology::Lines => self.lines.push(texture, mvp, state.blend, state.cull, vertices.to_vec()),
         }
     }
 
-    /// 矩形 quad（x/y/w/h，中心原点坐标系；全 uv）——位置由
-    /// `cur_model` 承载（`set_transform` 的执行原语）
+    /// 矩形 quad（x/y/w/h，中心原点坐标系；全 uv）
     ///
     /// `texture = None` → 1×1 白纹理（纯色路径）
     pub fn push_quad(
@@ -435,9 +398,8 @@ impl Batch {
         self.push_quad_corners_3d(corners3, uvs, color, texture);
     }
 
-    /// 任意四角 quad（**3D 形态**——角带 z；顶点再按 `cur_model` 烘——
-    /// 两级变换复合：调用方局部放置 × 会话 transform。角序 TL/TR/BR/BL，
-    /// 两三角 (0,1,2)(0,2,3)）
+    /// 任意四角 quad（**3D 形态**——角带 z；调用方自烘变换。角序
+    /// TL/TR/BR/BL，两三角 (0,1,2)(0,2,3)）
     pub fn push_quad_corners_3d(
         &mut self,
         corners: [[f32; 3]; 4],
@@ -490,8 +452,7 @@ impl Batch {
         self.end_draw();
     }
 
-    /// base 图元几何入批（`shape2d` 家族产出；顶点先按 `cur_model` 烘
-    /// （[`Geometry::transformed`] 复用）、z 透传、颜色烘焙为调用色）
+    /// base 图元几何入批（`shape2d` 家族产出；z 透传、颜色烘焙为调用色）
     ///
     /// **GLES 兼容（批次二十四）**：三角形以“退化四边形”入队——每三角形
     /// (a,b,c) 展开为 quad_corners [a,b,c,c]（第二三角 acc 退化零面积），
@@ -510,10 +471,8 @@ impl Batch {
     }
 
     /// 展开共用体（push_geometry / push_stream 共用——GLES 退化四边形
-    /// 序列 / 线流展开）。⚠️ **会话变换由 push_vertices 的 bake 统一烘**
-    /// （单烘定约 2026-11-21——曾在此预烘 cur_model + push_vertices 再
-    /// 烘 = 双重平移，带 set_transform 的图元平移翻倍出屏，恒等时无害
-    /// 故长期潜伏；gen_*+push 迁移引入 transform 组合后显形）
+    /// 序列 / 线流展开）。会话变换已删除（2026-11-28）——调用方自烘
+    /// （单烘定约 2026-11-21 的历史教训保留：变换只在一处烘）
     fn expand_geometry(
         &mut self,
         kind: GeometryKind,
@@ -941,36 +900,24 @@ mod batch_tests {
     }
 
     #[test]
-    fn model_bakes_into_vertices() {
-        // 会话 transform = CPU 烘顶点（渲染统一 draw 面）——平移 +100 落进
-        // 顶点 pos
+    fn push_quad_vertices_verbatim() {
+        // 会话 model 变换已删除（2026-11-28——per-call transform= py 侧
+        // 烘焙）——顶点原样入流，无隐藏矩阵
         let mut b = Batch::new();
-        b.set_model(Mat4::from_translation(glam::Vec3::new(100.0, 0.0, 0.0)));
         b.push_vertices(BatchTopology::Triangles, None, &quad_verts(0.0, 0.0));
         let first = b.tris.vertices.first().expect("顶点已入流");
-        assert_eq!(first.pos, [100.0, 0.0, 0.0], "model 烘进顶点");
+        assert_eq!(first.pos, [0.0, 0.0, 0.0], "顶点原样（无 model 烘）");
     }
 
     #[test]
-    fn model_is_one_shot_per_draw() {
-        // one-shot transform：draw 消费后自动回恒等（零泄漏——
-        // 第二个 draw 忘 set 不会复用上一个物体的矩阵）
+    fn one_shot_state_resets_per_draw() {
+        // one-shot 线框/色：draw 消费后自动复位（零泄漏——第二个 draw
+        // 忘 set 不复用上一个物体的状态）
         let mut b = Batch::new();
-        b.set_model(Mat4::from_translation(glam::Vec3::new(100.0, 0.0, 0.0)));
-        b.push_quad(0.0, 0.0, 10.0, 10.0, WHITE, None);
-        let first = b.tris.vertices.first().expect("顶点已入流");
-        assert_eq!(first.pos, [100.0, 0.0, 0.0], "第一次 draw 吃到 model");
-        b.push_quad(0.0, 0.0, 10.0, 10.0, WHITE, None);
-        let second_v = &b.tris.vertices[6];
-        assert_eq!(second_v.pos, [0.0, 0.0, 0.0], "第二次 draw 已回恒等（one-shot 消费）");
-    }
-
-    #[test]
-    fn model_identity_is_zero_cost() {
-        // 恒等 model 下 push_quad 与旧路径逐位一致（零拷贝快路径）
-        let mut b = Batch::new();
-        b.push_quad(10.0, 20.0, 30.0, 40.0, WHITE, None);
-        let first = b.tris.vertices.first().expect("顶点已入流");
-        assert_eq!(first.pos, [10.0, 20.0, 0.0]);
+        b.set_wireframe(true);
+        b.set_color([1.0, 0.0, 0.0, 1.0]);
+        b.push_quad(0.0, 0.0, 10.0, 10.0, [1.0, 0.0, 0.0, 1.0], None);
+        assert!(!b.cur_wireframe, "线框已消费复位");
+        assert_eq!(b.cur_color, DEFAULT_DRAW_COLOR, "色已消费复位");
     }
 }

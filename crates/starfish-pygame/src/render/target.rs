@@ -61,10 +61,9 @@ pub trait DrawTarget {
     /// 填充整个目标（恒像素段——盖满语义不受会话相机/显式相机影响）
     fn fill(&self, color: impl Into<Color>);
     /// 画一张离屏面（渲染统一 draw 面的 texture 通道）：源面 quad
-    /// (0,0)-(sw,sh) 按 **会话 transform**（`set_transform` 的 cur_model）
-    /// 变换放置——2D 仿射（平移/旋转/缩放/镜像）与 3D 空间放置（四角
-    /// 带 z，深度会话下正确遮挡）同一口；相机 = 会话 cur_mvp（段）。
-    /// 源自动 flush。
+    /// (0,0)-(sw,sh) 按目标中心锚直绘（会话 model 变换已删除——位置/
+    /// 旋转/缩放由调用方 per-call 烘或 draw_surface kwarg 承载）；相机
+    /// = 会话 cur_mvp（段）。源自动 flush。
     ///
     /// 默认管线 cull=none——镜像矩阵（det<0）绕序天然安全。
     fn draw_surface(&self, src: &Surface) {
@@ -227,12 +226,6 @@ pub trait DrawTarget {
     /// Screen 实现内含首帧自动 begin）
     fn with_batch(&self, f: impl FnOnce(&mut Batch));
 
-    /// 当前会话变换矩阵（调用方组合用：`model() × local` 的便捷入口；
-    /// 默认 = 恒等——各实现转发 batch 状态）
-    fn model(&self) -> Mat4 {
-        Mat4::IDENTITY
-    }
-
     /// 会话相机切换（渲染统一 draw 面——per-draw 相机段；默认转发 batch。
     /// 域分层 v3：收 GameCamera 唯一类型）
     fn set_camera(&self, camera: &GameCamera) {
@@ -247,16 +240,6 @@ pub trait DrawTarget {
     fn clear_camera(&self) {
         let pixel = super::pixel_ortho_mvp(self.logical_size());
         self.with_batch(|b| b.set_mvp(Some(pixel)));
-    }
-
-    /// 会话变换（后续绘制顶点 CPU 烘此矩阵）
-    fn set_transform(&self, model: Mat4) {
-        self.with_batch(|b| b.set_model(model));
-    }
-
-    /// 回恒等变换
-    fn reset_transform(&self) {
-        self.with_batch(|b| b.reset_model());
     }
 
     /// 当前 gfxdraw 绘制色（one-shot 状态；默认紫色）
@@ -1179,12 +1162,6 @@ impl DrawTarget for Screen {
         // 显式走 inherent 方法（含 ensure_begun 的首帧自动 begin）
         Screen::with_batch(self, f);
     }
-
-    fn model(&self) -> Mat4 {
-        let mut out = Mat4::IDENTITY;
-        self.with_batch(|b| out = b.model());
-        out
-    }
 }
 
 // ── 渲染通道会话（Rust 版 with 语法，ADR-5 v1.2）────────────────
@@ -1231,23 +1208,13 @@ impl<'a> RenderPass<'a> {
         p
     }
 
-    /// 会话开始重置绘制状态（Auto 兜底相机 + 恒等变换——新会话新状态，
-    /// 不残留上一会话的 set_camera/set_transform）
+    /// 会话开始重置绘制状态（Auto 兜底相机——新会话新状态，不残留
+    /// 上一会话的 set_camera）
     fn reset_draw_state(&self) {
         match &self.kind {
-            PassKind::Screen(s) => s.with_batch(|b| {
-                b.reset_mvp();
-                b.reset_model();
-            }),
-            PassKind::Surface(s) => s.with_batch(|b| {
-                b.reset_mvp();
-                b.reset_model();
-            }),
-            PassKind::Mrt { batch, .. } => {
-                let mut b = batch.borrow_mut();
-                b.reset_mvp();
-                b.reset_model();
-            }
+            PassKind::Screen(s) => s.with_batch(|b| b.reset_mvp()),
+            PassKind::Surface(s) => s.with_batch(|b| b.reset_mvp()),
+            PassKind::Mrt { batch, .. } => batch.borrow_mut().reset_mvp(),
         }
     }
 
@@ -1326,17 +1293,6 @@ impl<'a> RenderPass<'a> {
         self.with_batch(|b| b.set_mvp(Some(pixel)));
     }
 
-    /// 会话变换（后续 push 的顶点 CPU 烘此矩阵——位置/旋转/缩放/3D
-    /// 放置统一入口）
-    pub fn set_transform(&self, model: Mat4) {
-        self.with_batch(|b| b.set_model(model));
-    }
-
-    /// 回恒等变换
-    pub fn reset_transform(&self) {
-        self.with_batch(|b| b.reset_model());
-    }
-
     /// 会话级延迟叠加（**通用客人直绘的会话形态**，2026-10-24——"画到
     /// 哪个目标"由会话对象表达；也是获取原生 RenderPass 的规范路径：
     /// 闭包经 [`OverlayCtx::with_pass`] 拿 `&mut RenderPass` 直绘）。
@@ -1404,12 +1360,6 @@ impl<'a> RenderPass<'a> {
         DrawTarget::draw_surface(self, src)
     }
 
-    /// 当前会话变换矩阵（调用方组合用：`model() × local` 的便捷入口）
-    pub fn model(&self) -> Mat4 {
-        let mut out = Mat4::IDENTITY;
-        self.with_batch(|b| out = b.model());
-        out
-    }
 }
 
 impl Drop for RenderPass<'_> {
@@ -1484,11 +1434,6 @@ impl DrawTarget for RenderPass<'_> {
         }
     }
 
-    fn model(&self) -> Mat4 {
-        let mut out = Mat4::IDENTITY;
-        self.with_batch(|b| out = b.model());
-        out
-    }
 }
 
 // ── Surface（纹理背板，用户自由创建；可选深度）──────────────────
@@ -1833,13 +1778,6 @@ impl Surface {
         f(&mut self.batch.borrow_mut());
     }
 
-    /// 当前变换矩阵（调用方组合用：`model() × local` 的便捷入口）
-    pub fn model(&self) -> Mat4 {
-        let mut out = Mat4::IDENTITY;
-        self.with_batch(|b| out = b.model());
-        out
-    }
-
     // ── 固有形态（教程代码免 trait 导入）──
 
     // /// 填充（= [`DrawTarget::fill`]）
@@ -1907,12 +1845,6 @@ impl DrawTarget for Surface {
 
     fn with_batch(&self, f: impl FnOnce(&mut Batch)) {
         Surface::with_batch(self, f);
-    }
-
-    fn model(&self) -> Mat4 {
-        let mut out = Mat4::IDENTITY;
-        self.with_batch(|b| out = b.model());
-        out
     }
 }
 
