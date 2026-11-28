@@ -15,25 +15,27 @@
 //!
 //! The window entity is a `<canvas>`: looked up by id `starfish-we`,
 //! else the page's first canvas, otherwise one is created filling the
-//! page. **Page is the size authority** (2026-10-18 回退定型): CSS =
-//! bitmap = logical size, `devicePixelRatio` fully out of the engine
-//! picture — window sizing belongs to the page (HTML/CSS/JS); the
-//! engine only mirrors whatever layout the page gives the canvas
-//! (ResizeObserver + window resize, dedup by CSS rect; a physical
-//! `Resized` is reported on bitmap change). Browser zoom is a pure view
-//! transform — zero engine action. Event coordinates: CSS client
-//! coordinates − canvas origin (1:1). Keys follow the W3C
-//! `KeyboardEvent.code`, same origin as [`KeyCode`] — a direct mapping.
-//! Closing the page ends everything: the Web has no `CloseRequested`
-//! semantics.
+//! page. **Physical parity with desktop** (2026-11-28 定约回归): the
+//! bitmap = physical pixels (1:1 device px, crisp), CSS = bitmap/dpr
+//! (the canvas is visually the same size as a desktop window at the
+//! same set_mode size); the page remains the layout authority (CSS may
+//! clamp; the engine mirrors layout × dpr via ResizeObserver + window
+//! resize, dedup by (rect, dpr), reporting physical `Resized` on bitmap
+//! change). Browser zoom stays a pure view transform — layout
+//! unchanged, only bitmap density re-syncs. Event coordinates:
+//! (CSS client − canvas origin) × dpr = physical px. Keys follow the
+//! W3C `KeyboardEvent.code`, same origin as [`KeyCode`] — a direct
+//! mapping. Closing the page ends everything: the Web has no
+//! `CloseRequested` semantics.
 //! 窗口实体是 `<canvas>`：按 id `starfish-we` 查找，其次取页面
 //! 第一个 canvas，都没有则自建并铺满页面。
-//! **页面即尺寸权威**（2026-10-18 回退定型）：CSS = 位图 = 逻辑尺寸，
-//! devicePixelRatio 完全不进引擎——窗口大小控制权 100% 归页面
-//! （HTML/CSS/JS），引擎只镜像页面给 canvas 的布局（ResizeObserver
-//! + window resize，按 CSS rect 去重；位图变化上报物理 `Resized`）。
-//! 浏览器缩放是纯视图变换——引擎零动作。
-//! 事件坐标：CSS 客户坐标 − canvas 原点（1:1）。
+//! **与桌面物理等大**（2026-11-28 定约回归）：位图 = 物理像素
+//! （1:1 设备像素清晰），CSS = 位图/dpr（同尺寸 set_mode 的 canvas
+//! 视觉与桌面窗口等大）；页面仍是布局权威（CSS 可钳制布局；引擎经
+//! ResizeObserver + window resize 镜像布局×dpr，按 (rect, dpr) 去重，
+//! 位图变化上报物理 `Resized`）。浏览器缩放仍是纯视图变换——布局
+//! 不动，仅位图密度重同步。
+//! 事件坐标：(CSS 客户坐标 − canvas 原点) × dpr = 物理像素。
 //! 键盘走 W3C `KeyboardEvent.code`，与 [`KeyCode`] 命名同源，直接映射。
 //! 页面关闭即结束，Web 没有 `CloseRequested` 语义。
 
@@ -85,8 +87,8 @@ impl Drop for Listener {
 struct Ctx {
     canvas: HtmlCanvasElement,
     shared: Rc<RefCell<Shared>>,
-    /// 上次同步的 CSS rect（布局去重键；纯 zoom 不动作——渲染零扰动）
-    last_css: Rc<std::cell::Cell<(f64, f64)>>,
+    /// 上次同步的 CSS rect + dpr（布局/密度去重键）
+    last_css: Rc<std::cell::Cell<(f64, f64, f64)>>,
 }
 
 struct WebState {
@@ -157,7 +159,7 @@ impl WindowInner {
         let (listeners, observer) = Self::attach_listeners(&Ctx {
             canvas: canvas.clone(),
             shared: state.shared.clone(),
-            last_css: std::rc::Rc::new(std::cell::Cell::new((0.0, 0.0))),
+            last_css: std::rc::Rc::new(std::cell::Cell::new((0.0, 0.0, 0.0))),
         })?;
         if let Some(inner) = Rc::get_mut(&mut state) {
             inner._listeners = listeners;
@@ -267,16 +269,24 @@ impl WindowInner {
     /// 不走 [`Self::sync_canvas_size`]（那会读布局再乘 dpr，物理参数
     /// 被二次缩放）。
     pub(crate) fn set_size(&self, width: u32, height: u32) {
-        // **Web 尺寸定约（2026-10-18 回退定型）**：CSS = 位图 = 逻辑
-        // 尺寸（w×h），devicePixelRatio 完全不参与——窗口大小控制权
-        // 100% 在页面（HTML/CSS/JS），浏览器缩放是纯视图变换（渲染
-        // 零扰动），任意缩放档位打开/往返，canvas 的逻辑内容尺寸恒
-        // = w×h。高 DPI 屏由浏览器上采样显示。
+        // **Web 尺寸定约（2026-11-28 物理等大回归）**：位图 = 物理
+        // 像素（w×h，1:1 设备像素清晰），CSS = 物理/dpr（视觉与桌面
+        // 窗口物理等大——高 DPI 屏不再放大 dpr 倍）。窗口大小控制权
+        // 在页面（CSS 可约束布局），引擎 set_size 语义与桌面一致；
+        // 浏览器缩放仍纯视图变换（dpr 变 → CSS 盒随动，设备尺寸恒定）。
         let w = width.max(1);
         let h = height.max(1);
+        let dpr = web_sys::window()
+            .map(|win| win.device_pixel_ratio())
+            .unwrap_or(1.0)
+            .max(0.001);
         let style = self.state.canvas.style();
-        style.set_property("width", &format!("{w}px")).ok();
-        style.set_property("height", &format!("{h}px")).ok();
+        style
+            .set_property("width", &format!("{}px", w as f64 / dpr))
+            .ok();
+        style
+            .set_property("height", &format!("{}px", h as f64 / dpr))
+            .ok();
         self.state.canvas.set_width(w);
         self.state.canvas.set_height(h);
         // wgpu Web 表面自动跟随 canvas 属性，而引擎侧 Screen（swapchain
@@ -551,11 +561,11 @@ impl WindowInner {
             .unwrap_or(1.0)
     }
 
-    /// Bitmap is 1:1 with CSS pixels, no dpr supersampling — false by
-    /// definition.
-    /// 位图与 CSS 像素 1:1，无 dpr 超采样——恒 false。
+    /// Bitmap = CSS × dpr (dpr supersampling under the physical-parity
+    /// convention) — true.
+    /// 位图 = CSS × dpr（物理等大定约下的 dpr 超采样）——恒 true。
     pub(crate) fn high_pixel_density(&self) -> bool {
-        false
+        true
     }
 
     /// The underlying `<canvas>` (wasm builds only; used by the Web
@@ -656,7 +666,7 @@ impl WindowInner {
     /// attribute only governs render density (physical pixels), the style
     /// only governs layout size (CSS pixels) — the loop is gone. CSS
     /// itself is never rewritten here: layout authority lives with the
-    /// page (and engine `set_size`, which writes CSS = logical/dpr).
+    /// page (and engine `set_size`, which writes CSS = physical/dpr).
     /// **必须同时钉住内联 CSS 尺寸**（仅当内联样式未定宽高时）：canvas
     /// 无 CSS 尺寸时布局尺寸由 width/height 属性决定，只写属性不钉样式
     /// 会形成正反馈——每轮把放大后的属性当 client 尺寸再乘 dpr 写回，
@@ -664,7 +674,7 @@ impl WindowInner {
     /// 22763×17073，爆掉 max texture limit（8192）后全链黑屏。钉住样式
     /// 后属性只管渲染密度（物理像素），样式只管布局尺寸（CSS 像素）。
     /// CSS 本身这里从不改写：布局权威在页面（及引擎 `set_size`——它写
-    /// CSS = 逻辑/dpr）。
+    /// CSS = 物理/dpr）。
     fn sync_canvas_size(canvas: &HtmlCanvasElement) -> bool {
         let style = canvas.style();
         // An explicit inline width/height (e.g. the auto-created canvas's
@@ -688,9 +698,14 @@ impl WindowInner {
         if !inline("height") {
             style.set_property("height", &format!("{css_h}px")).ok();
         }
-        // 位图 = CSS 布局尺寸（1:1，dpr 不参与）
-        let width = css_w as u32;
-        let height = css_h as u32;
+        // 位图 = CSS 布局尺寸 × dpr（物理像素——与桌面窗口物理等大，
+        // 高 DPI 屏 1:1 设备像素清晰；2026-11-28 物理等大回归）
+        let dpr = web_sys::window()
+            .map(|win| win.device_pixel_ratio())
+            .unwrap_or(1.0)
+            .max(0.001);
+        let width = ((css_w * dpr).round() as u32).max(1);
+        let height = ((css_h * dpr).round() as u32).max(1);
         let changed = canvas.width() != width || canvas.height() != height;
         canvas.set_width(width);
         canvas.set_height(height);
@@ -708,8 +723,18 @@ impl WindowInner {
             return;
         };
         let shared = STATE.with_borrow(|slot| slot.as_ref().expect("STATE 已写入").shared.clone());
+        let canvas = STATE.with_borrow(|slot| slot.as_ref().expect("STATE 已写入").canvas.clone());
+        // dpr 基线（NaN = 首帧只记基线不动作——启动期 IAB/浏览器可能
+        // 短暂以系统 dpr 跑再切到页面 zoom，基线后只对真实变化自愈）
+        let last_dpr: std::rc::Rc<std::cell::Cell<f64>> =
+            std::rc::Rc::new(std::cell::Cell::new(f64::NAN));
         let closure = Closure::wrap(Box::new(move || {
             shared.borrow_mut().redraw = true;
+            if Self::heal_dpr_change(&canvas, &last_dpr) {
+                // 位图密度变化 → 上报物理 Resized（同 report_layout_change）
+                let (width, height) = Self::measure(&canvas);
+                shared.borrow_mut().pending.push_back(Event::Resized { width, height });
+            }
             if let Some(w) = web_sys::window() {
                 FRAME_LOOP.with_borrow(|cb| {
                     if let Some(cb) = cb.as_ref() {
@@ -728,6 +753,48 @@ impl WindowInner {
             RAF_HANDLE.with(|h| h.set(id));
         }
         FRAME_LOOP.with_borrow_mut(|slot| *slot = Some(closure));
+    }
+
+    /// dpr 变化自愈（2026-11-28 物理等大配套）：浏览器缩放/跨屏迁移
+    /// 改变 devicePixelRatio 时（ResizeObserver 与 window resize 都
+    /// 不响应纯 zoom）——① 引擎托管的内联 CSS(px) 重写 = 位图/dpr_new
+    /// （视觉设备尺寸恒定，物理等大不漂移）；② 位图重同步 = 布局
+    /// ×dpr_new（密度跟随）。页面托管的 CSS（vw/百分比/无内联）不动
+    /// ——布局权威在页面。返回位图是否变化（供 Resized 上报）。
+    fn heal_dpr_change(canvas: &HtmlCanvasElement, last_dpr: &std::cell::Cell<f64>) -> bool {
+        let Some(win) = web_sys::window() else {
+            return false;
+        };
+        let dpr = win.device_pixel_ratio().max(0.001);
+        let prev = last_dpr.get();
+        if prev.is_nan() {
+            last_dpr.set(dpr);
+            return false;
+        }
+        if (dpr - prev).abs() < 1e-9 {
+            return false;
+        }
+        last_dpr.set(dpr);
+        let style = canvas.style();
+        // 引擎托管判定：内联 px（set_size/sync 写的都是 px；vw/百分比
+        // = 页面响应式语义，不动）
+        let inline_px = |prop: &str| {
+            style
+                .get_property_value(prop)
+                .map(|v| v.trim().ends_with("px"))
+                .unwrap_or(false)
+        };
+        if inline_px("width") && inline_px("height") {
+            let w = canvas.width().max(1) as f64;
+            let h = canvas.height().max(1) as f64;
+            style
+                .set_property("width", &format!("{}px", w / dpr))
+                .ok();
+            style
+                .set_property("height", &format!("{}px", h / dpr))
+                .ok();
+        }
+        Self::sync_canvas_size(canvas)
     }
 
     // ---------------- Event listeners and translation (event feature
@@ -863,17 +930,20 @@ impl WindowInner {
     }
 
     /// Shared body of the window-resize listener and the ResizeObserver:
-    /// **only layout changes act**（CSS rect 变）——位图重同步为布局
-    /// 尺寸（1:1）并上报物理 `Resized`。纯 zoom（dpr 变、rect 不变）
-    /// 零动作：CSS/位图恒 = 逻辑尺寸，zoom 是纯视图变换。
-    /// window-resize 监听与 ResizeObserver 的共用体：**只有布局变化
-    /// 才动作**（CSS rect 变）——位图重同步为布局尺寸（1:1）并上报
-    /// 物理 `Resized`。纯 zoom 零动作。
+    /// **only layout/density changes act**（CSS rect 或 dpr 变）——位图
+    /// 重同步为布局×dpr（物理）并上报物理 `Resized`。布局不变的纯缩放
+    /// 只刷新位图密度（CSS 盒不动，零布局扰动）。
+    /// window-resize 监听与 ResizeObserver 的共用体：**只有布局/密度
+    /// 变化才动作**（CSS rect 或 dpr 变）——位图重同步为布局×dpr
+    /// （物理）并上报物理 `Resized`。
     fn report_layout_change(ctx: &Ctx) {
         let rect = ctx.canvas.get_bounding_client_rect();
-        let css_key = (rect.width().round(), rect.height().round());
+        let dpr = web_sys::window()
+            .map(|win| win.device_pixel_ratio())
+            .unwrap_or(1.0);
+        let css_key = (rect.width().round(), rect.height().round(), dpr);
         if css_key == ctx.last_css.get() {
-            return; // 布局没变（含纯 zoom）：渲染零扰动
+            return; // 布局与密度都没变：渲染零扰动
         }
         ctx.last_css.set(css_key);
         if Self::sync_canvas_size(&ctx.canvas) {
@@ -909,13 +979,21 @@ where
     })
 }
 
-/// Event coordinates: CSS client coordinates − canvas origin (bitmap is
-/// 1:1 with CSS pixels, dpr not involved).
-/// 事件坐标：CSS 客户坐标 − canvas 原点（位图与 CSS 像素 1:1，dpr
-/// 不参与）。
+/// Event coordinates: (CSS client coordinates − canvas origin) × dpr —
+/// physical pixels, matching the bitmap and the desktop convention
+/// (2026-11-28 物理等大回归).
+/// 事件坐标：(CSS 客户坐标 − canvas 原点) × dpr——物理像素，与位图
+/// 及桌面约定一致。
 fn canvas_coords(ctx: &Ctx, client_x: f64, client_y: f64) -> (f64, f64) {
     let rect = ctx.canvas.get_bounding_client_rect();
-    (client_x - rect.left(), client_y - rect.top())
+    let dpr = web_sys::window()
+        .map(|win| win.device_pixel_ratio())
+        .unwrap_or(1.0)
+        .max(0.001);
+    (
+        (client_x - rect.left()) * dpr,
+        (client_y - rect.top()) * dpr,
+    )
 }
 
 fn on_key(ctx: &Ctx, value: JsValue, down: bool) {
@@ -995,15 +1073,23 @@ fn on_wheel(ctx: &Ctx, value: JsValue) {
         return;
     };
     // deltaMode: 0 pixels / 1 line / 2 pages — normalized to a pixel
-    // scale.
-    // deltaMode：0 像素 / 1 行 / 2 页，统一折算成像素量纲。
+    // scale (×dpr — physical px, matching desktop).
+    // deltaMode：0 像素 / 1 行 / 2 页，统一折算成像素量纲（×dpr——
+    // 物理像素，与桌面一致）。
+    let dpr = web_sys::window()
+        .map(|w| w.device_pixel_ratio())
+        .unwrap_or(1.0)
+        .max(0.001);
     let unit = match ev.delta_mode() {
-        1 => 16.0,
-        2 => web_sys::window()
-            .and_then(|w| w.inner_height().ok())
-            .and_then(|h| h.as_f64())
-            .unwrap_or(800.0),
-        _ => 1.0,
+        1 => 16.0 * dpr,
+        2 => {
+            web_sys::window()
+                .and_then(|w| w.inner_height().ok())
+                .and_then(|h| h.as_f64())
+                .unwrap_or(800.0)
+                * dpr
+        }
+        _ => dpr,
     };
     // The browser scrolls positive-down; this crate's convention is
     // positive-up — negate.
